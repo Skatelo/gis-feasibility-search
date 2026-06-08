@@ -1276,7 +1276,11 @@ async function geocodeAddress(address: string, apiKey: string): Promise<{ lat: n
 export async function fetchZoningViaWebSearch(
   address: string,
 ): Promise<{ code: string; description: string; sourceUrl?: string } | null> {
-  const geminiApiKey = import.meta.env.VITE_GEMINI_API_KEY || "AIzaSyBA8NaGVY0XHvv43Qo9dPMHVrpL6uAGFDo";
+  const geminiApiKey = import.meta.env.VITE_GEMINI_API_KEY || "";
+  if (!geminiApiKey) {
+    console.warn("Gemini API key is not configured in .env.local.");
+    return null;
+  }
   const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=${geminiApiKey}`;
   const prompt = `Find the official ZONING DISTRICT for this exact property address: "${address}".
 Search official sources only: the county or municipal zoning map, the local GIS/parcel viewer, or the planning department.
@@ -1534,7 +1538,11 @@ export async function fetchGoogleDistanceMatrixComps(
   // listings. Returns recently-sold comparable HOMES (new construction prioritized).
   onStageChange?.("Searching sold home comps (Google)...");
   {
-    const geminiApiKey = import.meta.env.VITE_GEMINI_API_KEY || "AIzaSyBA8NaGVY0XHvv43Qo9dPMHVrpL6uAGFDo";
+    const geminiApiKey = import.meta.env.VITE_GEMINI_API_KEY || "";
+    if (!geminiApiKey) {
+      console.warn("Gemini API key is not configured in .env.local.");
+      return [];
+    }
     const propertyTypePrompt = category === 'residential'
       ? 'single-family residential (SFR)'
       : category === 'commercial'
@@ -1779,7 +1787,10 @@ export async function chatWithGemini(
   reportData: SiteFeasibilityData
 ): Promise<{ text: string; sources?: ChatSource[] }> {
 
-  const apiKey = import.meta.env.VITE_GEMINI_API_KEY || "AIzaSyBA8NaGVY0XHvv43Qo9dPMHVrpL6uAGFDo";
+  const apiKey = import.meta.env.VITE_GEMINI_API_KEY || "";
+  if (!apiKey) {
+    throw new Error("Gemini API key is not configured in .env.local.");
+  }
   const systemPrompt = `
 # Role & Objective
 You are Antigravity, an autonomous real estate acquisition intelligence agent. Your purpose is to process property assets, pull live market data from real estate platforms, cross-reference county GIS zoning datasets, compute exact physical buildability constraints via USGS 3DEP (1-meter) elevation, filter proximity market comps using the Google Distance Matrix API, structure a unified report payload ready for PDF/map rendering, and act as an interactive post-report chatbot.

@@ -30,10 +30,34 @@ async function testAddress(county: string, address: string) {
 }
 
 async function run() {
-  // Set mock environment variables so the service works in Node
-  process.env.VITE_OPENTOPOGRAPHY_API_KEY = "23f20d48de995277b1d5a9d3a00291f";
-  process.env.VITE_GEMINI_API_KEY = "AIzaSyBA8NaGVY0XHvv43Qo9dPMHVrpL6uAGFDo";
-  process.env.VITE_GOOGLE_MAPS_API_KEY = "AIzaSyAoMZvEZnisPQ0KgyHx11deQXJZKj6AJHo";
+  // Load environment variables from .env.local dynamically so we do not expose API keys
+  try {
+    const fs = await import('fs');
+    const path = await import('path');
+    // Note: in ESM context, __dirname is not available unless defined. We can construct it or use path.resolve.
+    const envPath = path.resolve(process.cwd(), '.env.local');
+    if (fs.existsSync(envPath)) {
+      const content = fs.readFileSync(envPath, 'utf8');
+      content.split(/\r?\n/).forEach(line => {
+        const parts = line.split('=');
+        if (parts.length >= 2) {
+          const key = parts[0].trim();
+          const val = parts.slice(1).join('=').trim();
+          if (key) process.env[key] = val;
+        }
+      });
+    }
+  } catch (e) {
+    console.warn("Could not load local env variables from .env.local:", e);
+  }
+
+  // Set fallback values if they are not in the loaded environment
+  if (!process.env.VITE_OPENTOPOGRAPHY_API_KEY) {
+    process.env.VITE_OPENTOPOGRAPHY_API_KEY = "23f20d48de995277b1d5a9d3a00291f";
+  }
+  if (!process.env.VITE_GOOGLE_MAPS_API_KEY) {
+    process.env.VITE_GOOGLE_MAPS_API_KEY = "AIzaSyAoMZvEZnisPQ0KgyHx11deQXJZKj6AJHo";
+  }
 
   // Wake County Test
   await testAddress("Wake", "7712 Bill Love Rd, Holly Springs, NC 27592");
