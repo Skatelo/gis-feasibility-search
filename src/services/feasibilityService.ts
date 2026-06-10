@@ -1,6 +1,26 @@
 import type { SiteFeasibilityData, SlopeProfile, CompProperty } from '../types/feasibility';
 import { fetchCountyZoningCode, hasCountyZoning, normalizeCountyKey } from '../data/ncZoning';
 
+export interface UserKeys {
+  googleMaps?: string;
+  gemini?: string;
+  openTopography?: string;
+}
+
+export function getUserKeys(): UserKeys {
+  try {
+    const userStr = localStorage.getItem('gis_active_user') || sessionStorage.getItem('gis_active_user');
+    if (userStr) {
+      const user = JSON.parse(userStr);
+      return user.keys || {};
+    }
+  } catch (e) {
+    console.error("Failed to read user keys:", e);
+  }
+  return {};
+}
+
+
 
 const NC_GEOCODER = "https://services.nconemap.gov/secure/rest/services/AddressNC/AddressNC_geocoder/GeocodeServer/findAddressCandidates";
 const NC_PARCEL_ENGINE = "https://services.gis.nc.gov/secure/rest/services/NC1Map_Parcels/MapServer/1/query";
@@ -78,108 +98,28 @@ export function estimateZoningStandards(code: string, desc: string): ZoningStand
 }
 
 
-export const ncCountyConfig: Record<string, { geocodeUrl: string; parcelUrl: string; extraWhere: string }> = {
-    Alamance: { geocodeUrl: NC_GEOCODER, parcelUrl: NC_PARCEL_ENGINE, extraWhere: "cntyname = 'Alamance'" },
-    Alexander: { geocodeUrl: NC_GEOCODER, parcelUrl: NC_PARCEL_ENGINE, extraWhere: "cntyname = 'Alexander'" },
-    Alleghany: { geocodeUrl: NC_GEOCODER, parcelUrl: NC_PARCEL_ENGINE, extraWhere: "cntyname = 'Alleghany'" },
-    Anson: { geocodeUrl: NC_GEOCODER, parcelUrl: NC_PARCEL_ENGINE, extraWhere: "cntyname = 'Anson'" },
-    Parcels: { geocodeUrl: NC_GEOCODER, parcelUrl: NC_PARCEL_ENGINE, extraWhere: "cntyname = 'Ashe'" },
-    Avery: { geocodeUrl: NC_GEOCODER, parcelUrl: NC_PARCEL_ENGINE, extraWhere: "cntyname = 'Avery'" },
-    Beaufort: { geocodeUrl: NC_GEOCODER, parcelUrl: NC_PARCEL_ENGINE, extraWhere: "cntyname = 'Beaufort'" },
-    Bertie: { geocodeUrl: NC_GEOCODER, parcelUrl: NC_PARCEL_ENGINE, extraWhere: "cntyname = 'Bertie'" },
-    Bladen: { geocodeUrl: NC_GEOCODER, parcelUrl: NC_PARCEL_ENGINE, extraWhere: "cntyname = 'Bladen'" },
-    Brunswick: { geocodeUrl: NC_GEOCODER, parcelUrl: NC_PARCEL_ENGINE, extraWhere: "cntyname = 'Brunswick'" },
-    Buncombe: { geocodeUrl: NC_GEOCODER, parcelUrl: NC_PARCEL_ENGINE, extraWhere: "cntyname = 'Buncombe'" },
-    Burke: { geocodeUrl: NC_GEOCODER, parcelUrl: NC_PARCEL_ENGINE, extraWhere: "cntyname = 'Burke'" },
-    Cabarrus: { geocodeUrl: NC_GEOCODER, parcelUrl: NC_PARCEL_ENGINE, extraWhere: "cntyname = 'Cabarrus'" },
-    Caldwell: { geocodeUrl: NC_GEOCODER, parcelUrl: NC_PARCEL_ENGINE, extraWhere: "cntyname = 'Caldwell'" },
-    Camden: { geocodeUrl: NC_GEOCODER, parcelUrl: NC_PARCEL_ENGINE, extraWhere: "cntyname = 'Camden'" },
-    Carteret: { geocodeUrl: NC_GEOCODER, parcelUrl: NC_PARCEL_ENGINE, extraWhere: "cntyname = 'Carteret'" },
-    Caswell: { geocodeUrl: NC_GEOCODER, parcelUrl: NC_PARCEL_ENGINE, extraWhere: "cntyname = 'Caswell'" },
-    Catawba: { geocodeUrl: NC_GEOCODER, parcelUrl: NC_PARCEL_ENGINE, extraWhere: "cntyname = 'Catawba'" },
-    Chatham: { geocodeUrl: NC_GEOCODER, parcelUrl: NC_PARCEL_ENGINE, extraWhere: "cntyname = 'Chatham'" },
-    Cherokee: { geocodeUrl: NC_GEOCODER, parcelUrl: NC_PARCEL_ENGINE, extraWhere: "cntyname = 'Cherokee'" },
-    Chowan: { geocodeUrl: NC_GEOCODER, parcelUrl: NC_PARCEL_ENGINE, extraWhere: "cntyname = 'Chowan'" },
-    Clay: { geocodeUrl: NC_GEOCODER, parcelUrl: NC_PARCEL_ENGINE, extraWhere: "cntyname = 'Clay'" },
-    Cleveland: { geocodeUrl: NC_GEOCODER, parcelUrl: NC_PARCEL_ENGINE, extraWhere: "cntyname = 'Cleveland'" },
-    Columbus: { geocodeUrl: NC_GEOCODER, parcelUrl: NC_PARCEL_ENGINE, extraWhere: "cntyname = 'Columbus'" },
-    Craven: { geocodeUrl: NC_GEOCODER, parcelUrl: NC_PARCEL_ENGINE, extraWhere: "cntyname = 'Craven'" },
-    Cumberland: { geocodeUrl: NC_GEOCODER, parcelUrl: NC_PARCEL_ENGINE, extraWhere: "cntyname = 'Cumberland'" },
-    Currituck: { geocodeUrl: NC_GEOCODER, parcelUrl: NC_PARCEL_ENGINE, extraWhere: "cntyname = 'Currituck'" },
-    Dare: { geocodeUrl: NC_GEOCODER, parcelUrl: NC_PARCEL_ENGINE, extraWhere: "cntyname = 'Dare'" },
-    Davidson: { geocodeUrl: NC_GEOCODER, parcelUrl: NC_PARCEL_ENGINE, extraWhere: "cntyname = 'Davidson'" },
-    Davie: { geocodeUrl: NC_GEOCODER, parcelUrl: NC_PARCEL_ENGINE, extraWhere: "cntyname = 'Davie'" },
-    Duplin: { geocodeUrl: NC_GEOCODER, parcelUrl: NC_PARCEL_ENGINE, extraWhere: "cntyname = 'Duplin'" },
-    Durham: { geocodeUrl: NC_GEOCODER, parcelUrl: NC_PARCEL_ENGINE, extraWhere: "cntyname = 'Durham'" },
-    Edgecombe: { geocodeUrl: NC_GEOCODER, parcelUrl: NC_PARCEL_ENGINE, extraWhere: "cntyname = 'Edgecombe'" },
-    Forsyth: { geocodeUrl: NC_GEOCODER, parcelUrl: NC_PARCEL_ENGINE, extraWhere: "cntyname = 'Forsyth'" },
-    Franklin: { geocodeUrl: NC_GEOCODER, parcelUrl: NC_PARCEL_ENGINE, extraWhere: "cntyname = 'Franklin'" },
-    Gaston: { geocodeUrl: NC_GEOCODER, parcelUrl: NC_PARCEL_ENGINE, extraWhere: "cntyname = 'Gaston'" },
-    Gates: { geocodeUrl: NC_GEOCODER, parcelUrl: NC_PARCEL_ENGINE, extraWhere: "cntyname = 'Gates'" },
-    Graham: { geocodeUrl: NC_GEOCODER, parcelUrl: NC_PARCEL_ENGINE, extraWhere: "cntyname = 'Graham'" },
-    Granville: { geocodeUrl: NC_GEOCODER, parcelUrl: NC_PARCEL_ENGINE, extraWhere: "cntyname = 'Granville'" },
-    Greene: { geocodeUrl: NC_GEOCODER, parcelUrl: NC_PARCEL_ENGINE, extraWhere: "cntyname = 'Greene'" },
-    Guilford: { geocodeUrl: NC_GEOCODER, parcelUrl: NC_PARCEL_ENGINE, extraWhere: "cntyname = 'Guilford'" },
-    Halifax: { geocodeUrl: NC_GEOCODER, parcelUrl: NC_PARCEL_ENGINE, extraWhere: "cntyname = 'Halifax'" },
-    Harnett: { geocodeUrl: NC_GEOCODER, parcelUrl: NC_PARCEL_ENGINE, extraWhere: "cntyname = 'Harnett'" },
-    Haywood: { geocodeUrl: NC_GEOCODER, parcelUrl: NC_PARCEL_ENGINE, extraWhere: "cntyname = 'Haywood'" },
-    Henderson: { geocodeUrl: NC_GEOCODER, parcelUrl: NC_PARCEL_ENGINE, extraWhere: "cntyname = 'Henderson'" },
-    Hertford: { geocodeUrl: NC_GEOCODER, parcelUrl: NC_PARCEL_ENGINE, extraWhere: "cntyname = 'Hertford'" },
-    Hoke: { geocodeUrl: NC_GEOCODER, parcelUrl: NC_PARCEL_ENGINE, extraWhere: "cntyname = 'Hoke'" },
-    Hyde: { geocodeUrl: NC_GEOCODER, parcelUrl: NC_PARCEL_ENGINE, extraWhere: "cntyname = 'Hyde'" },
-    Iredell: { geocodeUrl: NC_GEOCODER, parcelUrl: NC_PARCEL_ENGINE, extraWhere: "cntyname = 'Iredell'" },
-    Jackson: { geocodeUrl: NC_GEOCODER, parcelUrl: NC_PARCEL_ENGINE, extraWhere: "cntyname = 'Jackson'" },
-    Johnston: { geocodeUrl: NC_GEOCODER, parcelUrl: NC_PARCEL_ENGINE, extraWhere: "cntyname = 'Johnston'" },
-    Jones: { geocodeUrl: NC_GEOCODER, parcelUrl: NC_PARCEL_ENGINE, extraWhere: "cntyname = 'Jones'" },
-    Lee: { geocodeUrl: NC_GEOCODER, parcelUrl: NC_PARCEL_ENGINE, extraWhere: "cntyname = 'Lee'" },
-    Lenoir: { geocodeUrl: NC_GEOCODER, parcelUrl: NC_PARCEL_ENGINE, extraWhere: "cntyname = 'Lenoir'" },
-    Lincoln: { geocodeUrl: NC_GEOCODER, parcelUrl: NC_PARCEL_ENGINE, extraWhere: "cntyname = 'Lincoln'" },
-    Macon: { geocodeUrl: NC_GEOCODER, parcelUrl: NC_PARCEL_ENGINE, extraWhere: "cntyname = 'Macon'" },
-    Madison: { geocodeUrl: NC_GEOCODER, parcelUrl: NC_PARCEL_ENGINE, extraWhere: "cntyname = 'Madison'" },
-    Martin: { geocodeUrl: NC_GEOCODER, parcelUrl: NC_PARCEL_ENGINE, extraWhere: "cntyname = 'Martin'" },
-    McDowell: { geocodeUrl: NC_GEOCODER, parcelUrl: NC_PARCEL_ENGINE, extraWhere: "cntyname = 'McDowell'" },
-    Mecklenburg: { geocodeUrl: NC_GEOCODER, parcelUrl: NC_PARCEL_ENGINE, extraWhere: "cntyname = 'Mecklenburg'" },
-    Mitchell: { geocodeUrl: NC_GEOCODER, parcelUrl: NC_PARCEL_ENGINE, extraWhere: "cntyname = 'Mitchell'" },
-    Montgomery: { geocodeUrl: NC_GEOCODER, parcelUrl: NC_PARCEL_ENGINE, extraWhere: "cntyname = 'Montgomery'" },
-    Moore: { geocodeUrl: NC_GEOCODER, parcelUrl: NC_PARCEL_ENGINE, extraWhere: "cntyname = 'Moore'" },
-    Nash: { geocodeUrl: NC_GEOCODER, parcelUrl: NC_PARCEL_ENGINE, extraWhere: "cntyname = 'Nash'" },
-    "New Hanover": { geocodeUrl: NC_GEOCODER, parcelUrl: NC_PARCEL_ENGINE, extraWhere: "cntyname = 'New Hanover'" },
-    Northampton: { geocodeUrl: NC_GEOCODER, parcelUrl: NC_PARCEL_ENGINE, extraWhere: "cntyname = 'Northampton'" },
-    Onslow: { geocodeUrl: NC_GEOCODER, parcelUrl: NC_PARCEL_ENGINE, extraWhere: "cntyname = 'Onslow'" },
-    Orange: { geocodeUrl: NC_GEOCODER, parcelUrl: NC_PARCEL_ENGINE, extraWhere: "cntyname = 'Orange'" },
-    Pamlico: { geocodeUrl: NC_GEOCODER, parcelUrl: NC_PARCEL_ENGINE, extraWhere: "cntyname = 'Pamlico'" },
-    Pasquotank: { geocodeUrl: NC_GEOCODER, parcelUrl: NC_PARCEL_ENGINE, extraWhere: "cntyname = 'Pasquotank'" },
-    Pender: { geocodeUrl: NC_GEOCODER, parcelUrl: NC_PARCEL_ENGINE, extraWhere: "cntyname = 'Pender'" },
-    Perquimans: { geocodeUrl: NC_GEOCODER, parcelUrl: NC_PARCEL_ENGINE, extraWhere: "cntyname = 'Perquimans'" },
-    Person: { geocodeUrl: NC_GEOCODER, parcelUrl: NC_PARCEL_ENGINE, extraWhere: "cntyname = 'Person'" },
-    Pitt: { geocodeUrl: NC_GEOCODER, parcelUrl: NC_PARCEL_ENGINE, extraWhere: "cntyname = 'Pitt'" },
-    Polk: { geocodeUrl: NC_GEOCODER, parcelUrl: NC_PARCEL_ENGINE, extraWhere: "cntyname = 'Polk'" },
-    Randolph: { geocodeUrl: NC_GEOCODER, parcelUrl: NC_PARCEL_ENGINE, extraWhere: "cntyname = 'Randolph'" },
-    Richmond: { geocodeUrl: NC_GEOCODER, parcelUrl: NC_PARCEL_ENGINE, extraWhere: "cntyname = 'Richmond'" },
-    Robeson: { geocodeUrl: NC_GEOCODER, parcelUrl: NC_PARCEL_ENGINE, extraWhere: "cntyname = 'Robeson'" },
-    Rockingham: { geocodeUrl: NC_GEOCODER, parcelUrl: NC_PARCEL_ENGINE, extraWhere: "cntyname = 'Rockingham'" },
-    Rowan: { geocodeUrl: NC_GEOCODER, parcelUrl: NC_PARCEL_ENGINE, extraWhere: "cntyname = 'Rowan'" },
-    Rutherford: { geocodeUrl: NC_GEOCODER, parcelUrl: NC_PARCEL_ENGINE, extraWhere: "cntyname = 'Rutherford'" },
-    Sampson: { geocodeUrl: NC_GEOCODER, parcelUrl: NC_PARCEL_ENGINE, extraWhere: "cntyname = 'Sampson'" },
-    Scotland: { geocodeUrl: NC_GEOCODER, parcelUrl: NC_PARCEL_ENGINE, extraWhere: "cntyname = 'Scotland'" },
-    Stanly: { geocodeUrl: NC_GEOCODER, parcelUrl: NC_PARCEL_ENGINE, extraWhere: "cntyname = 'Stanly'" },
-    Stokes: { geocodeUrl: NC_GEOCODER, parcelUrl: NC_PARCEL_ENGINE, extraWhere: "cntyname = 'Stokes'" },
-    Surry: { geocodeUrl: NC_GEOCODER, parcelUrl: NC_PARCEL_ENGINE, extraWhere: "cntyname = 'Surry'" },
-    Swain: { geocodeUrl: NC_GEOCODER, parcelUrl: NC_PARCEL_ENGINE, extraWhere: "cntyname = 'Swain'" },
-    Transylvania: { geocodeUrl: NC_GEOCODER, parcelUrl: NC_PARCEL_ENGINE, extraWhere: "cntyname = 'Transylvania'" },
-    Tyrrell: { geocodeUrl: NC_GEOCODER, parcelUrl: NC_PARCEL_ENGINE, extraWhere: "cntyname = 'Tyrrell'" },
-    Union: { geocodeUrl: NC_GEOCODER, parcelUrl: NC_PARCEL_ENGINE, extraWhere: "cntyname = 'Union'" },
-    Vance: { geocodeUrl: NC_GEOCODER, parcelUrl: NC_PARCEL_ENGINE, extraWhere: "cntyname = 'Vance'" },
-    Wake: { geocodeUrl: NC_GEOCODER, parcelUrl: NC_PARCEL_ENGINE, extraWhere: "cntyname = 'Wake'" },
-    Warren: { geocodeUrl: NC_GEOCODER, parcelUrl: NC_PARCEL_ENGINE, extraWhere: "cntyname = 'Warren'" },
-    Washington: { geocodeUrl: NC_GEOCODER, parcelUrl: NC_PARCEL_ENGINE, extraWhere: "cntyname = 'Washington'" },
-    Watauga: { geocodeUrl: NC_GEOCODER, parcelUrl: NC_PARCEL_ENGINE, extraWhere: "cntyname = 'Watauga'" },
-    Wayne: { geocodeUrl: NC_GEOCODER, parcelUrl: NC_PARCEL_ENGINE, extraWhere: "cntyname = 'Wayne'" },
-    Wilkes: { geocodeUrl: NC_GEOCODER, parcelUrl: NC_PARCEL_ENGINE, extraWhere: "cntyname = 'Wilkes'" },
-    Wilson: { geocodeUrl: NC_GEOCODER, parcelUrl: NC_PARCEL_ENGINE, extraWhere: "cntyname = 'Wilson'" },
-    Yadkin: { geocodeUrl: NC_GEOCODER, parcelUrl: NC_PARCEL_ENGINE, extraWhere: "cntyname = 'Yadkin'" },
-    Yancey: { geocodeUrl: NC_GEOCODER, parcelUrl: NC_PARCEL_ENGINE, extraWhere: "cntyname = 'Yancey'" }
-};
+// All 100 NC counties share the same statewide geocoder + parcel engine, so the
+// config is generated from the county list instead of 100 hand-written entries.
+const NC_COUNTY_NAMES = [
+  "Alamance", "Alexander", "Alleghany", "Anson", "Ashe", "Avery", "Beaufort", "Bertie", "Bladen", "Brunswick",
+  "Buncombe", "Burke", "Cabarrus", "Caldwell", "Camden", "Carteret", "Caswell", "Catawba", "Chatham", "Cherokee",
+  "Chowan", "Clay", "Cleveland", "Columbus", "Craven", "Cumberland", "Currituck", "Dare", "Davidson", "Davie",
+  "Duplin", "Durham", "Edgecombe", "Forsyth", "Franklin", "Gaston", "Gates", "Graham", "Granville", "Greene",
+  "Guilford", "Halifax", "Harnett", "Haywood", "Henderson", "Hertford", "Hoke", "Hyde", "Iredell", "Jackson",
+  "Johnston", "Jones", "Lee", "Lenoir", "Lincoln", "Macon", "Madison", "Martin", "McDowell", "Mecklenburg",
+  "Mitchell", "Montgomery", "Moore", "Nash", "New Hanover", "Northampton", "Onslow", "Orange", "Pamlico",
+  "Pasquotank", "Pender", "Perquimans", "Person", "Pitt", "Polk", "Randolph", "Richmond", "Robeson", "Rockingham",
+  "Rowan", "Rutherford", "Sampson", "Scotland", "Stanly", "Stokes", "Surry", "Swain", "Transylvania", "Tyrrell",
+  "Union", "Vance", "Wake", "Warren", "Washington", "Watauga", "Wayne", "Wilkes", "Wilson", "Yadkin", "Yancey",
+] as const;
+
+export const ncCountyConfig: Record<string, { geocodeUrl: string; parcelUrl: string; extraWhere: string }> =
+  Object.fromEntries(
+    NC_COUNTY_NAMES.map((name) => [
+      name,
+      { geocodeUrl: NC_GEOCODER, parcelUrl: NC_PARCEL_ENGINE, extraWhere: `cntyname = '${name}'` },
+    ]),
+  );
 
 /**
  * State Plane coordinate bounds lookup helper (Mecklenburg-specific)
@@ -197,7 +137,7 @@ async function queryStatePlaneBounds(lng: number, lat: number) {
   
   const url = `https://services.nconemap.gov/secure/rest/services/NC1Map_Parcels/MapServer/1/query?${queryParams.toString()}`;
   try {
-    const res = await fetch(url);
+    const res = await fetchWithTimeout(url, 8000);
     if (res.ok) {
       const data = await res.json();
       if (data.features && data.features.length > 0) {
@@ -224,20 +164,35 @@ function toTitleCase(str: string): string {
 }
 
 /**
- * Formats an owner name with the FIRST name first. County records often store
- * names as "LAST, FIRST MIDDLE" (or "LAST FIRST"); this reorders comma-separated
- * names to "First Middle Last". Business names (LLC, INC, TRUST, etc.) are left
- * as-is. Returns a title-cased string.
+ * Formats an owner name with the FIRST name first, then the LAST name.
+ * County GIS records store personal names as "LAST, FIRST MIDDLE" or
+ * "LAST FIRST MIDDLE" (no comma); both are reordered to "First Middle Last"
+ * (suffixes like Jr/Sr/III stay after the last name). Business names
+ * (LLC, INC, TRUST, etc.) are left as-is. Returns a title-cased string.
  */
 function formatOwnerName(raw?: string): string {
   if (!raw || !String(raw).trim()) return "N/A";
-  let name = String(raw).trim();
-  const isBusiness = /\b(LLC|L\.?L\.?C|INC|CORP|CO|COMPANY|TRUST|LP|LLP|PARTNERS|HOLDINGS|PROPERTIES|ASSOCIATION|CHURCH|CITY|COUNTY|ESTATE|BANK)\b/i.test(name);
-  if (!isBusiness && name.includes(",")) {
-    const idx = name.indexOf(",");
-    const last = name.slice(0, idx).trim();
-    const rest = name.slice(idx + 1).trim();
-    if (last && rest) name = `${rest} ${last}`;
+  let name = String(raw).trim().replace(/\s+/g, " ");
+  const isBusiness = /\b(LLC|L\.?L\.?C|INC|CORP|CO|COMPANY|TRUST|TRUSTEES?|LP|LLP|PARTNERS(HIP)?|HOLDINGS|PROPERTIES|INVESTMENTS?|VENTURES?|GROUP|REALTY|HOMES|BUILDERS|DEVELOPMENT|ASSOCIATION|ASSOC|HOA|CHURCH|CITY|TOWN|COUNTY|STATE|ESTATE|BANK|ET\s?AL)\b/i.test(name);
+  if (!isBusiness) {
+    if (name.includes(",")) {
+      // "LAST, FIRST MIDDLE" → "First Middle Last"
+      const idx = name.indexOf(",");
+      const last = name.slice(0, idx).trim();
+      const rest = name.slice(idx + 1).trim().replace(/,/g, " ").replace(/\s+/g, " ");
+      if (last && rest) name = `${rest} ${last}`;
+    } else {
+      // "LAST FIRST MIDDLE [SUFFIX]" → "First Middle Last [Suffix]"
+      const parts = name.split(" ");
+      if (parts.length >= 2 && parts.length <= 4) {
+        const suffixes: string[] = [];
+        while (parts.length > 2 && /^(JR|SR|II|III|IV|V)\.?$/i.test(parts[parts.length - 1])) {
+          suffixes.unshift(parts.pop() as string);
+        }
+        const last = parts.shift() as string;
+        name = [...parts, last, ...suffixes].join(" ");
+      }
+    }
   }
   return toTitleCase(name);
 }
@@ -317,13 +272,14 @@ function normalizeCountyParcelAttrs(a: Record<string, any>): Record<string, any>
   if (!ownname) {
     const last = get(/own.*lst.*n/i, /owner.*last/i, /lastname/i, /own_?last/i);
     const first = get(/own.*frst.*n/i, /owner.*first/i, /firstname/i, /own_?first/i);
-    if (last) ownname = first ? `${first} ${last}` : last; // first name first
+    // Build "LAST, FIRST" so formatOwnerName reliably reorders to "First Last".
+    if (last) ownname = first ? `${last}, ${first}` : last;
   }
   let ownname2 = get(/^ownname2$/i, /owner2name/i, /^acctname2$/i);
   if (!ownname2) {
     const last2 = get(/ownr?2.*lst|owner2.*last/i);
     const first2 = get(/ownr?2.*frst|owner2.*first/i);
-    if (last2) ownname2 = first2 ? `${first2} ${last2}` : last2; // first name first
+    if (last2) ownname2 = first2 ? `${last2}, ${first2}` : last2;
   }
   let sourceref = get(/^sourceref$/i, /deedref/i);
   if (!sourceref) {
@@ -491,8 +447,7 @@ export async function executeLandAnalysis(
   addressString: string,
   onStageChange?: (stage: string) => void
 ): Promise<SiteFeasibilityData> {
-  const countyKey = countyName === "Ashe" ? "Parcels" : countyName;
-  const config = ncCountyConfig[countyKey];
+  const config = ncCountyConfig[countyName];
   if (!config) {
     throw new Error(`Target county context for '${countyName}' is unconfigured.`);
   }
@@ -516,7 +471,10 @@ export async function executeLandAnalysis(
   }
 
   if (!lng || !lat) {
-    const googleApiKey = import.meta.env.VITE_GOOGLE_MAPS_API_KEY || "AIzaSyAoMZvEZnisPQ0KgyHx11deQXJZKj6AJHo";
+    const googleApiKey = getUserKeys().googleMaps;
+    if (!googleApiKey) {
+      throw new Error("Google Maps API Key is required to geocode address coordinates. Please set it in Account Settings.");
+    }
     const googleCoords = await geocodeAddress(addressString, googleApiKey);
     if (googleCoords) {
       lng = googleCoords.lng;
@@ -525,6 +483,7 @@ export async function executeLandAnalysis(
       throw new Error("No geographic locations found matching this address. Neither the NC Geocoder nor the Google geocoding fallback could resolve it.");
     }
   }
+
 
   // Parcel resolution order: (1) statewide NC OneMap parcel layer (authoritative,
   // covers all 100 counties) → (2) the county's own parcel server if the statewide
@@ -665,6 +624,12 @@ export async function executeLandAnalysis(
   }
 
   const parcelId = info.parno || "N/A";
+
+  // Kick off the USGS 3DEP topography sampling NOW — it's independent of the
+  // zoning/comps lookups below, so running it in parallel shaves several
+  // seconds off the total search time. It's awaited just before returning.
+  onStageChange?.("Evaluating site topography (USGS 3DEP)...");
+  const slopeProfilePromise = fetchOpenTopographySlope(lat, lng, parcelId, boundaryRings);
 
   // A. Real zoning district from the county's own GIS, looked up at the parcel
   // point. If the county GIS returns nothing (no published service, or a
@@ -882,12 +847,14 @@ export async function executeLandAnalysis(
     typeOfTransaction
   };
 
-  onStageChange?.("Evaluating site topography (USGS 3DEP)...");
-  const slopeProfile = await fetchOpenTopographySlope(lat, lng, parcelId, boundaryRings);
   // Pass the full input address (it has the city/ZIP) so the comp search targets
   // the right area — the parcel's situs field is often street-only.
   const compLocationAddress = `${addressString}${info.scity && !addressString.toLowerCase().includes(String(info.scity).toLowerCase()) ? `, ${info.scity}` : ''}`;
-  const comps = await fetchGoogleDistanceMatrixComps(lat, lng, parcelId, zoningCode, zoningDescription, compLocationAddress, countyName, onStageChange);
+  // Comps and topography run concurrently (topography started earlier).
+  const [comps, slopeProfile] = await Promise.all([
+    fetchGoogleDistanceMatrixComps(lat, lng, parcelId, zoningCode, zoningDescription, compLocationAddress, countyName, onStageChange),
+    slopeProfilePromise,
+  ]);
 
   return {
     inputAddress: info.siteadd || addressString,
@@ -913,129 +880,6 @@ export async function executeLandAnalysis(
     slopeProfile,
     comps
   };
-}
-
-export function parseAAIGrid(text: string, south: number, north: number, _west: number, _east: number): SlopeProfile | null {
-  try {
-    const lines = text.trim().split(/\r?\n/);
-    let ncols = 0;
-    let nrows = 0;
-    let cellsize = 0.000277777777778;
-    let nodata = -9999;
-    let dataStartLine = 0;
-
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i].trim();
-      if (!line) continue;
-      const parts = line.split(/\s+/);
-      if (parts.length < 2) continue;
-      const key = parts[0].toLowerCase();
-      const val = parseFloat(parts[1]);
-      
-      if (key === 'ncols') ncols = Math.round(val);
-      else if (key === 'nrows') nrows = Math.round(val);
-      else if (key === 'cellsize') cellsize = val;
-      else if (key === 'nodata_value') nodata = val;
-      else if (['xllcorner', 'yllcorner', 'xllcenter', 'yllcenter'].includes(key)) {
-        // Just skip these header metadata
-      } else {
-        // Start of data
-        dataStartLine = i;
-        break;
-      }
-    }
-
-    if (ncols === 0 || nrows === 0) {
-      console.warn("Invalid AAIGrid headers: ncols or nrows is 0");
-      return null;
-    }
-
-    const tokens: number[] = [];
-    for (let i = dataStartLine; i < lines.length; i++) {
-      const lineTokens = lines[i].trim().split(/\s+/);
-      for (const tok of lineTokens) {
-        if (tok !== "") {
-          tokens.push(parseFloat(tok));
-        }
-      }
-    }
-
-    const grid: number[][] = [];
-    for (let r = 0; r < nrows; r++) {
-      const row: number[] = [];
-      for (let c = 0; c < ncols; c++) {
-        const idx = r * ncols + c;
-        row.push(tokens[idx] !== undefined ? tokens[idx] : nodata);
-      }
-      grid.push(row);
-    }
-
-    const midLat = south + (north - south) / 2;
-    const cell_height_m = cellsize * 111132;
-    const cell_width_m = cellsize * 111132 * Math.cos(midLat * Math.PI / 180);
-
-    const slopes: number[] = [];
-    const elevations: number[] = [];
-
-    for (let r = 0; r < nrows; r++) {
-      for (let c = 0; c < ncols; c++) {
-        const z = grid[r][c];
-        if (z === nodata || isNaN(z)) continue;
-        elevations.push(z);
-
-        // Compute slope gradients
-        let dz_dx = 0;
-        if (c > 0 && c < ncols - 1) {
-          dz_dx = (grid[r][c+1] - grid[r][c-1]) / (2 * cell_width_m);
-        } else if (c === 0 && ncols > 1) {
-          dz_dx = (grid[r][1] - grid[r][0]) / cell_width_m;
-        } else if (c === ncols - 1 && ncols > 1) {
-          dz_dx = (grid[r][ncols-1] - grid[r][ncols-2]) / cell_width_m;
-        }
-
-        let dz_dy = 0;
-        if (r > 0 && r < nrows - 1) {
-          dz_dy = (grid[r-1][c] - grid[r+1][c]) / (2 * cell_height_m);
-        } else if (r === 0 && nrows > 1) {
-          dz_dy = (grid[0][c] - grid[1][c]) / cell_height_m;
-        } else if (r === nrows - 1 && nrows > 1) {
-          dz_dy = (grid[nrows-2][c] - grid[nrows-1][c]) / cell_height_m;
-        }
-
-        const gradient = Math.sqrt(dz_dx * dz_dx + dz_dy * dz_dy);
-        const slopePercent = gradient * 100;
-        slopes.push(slopePercent);
-      }
-    }
-
-    if (elevations.length === 0) return null;
-
-    const minElevation = Math.min(...elevations);
-    const maxElevation = Math.max(...elevations);
-    const avgElevation = elevations.reduce((a, b) => a + b, 0) / elevations.length;
-
-    const maxSlope = slopes.length > 0 ? Math.max(...slopes) : 0;
-    const avgSlope = slopes.length > 0 ? slopes.reduce((a, b) => a + b, 0) / slopes.length : 0;
-
-    let verdict: 'BUILDABLE' | 'REQUIRES ENGINEERING' | 'NON-BUILDABLE' = 'BUILDABLE';
-    if (maxSlope > 25) {
-      verdict = 'NON-BUILDABLE';
-    } else if (maxSlope >= 15) {
-      verdict = 'REQUIRES ENGINEERING';
-    }
-
-    return {
-      avgSlope: Math.round(avgSlope * 10) / 10,
-      maxSlope: Math.round(maxSlope * 10) / 10,
-      avgElevation: Math.round(avgElevation * 10) / 10,
-      minElevation: Math.round(minElevation * 10) / 10,
-      maxElevation: Math.round(maxElevation * 10) / 10,
-      verdict
-    };
-  } catch (err) {
-    console.error("Failed parsing AAIGrid text:", err);
-    return null;
-  }
 }
 
 /**
@@ -1230,7 +1074,7 @@ export function getUseCategory(zoningCode: string, zoningDesc: string): 'residen
 async function geocodeAddress(address: string, apiKey: string): Promise<{ lat: number; lng: number } | null> {
   const url = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(address)}&key=${apiKey}`;
   try {
-    const res = await fetch(url);
+    const res = await fetchWithTimeout(url, 8000);
     if (res.ok) {
       const data = await res.json();
       if (data.status === "OK" && data.results && data.results[0]) {
@@ -1276,11 +1120,12 @@ async function geocodeAddress(address: string, apiKey: string): Promise<{ lat: n
 export async function fetchZoningViaWebSearch(
   address: string,
 ): Promise<{ code: string; description: string; sourceUrl?: string } | null> {
-  const geminiApiKey = import.meta.env.VITE_GEMINI_API_KEY || "";
+  const geminiApiKey = getUserKeys().gemini || "";
   if (!geminiApiKey) {
-    console.warn("Gemini API key is not configured in .env.local.");
+    console.warn("Gemini API key is not configured in Account Settings.");
     return null;
   }
+
   const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=${geminiApiKey}`;
   const prompt = `Find the official ZONING DISTRICT for this exact property address: "${address}".
 Search official sources only: the county or municipal zoning map, the local GIS/parcel viewer, or the planning department.
@@ -1483,6 +1328,45 @@ async function fetchRapidApiSoldComps(
   return comps;
 }
 
+// ---------------------------------------------------------------------------
+// Comp result cache. The Gemini/Google-Search comp discovery is inherently
+// non-deterministic, so without a cache the SAME address could return a
+// DIFFERENT comp set on every run. We persist the final verified comp set per
+// parcel location (localStorage, 7-day TTL) so repeat searches on the same
+// address are instant AND return identical comps.
+// ---------------------------------------------------------------------------
+const COMPS_CACHE_PREFIX = "gisfs:comps:v2:";
+const COMPS_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+
+function compsCacheKey(lat: number, lng: number, category: string): string {
+  // ~1m coordinate precision → the same parcel always maps to the same key.
+  return `${COMPS_CACHE_PREFIX}${lat.toFixed(5)},${lng.toFixed(5)}|${category}`;
+}
+
+function readCompsCache(key: string): CompProperty[] | null {
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return null;
+    const entry = JSON.parse(raw);
+    if (!entry || !Array.isArray(entry.comps) || typeof entry.t !== "number") return null;
+    if (Date.now() - entry.t > COMPS_CACHE_TTL_MS) {
+      localStorage.removeItem(key);
+      return null;
+    }
+    return entry.comps as CompProperty[];
+  } catch {
+    return null;
+  }
+}
+
+function writeCompsCache(key: string, comps: CompProperty[]): void {
+  try {
+    localStorage.setItem(key, JSON.stringify({ t: Date.now(), comps }));
+  } catch {
+    // localStorage full/unavailable — caching is best-effort only.
+  }
+}
+
 export async function fetchGoogleDistanceMatrixComps(
   lat: number,
   lng: number,
@@ -1504,6 +1388,15 @@ export async function fetchGoogleDistanceMatrixComps(
 
   // Permitted use category (drives the Realtor search property type).
   const category = getPermittedCategory(zoningCode, zoningDesc);
+
+  // Same address searched again? Return the EXACT same verified comp set
+  // (deterministic + instant) instead of re-running the non-deterministic search.
+  const cacheKey = compsCacheKey(lat, lng, category);
+  const cached = readCompsCache(cacheKey);
+  if (cached && cached.length > 0) {
+    console.log(`Returning ${cached.length} cached comps for this parcel (deterministic re-run).`);
+    return cached;
+  }
 
   // Straight-line miles from the subject to a candidate (used to pre-rank).
   const straightMiles = (c: { coords: { lat: number; lng: number } }) => {
@@ -1537,12 +1430,12 @@ export async function fetchGoogleDistanceMatrixComps(
   // B. Primary comp source: Gemini + Google Search grounding over Realtor.com sold
   // listings. Returns recently-sold comparable HOMES (new construction prioritized).
   onStageChange?.("Searching sold home comps (Google)...");
-  {
-    const geminiApiKey = import.meta.env.VITE_GEMINI_API_KEY || "";
-    if (!geminiApiKey) {
-      console.warn("Gemini API key is not configured in .env.local.");
-      return [];
-    }
+  const geminiApiKey = getUserKeys().gemini || "";
+  if (!geminiApiKey) {
+    console.warn("Gemini API key is not configured in Account Settings — skipping the Google comp search and relying on the listings API.");
+  }
+
+ else {
     const propertyTypePrompt = category === 'residential'
       ? 'single-family residential (SFR)'
       : category === 'commercial'
@@ -1558,7 +1451,7 @@ Criteria for each comp:
 - Completed HOMES only — NEVER vacant land, raw lots, or unbuilt pads.
 - Prioritize NEW CONSTRUCTION (year built ${MIN_YEAR_BUILT} or later); also include other recently sold comparable homes of the same type.
 
-Return EVERY qualifying sold property you can find (aim for 20–40 if available), de-duplicated by address. Never fabricate addresses, prices, sale dates, or year built — include only real, verifiable sales.
+BE EXHAUSTIVE — DO NOT BE LAZY. Return EVERY qualifying sold property you can find, de-duplicated by address. There is NO maximum count: if 60+ qualifying sales exist, return all 60+. Do not stop after the first page of results or the first source; keep searching until additional queries stop surfacing new qualifying sales. Never fabricate addresses, prices, sale dates, or year built — include only real, verifiable sales.
 
 Output a JSON array of objects inside a markdown code block exactly like this:
 \`\`\`json
@@ -1583,9 +1476,11 @@ Only output the JSON block, nothing else. Addresses must be real; prices must be
         body: JSON.stringify({
           contents: [{ role: 'user', parts: [{ text: queryPrompt }] }],
           systemInstruction: {
-            parts: [{ text: "You are a real estate comps research agent. Use Google Search across MULTIPLE sources — Zillow, Realtor.com, Redfin, Homes.com, Trulia, and public records — to find SOLD home listings, and return them as structured JSON. Pull as MANY real, verifiable sold homes as possible (do not stop at a few). Never include vacant land, and never fabricate." }]
+            parts: [{ text: "You are an exhaustive real estate comps research agent. Use Google Search across MULTIPLE sources — Zillow, Realtor.com, Redfin, Homes.com, Trulia, and public records — to find SOLD home listings, and return them as structured JSON. Pull EVERY real, verifiable sold home that meets the criteria — there is no maximum; being lazy or stopping at a handful is a failure. Never include vacant land, and never fabricate." }]
           },
-          tools: [{ google_search: {} }]
+          tools: [{ google_search: {} }],
+          // Deterministic decoding so the same address yields a stable comp set.
+          generationConfig: { temperature: 0 }
         })
       });
       if (geminiResponse.ok) {
@@ -1607,10 +1502,22 @@ Only output the JSON block, nothing else. Addresses must be real; prices must be
     }
   }
 
-  // Fallback: if the Google search returned nothing, use the RapidAPI listings API.
-  if (compAddresses.length === 0) {
+  // Supplement with the RapidAPI listings API (Realtor.com data) and merge —
+  // more sources = more qualifying comps. De-duplicated by normalized address.
+  {
     const compLocation = zip || `${city}, ${stateCode}`;
-    compAddresses = await fetchRapidApiSoldComps(compLocation, category);
+    const rapidComps = await fetchRapidApiSoldComps(compLocation, category);
+    if (rapidComps.length > 0) {
+      const seen = new Set(
+        compAddresses.map((c: any) => String(c?.address || '').toLowerCase().replace(/[^a-z0-9]/g, '')),
+      );
+      for (const rc of rapidComps) {
+        const key = String(rc.address || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+        if (!key || seen.has(key)) continue;
+        seen.add(key);
+        compAddresses.push(rc);
+      }
+    }
   }
 
   console.log(`Collected ${compAddresses.length} sold-comp candidates.`);
@@ -1632,15 +1539,14 @@ Only output the JSON block, nothing else. Addresses must be real; prices must be
   );
   let finalCompCandidates: any[] = resolved.filter((c): c is any => c !== null);
 
-  // Keep only comps meeting ALL criteria — NEW CONSTRUCTION (built 2025+), sold
-  // within 12 months, within ~5mi — BEFORE capping, so qualifying new construction
-  // isn't crowded out by nearby older homes. Then pre-rank by proximity, keep up
-  // to 50 (the Distance Matrix call is batched in 25s below).
+  // Keep ALL comps meeting the criteria — NEW CONSTRUCTION (built 2025+), sold
+  // within 12 months, within ~5mi — with NO cap on the count. Ranked by
+  // proximity; the Distance Matrix call below is batched in chunks of 25, so
+  // any number of qualifying comps can be verified.
   finalCompCandidates = finalCompCandidates.filter(
     (c) => isNewConstruction(c.yearBuilt) && soldWithinYear(c.saleDate) && straightMiles(c) <= 5.5,
   );
   finalCompCandidates.sort((a, b) => straightMiles(a) - straightMiles(b));
-  finalCompCandidates = finalCompCandidates.slice(0, 50);
 
   // F. Google Distance Matrix Driving Verification
   let compsWithDriving: CompProperty[] = [];
@@ -1759,15 +1665,17 @@ Only output the JSON block, nothing else. Addresses must be real; prices must be
 
   // Final comp set: STRICTLY new construction (built 2025+), same use, sold within
   // 12 months, 0.5–5 driving miles. No older/non-new-construction homes are
-  // included. Shown nearest-first.
+  // included, and NO cap on the count — every qualifying comp is returned,
+  // nearest-first.
   const result = compsWithDriving
     .filter(c =>
       c.distanceMiles >= 0.5 && c.distanceMiles <= 5.0 &&
       soldWithinYear(c.saleDate) && isNewConstruction(c.yearBuilt)
     )
-    .sort((a, b) => a.distanceMiles - b.distanceMiles)
-    .slice(0, 50);
-  console.log(`Returning ${result.length} new-construction comps.`);
+    .sort((a, b) => a.distanceMiles - b.distanceMiles);
+  console.log(`Returning ${result.length} new-construction comps (no cap).`);
+  // Persist so repeat searches of this address return the identical comp set.
+  if (result.length > 0) writeCompsCache(cacheKey, result);
   return result;
 }
 
@@ -1787,13 +1695,14 @@ export async function chatWithGemini(
   reportData: SiteFeasibilityData
 ): Promise<{ text: string; sources?: ChatSource[] }> {
 
-  const apiKey = import.meta.env.VITE_GEMINI_API_KEY || "";
+  const apiKey = getUserKeys().gemini || "";
   if (!apiKey) {
-    throw new Error("Gemini API key is not configured in .env.local.");
+    throw new Error("Gemini API key is required. Please configure it in Account Settings.");
   }
+
   const systemPrompt = `
 # Role & Objective
-You are Antigravity, an autonomous real estate acquisition intelligence agent. Your purpose is to process property assets, pull live market data from real estate platforms, cross-reference county GIS zoning datasets, compute exact physical buildability constraints via USGS 3DEP (1-meter) elevation, filter proximity market comps using the Google Distance Matrix API, structure a unified report payload ready for PDF/map rendering, and act as an interactive post-report chatbot.
+You are Antigravity, an autonomous real estate acquisition intelligence agent. Your purpose is to process property assets, pull live market data from real estate platforms, cross-reference county GIS zoning datasets, compute exact physical buildability constraints via USGS 3DEP (1-meter) elevation, filter proximity market comps using the Google Distance Matrix API, and produce a polished, human-readable land feasibility report.
 
 # Strict Development Rules
 1. CRITICAL: For new construction, you must NEVER look for active comps or make up artificial comps. Only look for and pull **recently SOLD comps** to protect valuation integrity.
@@ -1811,16 +1720,14 @@ When analyzing comps, use EXACTLY these criteria:
 - Distance: 0.5 to 5 driving miles from the subject.
 - The verified comps are supplied to you in the report data below — use ONLY those exact homes. Never invent comps, never substitute older (pre-2025) homes, and never substitute vacant-land/raw-lot sales. If the list is empty, say so plainly.
 
-# Interactivity & Saved Reports Protocol
-- PDF Generation: You must format the final payload inside a clean, structural JSON schema or markdown template that the backend code can immediately pass to a PDF printing utility (e.g., WeasyPrint, FPDF2).
-- Map Assets: Include a placeholder array containing the exact coordinates and map layers (Zoning overlay, Topography lines, Subject Pin, Comp Pins) for the frontend map renderer to draw.
-- Interruption Rule (Comp Verification): If the user does not specify a comp strategy in their current request, you must halt, list their Saved Preference Profile, and ask them to confirm if they want to apply those saved filters or modify the search parameters before generating the report.
+# Report Output Rules (CRITICAL)
+- Generate the FULL report immediately. The comp criteria above are fixed — do NOT halt to ask the user to confirm a comp strategy or saved preferences. Just produce the complete report (including the wholesale valuation) in one response using the provided comps and data.
+- The report is for HUMAN readers (investors/wholesalers). Do NOT include any "Map & Infrastructure Layer Assets" section, JSON schema payloads, raw JSON blocks, placeholder arrays, map-layer/renderer assets, or PDF/backend formatting instructions anywhere in the report.
+- Do NOT include, mention, or announce any "Interactive Assistant Mode", chatbot mode, session state, or persistent memory in the report. Never end the report with statements like "transitioning to Interactive Assistant Mode."
+- Use the ownership/tax/assessment data provided in the context as report content (owner, mailing address, values, taxes) — present it in normal report sections, not as a data dump.
 
-# Post-Report Interactive Chatbot Mode (New Layer)
-Once the Land Feasibility Report is generated and saved to the dashboard, you must immediately transition into **Interactive Assistant Mode**. 
-- Maintain a persistent state memory of the generated report, the raw GIS vector data, the county zoning data with estimated dimensional standards, and the USGS 3DEP slope profiles.
-- Act as a dedicated, conversational land concierge. Allow the user to ask follow-up questions without needing to re-fetch the data.
-- **Handling Queries:** If the user asks deep secondary questions (e.g., *"Can I build a duplex here instead?"*, *"Where exactly are the setbacks on the map?"*, or *"Show me the calculations for the grading costs"*), use the stored context to answer immediately, or leverage live Google Search grounding to look up niche municipal code sections if required.
+# Follow-Up Questions (after the report)
+For any follow-up question, answer conversationally using the stored report context; use live Google Search grounding for niche municipal code questions when needed. Do not regenerate the full report unless asked.
 
 # Gemini-Style Response Structure & Tone (CRITICAL)
 - Adopt the exact communication style of Google Gemini (gemini.google.com).
@@ -1829,18 +1736,54 @@ Once the Land Feasibility Report is generated and saved to the dashboard, you mu
 - Utilize rich formatting: use bolding (**text**), clear hierarchical headers (###), bullet points, and clean spacing.
 - When explaining complex numbers, code regulations, or calculations, structure the information in a clean Markdown table format or step-by-step numbered list.
 
-# Land Valuation & Wholesale Methodology (compute precisely; ALWAYS show the math)
-Accuracy is critical — the user relies on these numbers for real acquisition decisions. Use ONLY the provided comps and data; never invent sale prices, and never reuse numbers from a different property. Show every formula and input.
-1. ARV / Finished Value: From the verified new-construction sold comps in the report data, compute the MEDIAN sold price and the MEDIAN price-per-sqft. State how many comps were used and the median(s). If there are ZERO comps, state plainly that ARV cannot be reliably established from comps and do NOT fabricate one — anchor to the assessor value with lower confidence and stop the wholesale math there.
-2. Build / Development Cost: Estimate with a clearly-stated NC new-construction cost of $150–$185 per sqft (state the figure used) × the estimated buildable SF from the zoning section. Add a site/grading contingency from the slope verdict: BUILDABLE = +0%, REQUIRES ENGINEERING = +12%, NON-BUILDABLE = flag as likely infeasible.
-3. Residual (Builder's) Land Value = ARV − Build Cost − Soft Costs (≈8% of ARV) − Builder Profit (target 18% of ARV). This is the most a builder would rationally pay for the finished lot.
-4. Wholesale numbers (present as a Markdown table with each input shown):
-   - Maximum Allowable Offer (MAO) to the seller = Residual Land Value − target assignment fee − a 5% risk buffer.
-   - Target Assignment Fee: state the dollar amount used (e.g. $10,000–$20,000).
-   - Projected Resale to a builder ≈ Residual Land Value.
-   - Projected Spread = Resale − MAO.
-5. Sanity-anchor every figure against the county tax-assessor LAND value and assessed value in the report data. If they diverge widely, say so and lower the stated confidence.
-6. NEVER present a wholesale/MAO number without the supporting ARV, build-cost, soft-cost, and profit inputs shown. Label all estimates as estimates. If an input is missing, state which is missing rather than guessing.
+# Land Wholesale Methodology (compute precisely; ALWAYS show the math)
+This is a LAND WHOLESALING analysis — getting a lot under contract and ASSIGNING it to a builder/investor. It is NOT a rehab/flip and you do NOT subtract construction cost or builder profit. Use ONLY the provided comps and data; never invent prices. Show every formula, percentage, and input.
+
+STEP 1 — ARV (Finished New-Construction Value): From the verified new-construction sold comps in the report data, compute the MEDIAN sold price. State the comp count and the median. If there are ZERO comps, state plainly that ARV cannot be established from comps and STOP the wholesale math — note the county tax-assessor LAND value as the only anchor; do NOT fabricate a number.
+
+STEP 2 — Finished Lot Value (what a builder would pay for the lot): Builders pay roughly 15%–25% of ARV for the finished lot. Use 20% as the base (15% in softer/rural markets, 25% in hot infill markets); state the % used.
+   Lot Value = ARV × (15%–25%).
+   (If recent comparable LOT sales are known from Google Search, you may cross-check Lot Value against them.)
+
+STEP 3 — Classify the land type and pick the Investor/Builder Buy Percentage (state which applies):
+   | Land Type | Buy % of Lot Value |
+   | Infill lot in a city | 50%–70% |
+   | Buildable suburban lot | 40%–60% |
+   | Rural acreage | 20%–50% |
+   | Recreational land | 20%–40% |
+   For NC infill lots (Charlotte, Gastonia, Mount Holly, Kannapolis, Dallas, Concord, etc.), builders/investors typically buy at 70%–85% of the lot value depending on demand. Classify the subject from its acreage, zoning, and location (a small lot in/near a city = infill; a larger parcel = suburban/rural) and pick a percentage within the right band.
+
+STEP 4 — Maximum Allowable Offer (MAO) and assignment:
+   Investor/Builder Purchase Price = Lot Value × (Buy %).
+   MAO (your contract price to the seller) = Investor Purchase Price − Wholesale/Assignment Fee.
+   Assignment Fee: state the figure used (typical $5,000–$15,000).
+   Assignment Price (what you sell the contract to the builder for) ≈ Investor Purchase Price.
+   Projected Spread (your profit) = Assignment Price − MAO (≈ your assignment fee).
+
+WORKED EXAMPLE to mirror (use the subject's real numbers, not these):
+   ARV $350,000 → Lot Value at 20% = $70,000 → infill Buy % 80% → Investor Purchase Price = $56,000 → minus $7,500 fee → MAO ≈ $48,500; assign ≈ $56,000.
+
+METHOD 3 — Developer Formula (MANDATORY whenever the county tax-assessor PROPERTY value and/or LAND value are missing, zero, or N/A in the report data; also useful as a cross-check otherwise):
+Many land buyers use:
+   Offer = ARV × 20%–30%
+Example (mirror this with the subject's REAL ARV from the comps, not these numbers):
+   New construction ARV = $300,000 → Land acquisition target:
+   - 20% = $60,000
+   - 25% = $75,000
+   - 30% = $90,000
+Then SUBTRACT estimated site-prep and deal costs from the acquisition target to reach the final offer:
+   - Tree clearing
+   - Well
+   - Septic
+   - Utility extensions
+   - Grading
+   - Demolition (if applicable)
+   - Your assignment fee
+Present Method 3 as a Markdown table showing the subject's ARV, the 20% / 25% / 30% acquisition targets, each itemized deduction (label cost figures as estimates), and the resulting net offer range. When the assessor values are absent, say plainly that the assessor anchor is unavailable and that Method 3 (Developer Formula) is being used as the valuation basis.
+
+STEP 5 — Present a clean Markdown table showing every line: ARV, Lot % of ARV, Lot Value, land-type classification, Buy %, Investor Purchase Price, Assignment Fee, MAO (contract price), Assignment Price, and Spread. Then sanity-check the MAO and Lot Value against the county tax-assessor LAND value and assessed value in the report data; if they diverge widely, say so and lower the stated confidence. If the assessor LAND value and/or assessed PROPERTY value are missing, zero, or N/A, skip that sanity-check and instead apply METHOD 3 (Developer Formula) above as the cross-check and state its resulting offer range.
+
+STEP 6 — NEVER present an MAO without showing the ARV, lot %, buy %, and assignment fee inputs. Label estimates as estimates. If comps are missing, say so rather than guessing.
 
 # Accuracy Mandate
 - Use ONLY the data and comps provided in the report context plus live Google Search for facts you cite (always with a source). Do not invent owner names, prices, dates, slopes, or zoning.
@@ -1870,12 +1813,12 @@ ${reportData.comps && reportData.comps.length > 0
   ? reportData.comps.map((comp, idx) => `- Comp ${idx + 1}: ${comp.address} | ${comp.propertyType || 'Home'} | Built ${comp.yearBuilt ?? 'N/A'} | Sold ${comp.saleDate || 'N/A'} for $${comp.price.toLocaleString()} | ${comp.distanceMiles.toFixed(2)} mi / ${Math.round(comp.durationMins)} min driving`).join('\n')
   : "NONE FOUND: no new-construction (built 2025+) HOME sales of the subject's use type occurred within the last 12 months in the 0.5–5 mile radius. Do NOT substitute older homes, vacant-land, raw-lot, or unbuilt-pad sales. State plainly that no qualifying new-construction comps were available and anchor the valuation on the tax assessor baseline."}
 
-### 5. Map & Infrastructure Layer Assets
+### 5. Ownership, Tax & Assessment Data (for report content — never output this as a JSON/asset payload)
 - Center Coordinates: [${reportData.coordinates.lat}, ${reportData.coordinates.lng}]
-- Parcel Owner: ${reportData.ownerName}
+- Parcel Owner (first name first): ${reportData.ownerName}
 - Mailing Address: ${reportData.mailingAddress}
-- Assessed Value: $${reportData.assessedPropertyValue?.toLocaleString()}
-- Land Value: $${reportData.landValue?.toLocaleString()}
+- Assessed Value: ${reportData.assessedPropertyValue ? `$${reportData.assessedPropertyValue.toLocaleString()}` : 'N/A — no assessed property value on record (use METHOD 3 Developer Formula)'}
+- Land Value: ${reportData.landValue ? `$${reportData.landValue.toLocaleString()}` : 'N/A — no assessor land value on record (use METHOD 3 Developer Formula)'}
 - Census Tract: ${reportData.censusTract}
 - Tax Code Area: ${reportData.taxCodeArea}
 - Tax Amount: $${reportData.taxAmount}
@@ -1951,12 +1894,4 @@ ${reportData.comps && reportData.comps.length > 0
 
   return { text, sources: sources.length > 0 ? sources : undefined };
 }
-
-/**
- * Legacy API resolver matching local fallback configurations.
- */
-export async function getSiteFeasibility(address: string): Promise<SiteFeasibilityData> {
-  // Delegate Mecklenburg searches directly to executeLandAnalysis for consistency
-  return executeLandAnalysis("Mecklenburg", address);
-}
-
+// EOF

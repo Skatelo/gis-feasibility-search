@@ -1,10 +1,11 @@
 import { useState, useEffect, useRef } from 'react';
 import type { FormEvent, KeyboardEvent, FC } from 'react';
 import { createRoot } from 'react-dom/client';
-import { executeLandAnalysis, chatWithGemini } from '../services/feasibilityService';
+import { executeLandAnalysis, chatWithGemini, getUserKeys } from '../services/feasibilityService';
 import type { ChatMessage } from '../services/feasibilityService';
 import type { SiteFeasibilityData } from '../types/feasibility';
 import { getZoningServices, hasCountyZoning } from '../data/ncZoning';
+import { fetchOsmFeatures } from '../data/osmFeatures';
 import {
   Search,
   MapPin, 
@@ -550,6 +551,11 @@ const parseMarkdown = (text: string) => {
 };
 
 export const FeasibilitySearch: FC = () => {
+  const keys = getUserKeys();
+  const hasGoogleMapsKey = !!keys.googleMaps;
+  const hasGeminiKey = !!keys.gemini;
+  const hasKeys = hasGoogleMapsKey && hasGeminiKey;
+
   const [addressInput, setAddressInput] = useState('');
   const [selectedCounty, setSelectedCounty] = useState('Mecklenburg');
   const [loading, setLoading] = useState(false);
@@ -558,6 +564,7 @@ export const FeasibilitySearch: FC = () => {
   const [data, setData] = useState<SiteFeasibilityData | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [history, setHistory] = useState<any[]>([]);
+
 
   // Chatbot states
   const [chatInput, setChatInput] = useState('');
@@ -608,9 +615,13 @@ For comparable properties (comps), you MUST use and analyze exactly the followin
 
 ${compsList}
 
-Use exactly these comps to populate the "New Construction Sold Comps Table" in Section 2, and use their values for any financial/spread calculations throughout the report. Do NOT search for or suggest any different comps.
+Use exactly these comps to populate the "New Construction Sold Comps Table" in Section 2 — include EVERY comp listed above in the table (do not truncate or sample the list) — and use their values for any financial/spread calculations throughout the report. Do NOT search for or suggest any different comps.
 
 You MUST include markdown tables and/or ASCII charts (e.g. tables for financial spread analysis, developer cost breakdown, setbacks, and development capacity) to make the report highly actionable and visual.
+
+In Section 6 (Seller Offer Strategy & Wholesaler Formulas): if the county tax-assessor property value or land value is missing, zero, or N/A, you MUST apply METHOD 3 (Developer Formula): Offer = ARV × 20%–30% (show the 20%, 25%, and 30% acquisition targets from the subject's real ARV), then subtract estimated costs for tree clearing, well, septic, utility extensions, grading, demolition (if applicable), and your assignment fee.
+
+STRICT OUTPUT EXCLUSIONS: Do NOT include any "Map & Infrastructure Layer Assets" section, JSON payloads/schemas, raw code blocks, or map-layer asset arrays anywhere. Do NOT mention or announce any "Interactive Assistant Mode", chatbot mode, or session memory anywhere in the report.
 
 Your report must strictly follow this 10-section structure:
 # 1. 🧾 Property Overview (Core Data)
@@ -1022,6 +1033,8 @@ Format each section with clear markdown headers, bold text, bullet points, and t
   const [showStreams, setShowStreams] = useState(true);
   const [showContours, setShowContours] = useState(true);
   const [showZoning, setShowZoning] = useState(true);
+  const [showOsmFeatures, setShowOsmFeatures] = useState(false);
+  const [osmLoading, setOsmLoading] = useState(false);
 
   // GIS Overlay Layer Refs
   const floodplainsLayerRef = useRef<any>(null);
@@ -1029,6 +1042,8 @@ Format each section with clear markdown headers, bold text, bullet points, and t
   const contoursLayerRef = useRef<any>(null);
   const zoningLayersRef = useRef<any[]>([]);
   const zoningLabelOverlayRef = useRef<any>(null);
+  const osmDataLayerRef = useRef<any>(null);
+  const osmCacheRef = useRef<{ key: string; fc: any } | null>(null);
 
   // Load history on mount
   useEffect(() => {
@@ -1062,11 +1077,13 @@ Format each section with clear markdown headers, bold text, bullet points, and t
       return;
     }
 
-    const apiKey = import.meta.env.VITE_GOOGLE_MAPS_API_KEY;
+    const keys = getUserKeys();
+    const apiKey = keys.googleMaps;
     if (!apiKey) {
-      console.warn("VITE_GOOGLE_MAPS_API_KEY is not defined");
+      console.warn("User Google Maps API Key is not configured in settings.");
       return;
     }
+
 
     const script = document.createElement("script");
     script.src = `https://maps.googleapis.com/maps/api/js?key=${apiKey}&libraries=places,geometry`;
@@ -1648,6 +1665,72 @@ Format each section with clear markdown headers, bold text, bullet points, and t
 
   }, [showFloodplains, showStreams, showContours, showZoning, data, mapsLoaded]);
 
+  // Real OSM feature overlay: buildings, road centerlines, and water bodies drawn
+  // as a Google Maps vector Data layer (authoritative OpenStreetMap data).
+  useEffect(() => {
+    const map = googleMapInstanceRef.current;
+    if (!mapsLoaded || !map) return;
+
+    if (!showOsmFeatures || !data) {
+      if (osmDataLayerRef.current) osmDataLayerRef.current.setMap(null);
+      return;
+    }
+
+    const { lat, lng } = data.coordinates;
+    if (isNaN(lat) || isNaN(lng)) return;
+
+    // Ensure the Data layer exists with feature-type styling.
+    if (!osmDataLayerRef.current) {
+      const layer = new google.maps.Data();
+      layer.setStyle((feature: any) => {
+        const ft = feature.getProperty('feature_type');
+        if (ft === 'building') return { fillColor: '#f59e0b', fillOpacity: 0.35, strokeColor: '#f59e0b', strokeWeight: 1, clickable: true };
+        if (ft === 'water') return { fillColor: '#3b82f6', fillOpacity: 0.4, strokeColor: '#2563eb', strokeWeight: 2, clickable: true };
+        if (ft === 'road') return { strokeColor: '#ef4444', strokeWeight: 2.5, clickable: true };
+        return { strokeColor: '#ffffff', strokeWeight: 1 };
+      });
+      const info = new google.maps.InfoWindow();
+      layer.addListener('click', (e: any) => {
+        const ft = e.feature.getProperty('feature_type');
+        const name = e.feature.getProperty('name');
+        info.setContent(`<div style="font-family:Arial,sans-serif;font-size:12px;color:#000;padding:2px 4px;"><strong>${(ft || 'feature').toUpperCase()}</strong>${name ? `<br/>${name}` : ''}<br/><span style="color:#666;font-size:10px;">Source: OpenStreetMap</span></div>`);
+        info.setPosition(e.latLng);
+        info.open(map);
+      });
+      osmDataLayerRef.current = layer;
+    }
+    const layer = osmDataLayerRef.current;
+
+    // Bounding box around the subject (~550m square, adjusted for longitude).
+    const dLat = 0.0025;
+    const dLng = dLat / Math.cos((lat * Math.PI) / 180);
+    const cacheKey = `${lat.toFixed(5)},${lng.toFixed(5)}`;
+
+    const render = (fc: any) => {
+      layer.forEach((f: any) => layer.remove(f));
+      try { layer.addGeoJson(fc); } catch (err) { console.warn('Failed to add OSM GeoJSON:', err); }
+      layer.setMap(map);
+    };
+
+    if (osmCacheRef.current && osmCacheRef.current.key === cacheKey) {
+      render(osmCacheRef.current.fc);
+      return;
+    }
+
+    let cancelled = false;
+    setOsmLoading(true);
+    fetchOsmFeatures(lat - dLat, lng - dLng, lat + dLat, lng + dLng)
+      .then((fc) => {
+        if (cancelled) return;
+        osmCacheRef.current = { key: cacheKey, fc };
+        render(fc);
+      })
+      .catch((err) => console.warn('OSM feature fetch failed:', err))
+      .finally(() => { if (!cancelled) setOsmLoading(false); });
+
+    return () => { cancelled = true; };
+  }, [showOsmFeatures, data, mapsLoaded]);
+
   const handleSelectPrediction = (prediction: any) => {
     setAddressInput(prediction.description);
     setShowDropdown(false);
@@ -1692,8 +1775,13 @@ Format each section with clear markdown headers, bold text, bullet points, and t
 
   const handleSearch = async (addressToSearch: string, countyToSearch: string = selectedCounty) => {
     if (!addressToSearch.trim()) return;
+    if (!hasKeys) {
+      setError("Please set your personal Google Maps and Gemini API Keys in Account Settings to run feasibility analyses.");
+      return;
+    }
 
     setLoading(true);
+
     setLoadingStage("Querying county GIS records...");
     setError(null);
     try {
@@ -1739,7 +1827,17 @@ Format each section with clear markdown headers, bold text, bullet points, and t
             Enter any North Carolina property address to instantly query parcel boundaries, state plane projections, and local zoning classifications.
           </p>
 
+          {!hasKeys && (
+            <div className="api-keys-warning-banner" onClick={() => window.dispatchEvent(new CustomEvent('open-gis-settings'))}>
+              <AlertCircle size={18} className="warning-icon" />
+              <div className="warning-text">
+                <strong>API Keys Required:</strong> Personal Google Maps and Gemini API Keys must be configured to run feasibility analyses. Click here to configure them in Account Settings.
+              </div>
+            </div>
+          )}
+
           <form onSubmit={handleSubmit} className="search-form-row">
+
             <div className="select-wrapper">
               <select
                 className="county-select"
@@ -1785,16 +1883,19 @@ Format each section with clear markdown headers, bold text, bullet points, and t
                 </ul>
               )}
             </div>
-            <button type="submit" disabled={loading || !addressInput.trim()} className="btn btn-primary">
+            <button type="submit" disabled={loading || !addressInput.trim() || !hasKeys} className="btn btn-primary">
               {loading ? (
                 <>
                   <Loader2 className="spinner" size={18} />
                   <span>{loadingStage || "Querying GIS..."}</span>
                 </>
+              ) : !hasKeys ? (
+                <span>Setup API Keys</span>
               ) : (
                 <span>Analyze Site</span>
               )}
             </button>
+
           </form>
 
           {/* Graceful error reporting */}
@@ -2743,15 +2844,38 @@ Format each section with clear markdown headers, bold text, bullet points, and t
                       </button>
                     );
                   })()}
+                  <button
+                    type="button"
+                    className={`layer-toggle-btn ${showOsmFeatures ? 'active' : ''}`}
+                    onClick={() => setShowOsmFeatures(!showOsmFeatures)}
+                    title="Overlay real building footprints, road centerlines, and water bodies from OpenStreetMap"
+                  >
+                    <span className="toggle-indicator osm" />
+                    <span>{osmLoading ? 'Loading Features…' : 'Buildings & Roads (OSM)'}</span>
+                  </button>
                 </div>
               </div>
 
-              <div className={`map-wrapper ${hasStreetView ? `split-view ${splitOrientation}` : ''}`} style={{ height: splitOrientation === 'stacked' && hasStreetView ? '500px' : '400px' }}>
-                <div ref={mapRef} className="gis-map-canvas" />
-                {hasStreetView && (
-                  <div ref={streetViewRef} className="streetview-canvas" />
+              <div className={`map-wrapper ${hasStreetView ? `split-view ${splitOrientation}` : ''}`} style={{ height: splitOrientation === 'stacked' && hasStreetView ? '500px' : '400px', position: 'relative' }}>
+                {!hasGoogleMapsKey ? (
+                  <div className="map-offline-placeholder" onClick={() => window.dispatchEvent(new CustomEvent('open-gis-settings'))}>
+                    <Map size={36} className="offline-map-icon" />
+                    <h4>Map Viewer Offline</h4>
+                    <p>Configure your Google Maps API Key in Account Settings to initialize the interactive satellite map canvas.</p>
+                    <button type="button" className="btn btn-secondary btn-sm" style={{ marginTop: '8px' }}>
+                      Open Settings
+                    </button>
+                  </div>
+                ) : (
+                  <>
+                    <div ref={mapRef} className="gis-map-canvas" />
+                    {hasStreetView && (
+                      <div ref={streetViewRef} className="streetview-canvas" />
+                    )}
+                  </>
                 )}
               </div>
+
               <div className="map-legend">
                 <span className="legend-item">
                   <span className="legend-color boundary" />
