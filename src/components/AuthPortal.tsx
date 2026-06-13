@@ -1,11 +1,18 @@
-import { useState } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import type { FormEvent } from 'react';
-import { Mail, Lock, Shield, Eye, EyeOff, LogIn, UserPlus } from 'lucide-react';
+import { Mail, Lock, Shield, Eye, EyeOff, LogIn, UserPlus, KeyRound, Cloud, CloudOff, Loader2 } from 'lucide-react';
+import { isSupabaseConfigured, setSupabaseConfig, getRememberPreference } from '../services/supabaseClient';
+import { signInWithEmail, signUpWithEmail, signInWithGoogle } from '../services/authService';
 
 
 interface AuthPortalProps {
   onLoginSuccess: (user: any) => void;
 }
+
+// Real Google Sign-In requires the user's OWN Google OAuth Client ID (created in
+// their Google Cloud Console, like their other API keys). It's stored locally so
+// it only needs to be entered once per browser.
+const GOOGLE_CLIENT_ID_KEY = 'gis_google_client_id';
 
 export function AuthPortal({ onLoginSuccess }: AuthPortalProps) {
   const [isSignUp, setIsSignUp] = useState(false);
@@ -16,12 +23,110 @@ export function AuthPortal({ onLoginSuccess }: AuthPortalProps) {
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
-  
-  // Google Auth Mock State
+
+  // Google Sign-In state (real OAuth when a Client ID is configured; demo otherwise)
   const [showGoogleMock, setShowGoogleMock] = useState(false);
   const [googleLoading, setGoogleLoading] = useState(false);
+  const [googleClientId, setGoogleClientId] = useState(() => {
+    try { return localStorage.getItem(GOOGLE_CLIENT_ID_KEY) || ''; } catch { return ''; }
+  });
+  const [clientIdInput, setClientIdInput] = useState('');
+  const googleBtnRef = useRef<HTMLDivElement>(null);
 
-  const handleEmailAuth = (e: FormEvent) => {
+  // Supabase cloud accounts (real auth + cross-device reports sync)
+  const [supaConfigured, setSupaConfigured] = useState(isSupabaseConfigured());
+  const [showConnect, setShowConnect] = useState(false);
+  const [supaUrlInput, setSupaUrlInput] = useState('');
+  const [supaAnonInput, setSupaAnonInput] = useState('');
+  const [authBusy, setAuthBusy] = useState(false);
+
+  const saveSupabaseConnection = () => {
+    setError(null);
+    const url = supaUrlInput.trim();
+    const anon = supaAnonInput.trim();
+    if (!/^https:\/\/.+\.supabase\.co\/?$/.test(url)) {
+      setError('That does not look like a Supabase project URL (expected https://xxxx.supabase.co).');
+      return;
+    }
+    if (anon.length < 20) {
+      setError('That does not look like a valid Supabase anon (public) key.');
+      return;
+    }
+    setSupabaseConfig(url, anon);
+    setSupaConfigured(true);
+    setShowConnect(false);
+    setSuccess('Supabase connected! Accounts and saved reports now sync to the cloud.');
+  };
+
+  /** Find-or-register a Google account locally and start the session. */
+  const completeGoogleLogin = (gmail: string) => {
+    const usersStr = localStorage.getItem('gis_registered_users') || '[]';
+    const users = JSON.parse(usersStr);
+    let user = users.find((u: any) => u.email.toLowerCase() === gmail.toLowerCase());
+    if (!user) {
+      user = {
+        email: gmail,
+        password: '', // Google users don't have passwords
+        keys: { googleMaps: '', gemini: '', openTopography: '' },
+        provider: 'google'
+      };
+      users.push(user);
+      localStorage.setItem('gis_registered_users', JSON.stringify(users));
+    }
+    loginUser(user);
+  };
+
+  // When the Google dialog opens and a Client ID is configured, load Google
+  // Identity Services and render the REAL Google sign-in button.
+  useEffect(() => {
+    if (!showGoogleMock || !googleClientId) return;
+    const init = () => {
+      const g = (window as any).google;
+      if (!g?.accounts?.id || !googleBtnRef.current) return;
+      try {
+        g.accounts.id.initialize({
+          client_id: googleClientId,
+          callback: (resp: any) => {
+            try {
+              const part = resp.credential.split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
+              const payload = JSON.parse(atob(part));
+              if (payload?.email) {
+                setShowGoogleMock(false);
+                completeGoogleLogin(payload.email);
+              } else {
+                setError('Google sign-in did not return an email address.');
+              }
+            } catch {
+              setError('Google sign-in failed to decode the credential.');
+            }
+          },
+        });
+        googleBtnRef.current.innerHTML = '';
+        g.accounts.id.renderButton(googleBtnRef.current, { theme: 'outline', size: 'large', width: 280 });
+      } catch (e) {
+        console.error('Google Identity Services init failed:', e);
+        setError('Failed to initialize Google Sign-In. Check that your OAuth Client ID is valid and this origin is authorized.');
+      }
+    };
+    if ((window as any).google?.accounts?.id) { init(); return; }
+    const existing = document.querySelector('script[src="https://accounts.google.com/gsi/client"]');
+    if (existing) { existing.addEventListener('load', init); return; }
+    const s = document.createElement('script');
+    s.src = 'https://accounts.google.com/gsi/client';
+    s.async = true;
+    s.onload = init;
+    document.head.appendChild(s);
+  }, [showGoogleMock, googleClientId]);
+
+  const saveClientId = () => {
+    const v = clientIdInput.trim();
+    if (!v) return;
+    try { localStorage.setItem(GOOGLE_CLIENT_ID_KEY, v); } catch { /* ignore */ }
+    setGoogleClientId(v);
+    setClientIdInput('');
+  };
+
+  const handleEmailAuth = async (e: FormEvent) => {
     e.preventDefault();
     setError(null);
     setSuccess(null);
@@ -31,6 +136,50 @@ export function AuthPortal({ onLoginSuccess }: AuthPortalProps) {
       return;
     }
 
+    // --- Supabase cloud accounts (real authentication) ---
+    if (supaConfigured) {
+      if (isSignUp) {
+        if (password !== confirmPassword) {
+          setError("Passwords do not match.");
+          return;
+        }
+        if (password.length < 6) {
+          setError("Password must be at least 6 characters.");
+          return;
+        }
+      }
+      setAuthBusy(true);
+      try {
+        if (isSignUp) {
+          const { needsConfirmation } = await signUpWithEmail(email.trim(), password);
+          if (needsConfirmation) {
+            setSuccess("Account created! Check your inbox for the confirmation email, then sign in.");
+            setIsSignUp(false);
+            setPassword('');
+            setConfirmPassword('');
+          }
+          // If confirmation is disabled on the project, the session is already
+          // active and the app-level auth listener signs the user in.
+        } else {
+          // If the remember-me preference changed, the Supabase client gets a
+          // new storage backend — reload afterwards so the app re-subscribes.
+          const prefChanged = getRememberPreference() !== rememberMe;
+          await signInWithEmail(email.trim(), password, rememberMe);
+          if (prefChanged) {
+            window.location.reload();
+            return;
+          }
+          // Otherwise the app-level auth listener takes over.
+        }
+      } catch (err: any) {
+        setError(err?.message || 'Authentication failed.');
+      } finally {
+        setAuthBusy(false);
+      }
+      return;
+    }
+
+    // --- Local fallback mode (Supabase not connected) ---
     if (isSignUp) {
       if (password !== confirmPassword) {
         setError("Passwords do not match.");
@@ -108,8 +257,20 @@ export function AuthPortal({ onLoginSuccess }: AuthPortalProps) {
     onLoginSuccess(sessionData);
   };
 
-  const startGoogleSignIn = () => {
+  const startGoogleSignIn = async () => {
     setError(null);
+    if (supaConfigured) {
+      // REAL Google Sign-In via Supabase OAuth — redirects to accounts.google.com.
+      setAuthBusy(true);
+      try {
+        await signInWithGoogle(rememberMe);
+        // The browser is redirecting; no further action here.
+      } catch (err: any) {
+        setError(err?.message || 'Google sign-in failed. Is the Google provider enabled in your Supabase project?');
+        setAuthBusy(false);
+      }
+      return;
+    }
     setShowGoogleMock(true);
   };
 
@@ -118,24 +279,7 @@ export function AuthPortal({ onLoginSuccess }: AuthPortalProps) {
     setTimeout(() => {
       setGoogleLoading(false);
       setShowGoogleMock(false);
-
-      // Find or register this mock Google user in database
-      const usersStr = localStorage.getItem('gis_registered_users') || '[]';
-      const users = JSON.parse(usersStr);
-
-      let user = users.find((u: any) => u.email.toLowerCase() === gmail.toLowerCase());
-      if (!user) {
-        user = {
-          email: gmail,
-          password: '', // Google users don't have passwords
-          keys: { googleMaps: '', gemini: '', openTopography: '' },
-          provider: 'google'
-        };
-        users.push(user);
-        localStorage.setItem('gis_registered_users', JSON.stringify(users));
-      }
-
-      loginUser(user);
+      completeGoogleLogin(gmail);
     }, 1500); // realistic loading feel
   };
 
@@ -233,8 +377,13 @@ export function AuthPortal({ onLoginSuccess }: AuthPortalProps) {
               </label>
             </div>
 
-            <button type="submit" className="auth-submit-btn">
-              {isSignUp ? (
+            <button type="submit" className="auth-submit-btn" disabled={authBusy}>
+              {authBusy ? (
+                <>
+                  <Loader2 size={18} className="spinner" />
+                  <span>Please wait...</span>
+                </>
+              ) : isSignUp ? (
                 <>
                   <UserPlus size={18} />
                   <span>Create Account</span>
@@ -282,6 +431,71 @@ export function AuthPortal({ onLoginSuccess }: AuthPortalProps) {
               </p>
             )}
           </div>
+
+          {/* Cloud accounts status / Supabase connection */}
+          <div style={{ marginTop: '14px', borderTop: '1px solid #e2e8f0', paddingTop: '12px' }}>
+            {supaConfigured ? (
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px', fontSize: '0.74rem', color: '#16a34a', fontWeight: 600 }}>
+                <Cloud size={14} />
+                <span>Cloud accounts enabled — reports & API keys sync via Supabase</span>
+              </div>
+            ) : showConnect ? (
+              <div style={{ border: '1px solid #e2e8f0', borderRadius: '10px', padding: '12px', background: '#f8fafc' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.8rem', fontWeight: 700, color: '#334155', marginBottom: '6px' }}>
+                  <Cloud size={14} />
+                  <span>Connect Supabase (cloud accounts)</span>
+                </div>
+                <p style={{ fontSize: '0.72rem', color: '#64748b', margin: '0 0 8px', lineHeight: 1.45 }}>
+                  Paste your Supabase project URL and anon (public) key — found in your Supabase
+                  dashboard under Settings → API. Full setup steps (tables + Google provider) are in
+                  SETUP_SUPABASE.md in the project folder.
+                </p>
+                <input
+                  type="text"
+                  placeholder="https://xxxx.supabase.co"
+                  value={supaUrlInput}
+                  onChange={(e) => setSupaUrlInput(e.target.value)}
+                  style={{ width: '100%', fontSize: '0.76rem', padding: '7px 9px', border: '1px solid #cbd5e1', borderRadius: '6px', marginBottom: '6px', boxSizing: 'border-box' }}
+                />
+                <input
+                  type="password"
+                  placeholder="Supabase anon (public) key"
+                  value={supaAnonInput}
+                  onChange={(e) => setSupaAnonInput(e.target.value)}
+                  style={{ width: '100%', fontSize: '0.76rem', padding: '7px 9px', border: '1px solid #cbd5e1', borderRadius: '6px', marginBottom: '8px', boxSizing: 'border-box' }}
+                />
+                <div style={{ display: 'flex', gap: '8px', justifyContent: 'flex-end' }}>
+                  <button
+                    type="button"
+                    onClick={() => setShowConnect(false)}
+                    style={{ fontSize: '0.74rem', padding: '6px 12px', border: '1px solid #cbd5e1', borderRadius: '6px', background: '#fff', color: '#64748b', cursor: 'pointer' }}
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    onClick={saveSupabaseConnection}
+                    disabled={!supaUrlInput.trim() || !supaAnonInput.trim()}
+                    style={{ fontSize: '0.74rem', padding: '6px 14px', border: 'none', borderRadius: '6px', background: '#16a34a', color: '#fff', cursor: 'pointer', fontWeight: 600 }}
+                  >
+                    Connect
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px', fontSize: '0.74rem', color: '#94a3b8' }}>
+                <CloudOff size={14} />
+                <span>Accounts are stored on this device only.</span>
+                <button
+                  type="button"
+                  onClick={() => setShowConnect(true)}
+                  style={{ background: 'none', border: 'none', color: '#4f46e5', cursor: 'pointer', fontSize: '0.74rem', padding: 0, textDecoration: 'underline', fontWeight: 600 }}
+                >
+                  Connect Supabase
+                </button>
+              </div>
+            )}
+          </div>
         </div>
       </div>
 
@@ -300,8 +514,59 @@ export function AuthPortal({ onLoginSuccess }: AuthPortalProps) {
                 <div className="google-spinner"></div>
                 <p>Connecting securely...</p>
               </div>
+            ) : googleClientId ? (
+              <div className="google-mock-body">
+                {/* REAL Google Sign-In (Google Identity Services) */}
+                <div ref={googleBtnRef} style={{ display: 'flex', justifyContent: 'center', minHeight: '44px', padding: '8px 0' }} />
+                <p style={{ fontSize: '0.72rem', color: '#94a3b8', textAlign: 'center', margin: '10px 0 0' }}>
+                  Using your Google OAuth Client ID.{' '}
+                  <button
+                    type="button"
+                    style={{ background: 'none', border: 'none', color: '#4285F4', cursor: 'pointer', fontSize: '0.72rem', padding: 0, textDecoration: 'underline' }}
+                    onClick={() => {
+                      try { localStorage.removeItem(GOOGLE_CLIENT_ID_KEY); } catch { /* ignore */ }
+                      setGoogleClientId('');
+                    }}
+                  >
+                    Remove
+                  </button>
+                </p>
+                <button
+                  type="button"
+                  onClick={() => setShowGoogleMock(false)}
+                  className="google-mock-cancel"
+                >
+                  Cancel
+                </button>
+              </div>
             ) : (
               <div className="google-mock-body">
+                <div style={{ border: '1px solid #e2e8f0', borderRadius: '8px', padding: '10px 12px', marginBottom: '14px', background: '#f8fafc' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.78rem', fontWeight: 600, color: '#334155', marginBottom: '6px' }}>
+                    <KeyRound size={13} />
+                    <span>Enable real Google Sign-In</span>
+                  </div>
+                  <p style={{ fontSize: '0.72rem', color: '#64748b', margin: '0 0 8px', lineHeight: 1.4 }}>
+                    Paste your own Google OAuth Client ID (Google Cloud Console → Credentials → OAuth 2.0 Client ID, type "Web application"). Without one, the demo accounts below are used.
+                  </p>
+                  <div style={{ display: 'flex', gap: '6px' }}>
+                    <input
+                      type="text"
+                      placeholder="xxxxxxxx.apps.googleusercontent.com"
+                      value={clientIdInput}
+                      onChange={(e) => setClientIdInput(e.target.value)}
+                      style={{ flex: 1, fontSize: '0.74rem', padding: '6px 8px', border: '1px solid #cbd5e1', borderRadius: '6px' }}
+                    />
+                    <button
+                      type="button"
+                      onClick={saveClientId}
+                      disabled={!clientIdInput.trim()}
+                      style={{ fontSize: '0.74rem', padding: '6px 12px', border: 'none', borderRadius: '6px', background: '#4285F4', color: '#fff', cursor: 'pointer', fontWeight: 600 }}
+                    >
+                      Save
+                    </button>
+                  </div>
+                </div>
                 <div className="google-account-list">
                   <button
                     onClick={() => selectGoogleAccount("developer.gis@gmail.com")}

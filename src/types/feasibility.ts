@@ -34,12 +34,29 @@ export interface SlopeProfile {
 export interface CompProperty {
   address: string;
   price: number;
+  /** Driving miles (Google Distance Matrix) — the primary distance. */
   distanceMiles: number;
   durationMins: number;
   saleDate: string;
   coords?: { lat: number; lng: number };
   yearBuilt?: number;
   propertyType?: string;
+  /** Living area in square feet. */
+  sqft?: number;
+  /** Sold price per square foot (rounded). */
+  pricePerSqft?: number;
+  /** Haversine straight-line miles (secondary, shown in parentheses). */
+  straightLineMiles?: number;
+  /** True when Google driving distance was unavailable and straight-line was used. */
+  drivingFallback?: boolean;
+  /** True when the sold price/date were verified on the Realtor.com detail page. */
+  verified?: boolean;
+  verifiedNote?: string;
+  /** Set when the detail-page price differed from the search result by > $500. */
+  priceDiscrepancy?: string;
+  /** Realtor.com detail page URL. */
+  url?: string;
+  zip?: string;
 }
 
 export interface SiteFeasibilityData {
@@ -82,5 +99,7 @@ export interface SiteFeasibilityData {
   // Slope and Comps details
   slopeProfile?: SlopeProfile;
   comps?: CompProperty[];
+  /** Conversational markdown summary of the comp run (criteria, per-comp detail, Bottom Line). */
+  compRunSummary?: string;
 }
 

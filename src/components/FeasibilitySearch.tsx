@@ -3,6 +3,8 @@ import type { FormEvent, KeyboardEvent, FC } from 'react';
 import { createRoot } from 'react-dom/client';
 import { executeLandAnalysis, chatWithGemini, getUserKeys } from '../services/feasibilityService';
 import type { ChatMessage } from '../services/feasibilityService';
+import { saveReport, getReportEtaMs, recordReportDuration } from '../services/reportStore';
+import { ReportsDrawer } from './ReportsDrawer';
 import type { SiteFeasibilityData } from '../types/feasibility';
 import { getZoningServices, hasCountyZoning } from '../data/ncZoning';
 import { fetchOsmFeatures } from '../data/osmFeatures';
@@ -34,7 +36,11 @@ import {
   Paperclip,
   Mic,
   Send,
-  Globe
+  Globe,
+  Clock,
+  FolderOpen,
+  MessageCircle,
+  X
 } from 'lucide-react';
 
 
@@ -266,7 +272,7 @@ const parseInlineMarkdown = (text: string): React.ReactNode[] => {
   return tokens;
 };
 
-const parseMarkdown = (text: string) => {
+export const parseMarkdown = (text: string) => {
   if (!text) return null;
   const lines = text.split('\n');
   const nodes: React.ReactNode[] = [];
@@ -550,6 +556,53 @@ const parseMarkdown = (text: string) => {
   return nodes;
 };
 
+/**
+ * Live countdown for AI report generation. The estimate is a rolling average
+ * of this machine's recent generation times (see reportStore), so it gets more
+ * accurate with every report.
+ */
+const ReportCountdown: FC<{ startedAt: number; etaMs: number }> = ({ startedAt, etaMs }) => {
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, []);
+  const elapsed = now - startedAt;
+  const remaining = Math.max(0, etaMs - elapsed);
+  const pct = Math.min(99, Math.round((elapsed / etaMs) * 100));
+  const secs = Math.ceil(remaining / 1000);
+  const mins = Math.floor(secs / 60);
+  const label = remaining > 0
+    ? `Estimated ${mins > 0 ? `${mins}m ${secs % 60}s` : `${secs}s`} remaining`
+    : 'Finalizing report — almost done...';
+  return (
+    <div style={{ marginTop: '10px', maxWidth: '420px' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.78rem', color: 'var(--text-secondary)', marginBottom: '6px' }}>
+        <Clock size={13} />
+        <span>{label}</span>
+        <span style={{ marginLeft: 'auto', fontVariantNumeric: 'tabular-nums' }}>{pct}%</span>
+      </div>
+      <div style={{ height: '6px', borderRadius: '3px', background: 'var(--bg-card-border, #e2e8f0)', overflow: 'hidden' }}>
+        <div style={{
+          height: '100%',
+          width: `${pct}%`,
+          borderRadius: '3px',
+          background: 'linear-gradient(90deg, #1a73e8, #a530f2, #f43f5e)',
+          transition: 'width 1s linear'
+        }} />
+      </div>
+    </div>
+  );
+};
+
+/** Single row in the live analysis-progress checklist. */
+const ProgressStep: FC<{ done: boolean; active?: boolean; label: string }> = ({ done, active, label }) => (
+  <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.8rem', padding: '4px 0', color: done ? 'var(--success)' : active ? 'var(--text-primary)' : 'var(--text-muted)' }}>
+    {done ? <Check size={14} /> : active ? <Loader2 size={14} className="spinner" /> : <span style={{ width: 14, height: 14, borderRadius: '50%', border: '2px solid var(--bg-card-border)', display: 'inline-block' }} />}
+    <span style={{ fontWeight: done || active ? 600 : 400 }}>{label}</span>
+  </div>
+);
+
 export const FeasibilitySearch: FC = () => {
   const keys = getUserKeys();
   const hasGoogleMapsKey = !!keys.googleMaps;
@@ -565,6 +618,19 @@ export const FeasibilitySearch: FC = () => {
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [history, setHistory] = useState<any[]>([]);
 
+  // Saved Reports drawer + save feedback
+  const [showReports, setShowReports] = useState(false);
+  const [reportSaved, setReportSaved] = useState(false);
+
+  // Floating AI chat bubble
+  const [chatOpen, setChatOpen] = useState(false);
+  const [chatUnread, setChatUnread] = useState(false);
+
+  // Report-generation countdown ({ startedAt, etaMs } while the AI report runs)
+  const [reportTimer, setReportTimer] = useState<{ startedAt: number; etaMs: number } | null>(null);
+
+  // Monotonic search sequence — partial emissions from a superseded search are ignored.
+  const searchSeqRef = useRef(0);
 
   // Chatbot states
   const [chatInput, setChatInput] = useState('');
@@ -586,13 +652,24 @@ export const FeasibilitySearch: FC = () => {
     }
   }, [chatHistory, chatLoading]);
 
+  // Unread indicator on the chat bubble when an answer arrives while it's closed
+  useEffect(() => {
+    if (!chatOpen && chatHistory.length > 1 && chatHistory[chatHistory.length - 1].role === 'model') {
+      setChatUnread(true);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chatHistory]);
+
   const generateInitialChatReport = async (reportData: SiteFeasibilityData) => {
     setChatLoading(true);
     setChatHistory([]);
+    setReportSaved(false);
+    const reportStart = Date.now();
+    setReportTimer({ startedAt: reportStart, etaMs: getReportEtaMs() });
     try {
       const compsList = reportData.comps && reportData.comps.length > 0
-        ? reportData.comps.map((comp, idx) => 
-            `- Comp ${idx + 1}: ${comp.address} | Price: $${comp.price.toLocaleString()} | Proximity: ${comp.distanceMiles.toFixed(2)} mi | Year Built: ${comp.yearBuilt || 'N/A'} | Type: ${comp.propertyType || 'N/A'} | Sale Date: ${comp.saleDate || 'N/A'}`
+        ? reportData.comps.map((comp, idx) =>
+            `- Comp ${idx + 1}: ${comp.address} | Sold: $${comp.price.toLocaleString()}${comp.pricePerSqft ? ` ($${comp.pricePerSqft}/sqft)` : ''} | ${comp.sqft ? `${comp.sqft.toLocaleString()} sqft | ` : ''}Driving: ${comp.distanceMiles.toFixed(2)} mi | Year Built: ${comp.yearBuilt || 'N/A'} | Type: ${comp.propertyType || 'N/A'} | Sale Date: ${comp.saleDate || 'N/A'} | ${comp.verifiedNote || 'RealtyAPI closed-sale record'}`
           ).join('\n')
         : 'No verified comps available.';
 
@@ -609,38 +686,40 @@ Extract the following details about the property:
 
 Reconcile any data differences across the sources. Cite at least 3 distinct listing links you consulted using standard Markdown links (e.g. [Zillow](url), [Redfin](url), [Realtor](url)).
 
-Compile this into a highly detailed, comprehensive, investor-style land feasibility report for ${reportData.inputAddress}. Do NOT just summarize the data. The report must be thorough, precise, and tailored specifically for real estate developers and land wholesalers. Focus heavily on development potential (e.g. buildability, zoning guidelines, building density, construction costs, developer exits) rather than just raw land.
+Compile this into a highly detailed, comprehensive land feasibility report for ${reportData.inputAddress}. Do NOT just summarize the data. The report must be thorough and precise, written for real estate developers and investors evaluating the site. Focus on development potential (buildability, zoning guidelines, building density, and construction-cost considerations). This is a FEASIBILITY analysis ONLY — do NOT include any wholesaling, assignment-fee, "maximum allowable offer" (MAO), seller-offer-strategy, spread/profit, or exit-strategy content anywhere in the report.
 
 For comparable properties (comps), you MUST use and analyze exactly the following verified comparable properties (comps) that have already been calculated and verified for this parcel. Do NOT search for or list any other comps:
 
 ${compsList}
 
-Use exactly these comps to populate the "New Construction Sold Comps Table" in Section 2 — include EVERY comp listed above in the table (do not truncate or sample the list) — and use their values for any financial/spread calculations throughout the report. Do NOT search for or suggest any different comps.
+Use exactly these comps to populate the "New Construction Sold Comps Table" in Section 2 — include EVERY comp listed above in the table (do not truncate or sample the list), and show each comp's property TYPE. Derive the market-value indication (median, range, $/sqft, and type mix) from these comps only. Do NOT search for or suggest any different comps, and NEVER cite a sale price other than the exact prices provided above.
 
 You MUST include markdown tables and/or ASCII charts (e.g. tables for financial spread analysis, developer cost breakdown, setbacks, and development capacity) to make the report highly actionable and visual.
 
-In Section 6 (Seller Offer Strategy & Wholesaler Formulas): if the county tax-assessor property value or land value is missing, zero, or N/A, you MUST apply METHOD 3 (Developer Formula): Offer = ARV × 20%–30% (show the 20%, 25%, and 30% acquisition targets from the subject's real ARV), then subtract estimated costs for tree clearing, well, septic, utility extensions, grading, demolition (if applicable), and your assignment fee.
-
 STRICT OUTPUT EXCLUSIONS: Do NOT include any "Map & Infrastructure Layer Assets" section, JSON payloads/schemas, raw code blocks, or map-layer asset arrays anywhere. Do NOT mention or announce any "Interactive Assistant Mode", chatbot mode, or session memory anywhere in the report.
 
-Your report must strictly follow this 10-section structure:
+Your report must strictly follow this 7-section structure. Do NOT add any wholesaling, seller-offer, assignment-fee, MAO, spread/profit, or exit-strategy sections:
 # 1. 🧾 Property Overview (Core Data)
-# 2. 🌎 Market Context (including New Construction Sold Comps Table)
+# 2. 🌎 Market Context (including New Construction Sold Comps Table — list each comp's property type)
 # 3. 🧱 Site Development Reality & Construction Cost Estimates (Detailed Table)
 # 4. 📊 Highest & Best Use & Development Capacity
-# 5. 💰 Land Value Analysis & Acquisition Target (Investor Lens)
-# 6. 🧾 Seller Offer Strategy & Wholesaler Formulas
-# 7. 🔁 Wholesale Exit Strategy
-# 8. 💰 Spread & Profit Analysis (Detailed Financial Table)
-# 9. ⚠️ Risk Factors & Mitigation
-# 10. 🧠 Final Investor Summary & Verdict
+# 5. 💰 Comparable Sales & Market Value Indication (median, range, and $/sqft from the provided comps, plus the comp type mix — this is a market-value indication only, NOT an offer, MAO, assignment fee, or spread)
+# 6. ⚠️ Risk Factors & Mitigation
+# 7. 🧠 Final Feasibility Summary & Verdict
 
 Format each section with clear markdown headers, bold text, bullet points, and tables. Ensure the data is customized for this address based on its GIS attributes (Lot size: ${reportData.gisAcres.toFixed(2)} acres, Zoning: ${reportData.zoningCode}, Owners: ${reportData.ownerName || 'N/A'}). Do not include conversational intro/outro filler.`;
 
       const response = await chatWithGemini([{ role: 'user', content: initialPrompt }], reportData);
-      setChatHistory([
+      recordReportDuration(Date.now() - reportStart); // refine future countdown estimates
+      const messages: ChatMessage[] = [
         { role: 'model', content: response.text, sources: response.sources }
-      ]);
+      ];
+      // Follow the report with the verified comp-run summary (criteria,
+      // per-comp detail, Bottom Line) as its own conversational message.
+      if (reportData.compRunSummary) {
+        messages.push({ role: 'model', content: reportData.compRunSummary });
+      }
+      setChatHistory(messages);
     } catch (err: any) {
       console.error(err);
       setChatHistory([
@@ -648,24 +727,21 @@ Format each section with clear markdown headers, bold text, bullet points, and t
       ]);
     } finally {
       setChatLoading(false);
+      setReportTimer(null);
     }
   };
 
-  // Reset chat history and load initial investor-style report when new parcel is loaded
-  useEffect(() => {
+  /** Clears all chat/report UI state at the start of a new search. */
+  const resetChatUiState = () => {
     setChatInput('');
+    setChatHistory([]);
     setLikedMessages({});
     setActiveDrafts({});
     setExpandedDrafts({});
     setCopiedMessageIndex(null);
     setShowCheckOverlay({});
-
-    if (data) {
-      generateInitialChatReport(data);
-    } else {
-      setChatHistory([]);
-    }
-  }, [data]);
+    setReportSaved(false);
+  };
 
   const handleChatSubmit = async (e: FormEvent) => {
     e.preventDefault();
@@ -1057,6 +1133,13 @@ Format each section with clear markdown headers, bold text, bullet points, and t
     }
   }, []);
 
+  // Open the Reports drawer from the app header ("My Reports" button)
+  useEffect(() => {
+    const openReports = () => setShowReports(true);
+    window.addEventListener('open-gis-reports', openReports);
+    return () => window.removeEventListener('open-gis-reports', openReports);
+  }, []);
+
   // Dynamic loader for Google Maps JS API script
   useEffect(() => {
     const callback = () => {
@@ -1417,9 +1500,13 @@ Format each section with clear markdown headers, bold text, bullet points, and t
         }
       }
 
-      // Comps markers (red circles with index numbers)
+      // Comps markers (red circles with index numbers). ONE shared InfoWindow is
+      // reused for every marker — creating one per comp (150+) was memory-heavy and
+      // occasionally rendered the map black. Map pins are capped to the closest 75
+      // (the full comp list and report still include every comp).
       if (data.comps && data.comps.length > 0) {
-        data.comps.forEach((comp, idx) => {
+        const compInfoWindow = new google.maps.InfoWindow();
+        data.comps.slice(0, 75).forEach((comp, idx) => {
           if (!comp.coords) return;
           const compMarker = new google.maps.Marker({
             position: comp.coords,
@@ -1441,19 +1528,17 @@ Format each section with clear markdown headers, bold text, bullet points, and t
             }
           });
           
-          const compInfoWindow = new google.maps.InfoWindow({
-            content: `
+          const _compContent = `
               <div style="font-family: Arial, sans-serif; font-size: 12px; color: #000; padding: 6px; min-width: 180px;">
                 <strong style="color: #EF4444; font-size: 13px; display: block; margin-bottom: 4px; border-bottom: 1px solid #eee; padding-bottom: 2px;">SOLD COMP ${idx + 1}</strong>
-                <strong>Address:</strong> <a href="https://www.google.com/search?q=${encodeURIComponent(comp.address)}" target="_blank" rel="noopener noreferrer" style="color: #4338ca; text-decoration: underline; font-weight: 500;">${comp.address} ↗</a><br/>
+                <strong>Address:</strong> <a href="${comp.url || `https://www.google.com/search?q=${encodeURIComponent(comp.address)}`}" target="_blank" rel="noopener noreferrer" style="color: #4338ca; text-decoration: underline; font-weight: 500;">${comp.address} ↗</a><br/>
                 <strong>Price:</strong> $${comp.price.toLocaleString()}<br/>
                 <strong>Proximity:</strong> ${comp.distanceMiles.toFixed(2)} mi (${comp.durationMins.toFixed(0)} mins)<br/>
                 <strong>Sale Date:</strong> ${comp.saleDate}
               </div>
-            `
-          });
-          
+            `;
           compMarker.addListener('click', () => {
+            compInfoWindow.setContent(_compContent);
             compInfoWindow.open(googleMapInstanceRef.current, compMarker);
           });
           
@@ -1780,21 +1865,46 @@ Format each section with clear markdown headers, bold text, bullet points, and t
       return;
     }
 
+    const seq = ++searchSeqRef.current; // invalidates any in-flight previous search
     setLoading(true);
-
     setLoadingStage("Querying county GIS records...");
     setError(null);
+    setData(null);
+    resetChatUiState();
+
+    // Progressive loading: merge each partial emission into view state the
+    // moment it arrives — parcel/GIS data renders immediately; zoning,
+    // topography, and comps stream in as they resolve.
+    let current: SiteFeasibilityData | null = null;
+    const onPartial = (partial: Partial<SiteFeasibilityData>) => {
+      if (seq !== searchSeqRef.current) return; // superseded search — discard
+      current = current ? { ...current, ...partial } : (partial as SiteFeasibilityData);
+      setData(current);
+    };
+
     try {
-      const result = await executeLandAnalysis(countyToSearch, addressToSearch, setLoadingStage);
+      const result = await executeLandAnalysis(
+        countyToSearch,
+        addressToSearch,
+        (stage) => { if (seq === searchSeqRef.current) setLoadingStage(stage); },
+        onPartial
+      );
+      if (seq !== searchSeqRef.current) return;
       setData(result);
       addToHistory(result.inputAddress, countyToSearch);
+      // All site data is in — generate the AI feasibility report (the countdown
+      // timer in the chat panel tracks this phase).
+      generateInitialChatReport(result);
     } catch (err: any) {
+      if (seq !== searchSeqRef.current) return;
       console.error(err);
       setError(err?.message || "An unexpected error occurred while fetching feasibility data.");
       setData(null);
     } finally {
-      setLoading(false);
-      setLoadingStage(null);
+      if (seq === searchSeqRef.current) {
+        setLoading(false);
+        setLoadingStage(null);
+      }
     }
   };
 
@@ -1822,7 +1932,19 @@ Format each section with clear markdown headers, bold text, bullet points, and t
       {/* Top Search Hero Section */}
       <div className="search-hero-section">
         <div className="card search-card">
-          <h2>GIS Feasibility Search</h2>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '12px', flexWrap: 'wrap' }}>
+            <h2>GIS Feasibility Search</h2>
+            <button
+              type="button"
+              className="btn-quick-action"
+              onClick={() => setShowReports(true)}
+              title="View your saved feasibility reports"
+              style={{ flexShrink: 0 }}
+            >
+              <FolderOpen size={14} />
+              <span>My Reports</span>
+            </button>
+          </div>
           <p className="card-subtitle">
             Enter any North Carolina property address to instantly query parcel boundaries, state plane projections, and local zoning classifications.
           </p>
@@ -1938,6 +2060,24 @@ Format each section with clear markdown headers, bold text, bullet points, and t
         <div className="dashboard-sidebar-column">
           {data ? (
             <div className="sidebar-scroll-wrapper fade-in">
+              {/* Live analysis progress — parcel data is already visible below;
+                  the remaining layers stream in as they resolve. */}
+              {loading && (
+                <div className="card registry-card" style={{ marginBottom: '15px' }}>
+                  <h3 className="registry-card-header" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <Loader2 size={15} className="spinner" />
+                    <span>Live Analysis Progress</span>
+                  </h3>
+                  <ProgressStep done label="Parcel boundary & county registry" />
+                  <ProgressStep done={!!data.zoningCode} active={!data.zoningCode} label="Zoning district & dimensional standards" />
+                  <ProgressStep done={!!data.slopeProfile} active={!data.slopeProfile} label="Topography & buildability (USGS 3DEP)" />
+                  <ProgressStep
+                    done={data.comps !== undefined}
+                    active={data.comps === undefined}
+                    label={data.comps === undefined && loadingStage ? `Sold comps — ${loadingStage}` : "Verified sold comps"}
+                  />
+                </div>
+              )}
               {data.isSimulated && (
                 <div className="card" style={{ background: 'var(--warning-bg, #fef3c7)', border: '1px solid var(--warning-border, #f59e0b)', color: 'var(--warning-text, #78350f)', padding: '10px 15px', borderRadius: 'var(--radius-md)', marginBottom: '15px', display: 'flex', alignItems: 'center', gap: '10px' }}>
                   <AlertCircle size={20} style={{ color: '#d97706', flexShrink: 0 }} />
@@ -1971,7 +2111,7 @@ Format each section with clear markdown headers, bold text, bullet points, and t
                     <Navigation size={14} className="directions-icon-rotate" />
                     <span>Directions</span>
                   </a>
-                  <button 
+                  <button
                     onClick={generatePrintableReport}
                     className="btn-quick-action"
                     disabled={chatLoading || chatHistory.length === 0}
@@ -1985,6 +2125,41 @@ Format each section with clear markdown headers, bold text, bullet points, and t
                       <>
                         <Download size={14} />
                         <span>Download PDF Report</span>
+                      </>
+                    )}
+                  </button>
+                  <button
+                    onClick={async () => {
+                      if (!data || chatHistory.length === 0 || chatHistory[0].role !== 'model') return;
+                      try {
+                        await saveReport({
+                          address: data.inputAddress,
+                          county: data.countyName,
+                          parcelId: data.parcelId,
+                          acres: data.gisAcres,
+                          zoningCode: data.zoningCode,
+                          ownerName: data.ownerName,
+                          reportMarkdown: chatHistory[0].content,
+                        });
+                        setReportSaved(true);
+                      } catch (e: any) {
+                        console.error(e);
+                        alert(e?.message || 'Failed to save the report.');
+                      }
+                    }}
+                    className="btn-quick-action"
+                    disabled={chatLoading || chatHistory.length === 0 || reportSaved}
+                    title="Save this report to your Reports section"
+                  >
+                    {reportSaved ? (
+                      <>
+                        <Check size={14} />
+                        <span>Saved to Reports</span>
+                      </>
+                    ) : (
+                      <>
+                        <Bookmark size={14} />
+                        <span>Save to Reports</span>
                       </>
                     )}
                   </button>
@@ -2260,9 +2435,16 @@ Format each section with clear markdown headers, bold text, bullet points, and t
                         {data.zoningSource === 'county-gis' ? 'SOURCE: COUNTY GIS' : data.zoningSource === 'web' ? 'SOURCE: WEB LOOKUP — VERIFY' : ''}
                       </span>
                     </span>
-                    <span className={`zoning-badge ${data.zoningSource === 'county-gis' ? 'active-zone' : 'fallback-zone'}`}>
-                      {data.zoningCode}
-                    </span>
+                    {data.zoningCode ? (
+                      <span className={`zoning-badge ${data.zoningSource === 'county-gis' ? 'active-zone' : 'fallback-zone'}`}>
+                        {data.zoningCode}
+                      </span>
+                    ) : (
+                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', fontSize: '0.78rem', color: 'var(--text-muted)' }}>
+                        <Loader2 size={13} className="spinner" />
+                        <span>Resolving...</span>
+                      </span>
+                    )}
                   </div>
                   <div className="registry-row" style={{ borderBottom: '1px solid var(--bg-card-border)', paddingBottom: '0.75rem', marginBottom: '0.75rem' }}>
                     <span className="field-label" style={{ fontSize: '0.75rem' }}>Zoning Description</span>
@@ -2333,6 +2515,15 @@ Format each section with clear markdown headers, bold text, bullet points, and t
               </div>
 
               {/* Card 5: USGS 3DEP Slope Profile */}
+              {!data.slopeProfile && (
+                <div className="card registry-card slope-card">
+                  <h3 className="registry-card-header">USGS 3DEP Slope Profile (1m)</h3>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '14px 0', color: 'var(--text-muted)', fontSize: '0.85rem' }}>
+                    <Loader2 size={16} className="spinner" />
+                    <span>Sampling parcel elevations from USGS 3DEP...</span>
+                  </div>
+                </div>
+              )}
               {data.slopeProfile && (
                 <div className="card registry-card slope-card">
                   <h3 className="registry-card-header">USGS 3DEP Slope Profile (1m)</h3>
@@ -2387,11 +2578,42 @@ Format each section with clear markdown headers, bold text, bullet points, and t
               )}
 
               {/* Card 6: Verified Market Comps (SOLD ONLY) */}
-              {data.comps && data.comps.length > 0 && (
+              {data.comps === undefined && (
                 <div className="card registry-card comps-card">
                   <h3 className="registry-card-header">Verified Market Comps (SOLD ONLY)</h3>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '14px 0', color: 'var(--text-muted)', fontSize: '0.85rem' }}>
+                    <Loader2 size={16} className="spinner" />
+                    <span>{loadingStage || 'Searching & verifying sold new-construction comps...'}</span>
+                  </div>
+                </div>
+              )}
+              {data.comps && data.comps.length === 0 && (
+                <div className="card registry-card comps-card">
+                  <h3 className="registry-card-header">Verified Market Comps (SOLD ONLY)</h3>
+                  <div style={{ display: 'flex', alignItems: 'flex-start', gap: '10px', padding: '10px 0', color: 'var(--text-secondary)', fontSize: '0.82rem', lineHeight: 1.45 }}>
+                    <AlertCircle size={16} style={{ flexShrink: 0, marginTop: '2px', color: 'var(--warning, #d97706)' }} />
+                    <span>No qualifying comps found: no new-construction sales (built 2025–2026) matching this parcel's zoning use closed within the last 12 months inside the 5 driving-mile radius (RealtyAPI: Realtor, Redfin, Zillow). The chat bubble has the run breakdown.</span>
+                  </div>
+                </div>
+              )}
+              {data.comps && data.comps.length > 0 && (
+                <div className="card registry-card comps-card">
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '8px' }}>
+                    <h3 className="registry-card-header">Verified Market Comps (SOLD ONLY)</h3>
+                    {data.compRunSummary && (
+                      <a
+                        className="btn-quick-action"
+                        style={{ flexShrink: 0, textDecoration: 'none' }}
+                        title="Open a pre-filled email with the comp run summary"
+                        href={`mailto:Herringdarius00@gmail.com?subject=${encodeURIComponent(`New Construction Comps — ${data.inputAddress} (${data.comps.length} comps)`)}&body=${encodeURIComponent(data.compRunSummary.replace(/[#*]/g, '').slice(0, 1800))}`}
+                      >
+                        <Mail size={13} />
+                        <span>Email Summary</span>
+                      </a>
+                    )}
+                  </div>
                   <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginBottom: '1rem', fontStyle: 'italic', borderBottom: '1px dashed var(--bg-card-border)', paddingBottom: '0.5rem' }}>
-                    *Applying Zoning Filters: New construction (built {new Date().getFullYear() - 1}–{new Date().getFullYear()}), matching permitted use, sold within 12 months, 1–5 mile radius.*
+                    *Criteria: New construction (built 2025–2026) matching this parcel's zoning use, sold within 12 months, no sqft limits, within 3 driving miles (auto-expands to 5). Sources: Realtor.com sold records (radius scan, ✓ confirmed) + public MLS via Google Search.*
                   </div>
                   <div className="comps-list" style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
                     {data.comps.map((comp, idx) => (
@@ -2422,7 +2644,7 @@ Format each section with clear markdown headers, bold text, bullet points, and t
                           </span>
                             <strong style={{ fontSize: '0.85rem', color: 'var(--text-primary)', flex: 1 }}>
                             <a 
-                              href={`https://www.google.com/search?q=${encodeURIComponent(comp.address)}`} 
+                              href={comp.url || `https://www.google.com/search?q=${encodeURIComponent(comp.address)}`} 
                               target="_blank" 
                               rel="noopener noreferrer"
                               style={{ color: 'var(--primary)', textDecoration: 'underline' }}
@@ -2435,13 +2657,33 @@ Format each section with clear markdown headers, bold text, bullet points, and t
                           </strong>
                         </div>
                         <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.72rem', color: 'var(--text-secondary)', paddingLeft: '24px' }}>
-                          <span>Proximity: <strong>{comp.distanceMiles.toFixed(2)} mi</strong> ({comp.durationMins.toFixed(0)} mins)</span>
+                          <span>
+                            Driving: <strong>{comp.distanceMiles.toFixed(1)} mi</strong> ({comp.durationMins.toFixed(0)} mins)
+                            {comp.straightLineMiles != null && <span style={{ color: 'var(--text-muted)' }}> · {comp.straightLineMiles.toFixed(1)} mi straight</span>}
+                          </span>
                           <span>Sold: <strong>{comp.saleDate}</strong></span>
                         </div>
-                        {(comp.propertyType || comp.yearBuilt) && (
+                        {(comp.sqft || comp.pricePerSqft || comp.yearBuilt) && (
                           <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.72rem', color: 'var(--text-secondary)', paddingLeft: '24px', borderTop: '1px dashed rgba(0,0,0,0.05)', paddingTop: '4px' }}>
-                            {comp.propertyType && <span>Type: <strong>{comp.propertyType}</strong></span>}
+                            {comp.sqft && <span>Size: <strong>{comp.sqft.toLocaleString()} SF</strong></span>}
+                            {comp.pricePerSqft && <span><strong>${comp.pricePerSqft.toLocaleString()}/SF</strong></span>}
                             {comp.yearBuilt && <span>Built: <strong>{comp.yearBuilt}</strong></span>}
+                          </div>
+                        )}
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '0.7rem', paddingLeft: '24px', paddingTop: '2px' }}>
+                          <span style={{ color: comp.verified ? 'var(--success)' : 'var(--text-muted)', fontWeight: 600 }}>
+                            {comp.verifiedNote || 'Source: RealtyAPI closed-sale record'}
+                            {comp.url && (
+                              <a href={comp.url} target="_blank" rel="noopener noreferrer" style={{ marginLeft: '6px', color: 'var(--primary)', textDecoration: 'underline', fontWeight: 700 }} title="Open the actual listing to confirm the sold price">verify ↗</a>
+                            )}
+                          </span>
+                          {comp.drivingFallback && (
+                            <span style={{ color: 'var(--warning, #d97706)' }} title="Google driving distance unavailable — straight-line used">⚠ straight-line</span>
+                          )}
+                        </div>
+                        {comp.priceDiscrepancy && (
+                          <div style={{ fontSize: '0.68rem', color: 'var(--text-muted)', paddingLeft: '24px' }}>
+                            Price corrected to MLS record ({comp.priceDiscrepancy})
                           </div>
                         )}
                       </div>
@@ -2450,7 +2692,244 @@ Format each section with clear markdown headers, bold text, bullet points, and t
                 </div>
               )}
 
-              {/* Card 7: Land Expert Q&A Chatbot */}
+              {/* AI Feasibility Report (follow-up Q&A lives in the floating chat bubble) */}
+              <div className="card registry-card report-card">
+                <h3 className="registry-card-header" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <FileText size={16} style={{ color: 'var(--primary)' }} />
+                  <span>AI Feasibility Report</span>
+                </h3>
+                {chatLoading && chatHistory.length === 0 ? (
+                  <div style={{ padding: '8px 0' }}>
+                    <div className="gemini-wave-loader-wrapper">
+                      <div className="gemini-wave-loader">
+                        <div className="wave-bar bar-1"></div>
+                        <div className="wave-bar bar-2"></div>
+                        <div className="wave-bar bar-3"></div>
+                      </div>
+                      <span className="loading-text">Generating the full feasibility report...</span>
+                    </div>
+                    {reportTimer && <ReportCountdown startedAt={reportTimer.startedAt} etaMs={reportTimer.etaMs} />}
+                  </div>
+                ) : chatHistory.length > 0 && chatHistory[0].role === 'model' ? (
+                  <>
+                    <div className="message-content model-text report-inline-body">
+                      {parseMarkdown(chatHistory[0].content)}
+                    </div>
+                    <div style={{ marginTop: '12px', paddingTop: '10px', borderTop: '1px dashed var(--bg-card-border)', fontSize: '0.78rem', color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                      <MessageCircle size={13} />
+                      <span>Questions about this report? Use the chat bubble in the corner.</span>
+                    </div>
+                  </>
+                ) : (
+                  <div style={{ fontSize: '0.85rem', color: 'var(--text-muted)', padding: '8px 0' }}>
+                    The investor-style feasibility report will appear here automatically once the site analysis completes.
+                  </div>
+                )}
+              </div>
+
+              {/* Informational Guidelines Card */}
+              <div className="card info-card">
+                <h3>Statewide Data Coverage</h3>
+                <ul className="info-list">
+                  <li>
+                    <strong>Google Geocoder:</strong> Pinpoints standard latitude/longitude coordinates from text addresses.
+                  </li>
+                  <li>
+                    <strong>NC OneMap Service:</strong> Queries the official state-wide database intersecting GPS points with registered parcel boundaries.
+                  </li>
+                  <li>
+                    <strong>Charlotte Zoning:</strong> Direct API routing for Mecklenburg county queries returning exact planning classifications (e.g. UMUD, TOD, N1-C).
+                  </li>
+                  <li>
+                    <strong>Other Counties:</strong> Standard fallback instructing to verify local municipal codes.
+                  </li>
+                </ul>
+              </div>
+            </div>
+          ) : loading ? (
+            <div className="card info-card fade-in" style={{ height: 'auto', display: 'flex', flexDirection: 'column', justifyContent: 'center' }}>
+              <h3 style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                <Loader2 size={18} className="spinner" />
+                <span>Running Site Analysis</span>
+              </h3>
+              <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)', margin: '0.5rem 0 1rem' }}>
+                {loadingStage || 'Resolving the parcel...'} Results appear here the moment each layer is ready.
+              </p>
+              <ProgressStep done={false} active label="Parcel boundary & county registry" />
+              <ProgressStep done={false} label="Zoning district & dimensional standards" />
+              <ProgressStep done={false} label="Topography & buildability (USGS 3DEP)" />
+              <ProgressStep done={false} label="Verified sold comps" />
+            </div>
+          ) : (
+            <div className="card info-card fade-in" style={{ height: 'auto', display: 'flex', flexDirection: 'column', justifyContent: 'center' }}>
+              <h3>Statewide Data Coverage</h3>
+              <p style={{ fontSize: '0.9rem', color: '#888', marginBottom: '1.5rem' }}>
+                Antigravity GIS integrates direct parcel coordinate layers and zoning APIs for standard NC counties:
+              </p>
+              <ul className="info-list" style={{ gap: '1.25rem' }}>
+                <li>
+                  <strong>Google Geocoder:</strong> Pinpoints standard latitude/longitude coordinates from text addresses.
+                </li>
+                <li>
+                  <strong>NC OneMap Service:</strong> Queries the official state-wide database intersecting GPS points with registered parcel boundaries.
+                </li>
+                <li>
+                  <strong>Charlotte Zoning:</strong> Direct API routing for Mecklenburg county queries returning exact planning classifications (e.g. UMUD, TOD, N1-C).
+                </li>
+                <li>
+                  <strong>Other Counties:</strong> Standard fallback instructing to verify local municipal codes.
+                </li>
+              </ul>
+            </div>
+          )}
+        </div>
+
+        {/* Right Column: Maps Column */}
+        <div className="dashboard-map-column">
+          {data ? (
+            <div className="card map-card fade-in" style={{ height: 'auto' }}>
+              <div className="map-header" style={{ display: 'flex', flexDirection: 'column', gap: '1rem', alignItems: 'stretch' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '1rem' }}>
+                  <h3 className="map-title">
+                    <Layers size={18} className="geo-icon" />
+                    <span>GIS Boundary & Aerial Imagery Overlay</span>
+                  </h3>
+                  
+                  {/* Street View Orientation Switcher */}
+                  {hasStreetView && (
+                    <div className="split-toggle-group" style={{ display: 'flex', background: 'var(--bg-card-hover)', padding: '2px', borderRadius: 'var(--radius-sm)', border: '1px solid var(--bg-card-border)' }}>
+                      <button
+                        type="button"
+                        className={`layer-toggle-btn ${splitOrientation === 'side-by-side' ? 'active' : ''}`}
+                        style={{ margin: 0, padding: '0.35rem 0.75rem', fontSize: '0.75rem', borderRadius: 'calc(var(--radius-sm) - 2px)' }}
+                        onClick={() => setSplitOrientation('side-by-side')}
+                        title="Display maps side-by-side"
+                      >
+                        Side-by-Side
+                      </button>
+                      <button
+                        type="button"
+                        className={`layer-toggle-btn ${splitOrientation === 'stacked' ? 'active' : ''}`}
+                        style={{ margin: 0, padding: '0.35rem 0.75rem', fontSize: '0.75rem', borderRadius: 'calc(var(--radius-sm) - 2px)' }}
+                        onClick={() => setSplitOrientation('stacked')}
+                        title="Stack maps vertically"
+                      >
+                        Stacked View
+                      </button>
+                    </div>
+                  )}
+                </div>
+                
+                {/* GIS Layer Toggles */}
+                <div className="map-controls" style={{ alignSelf: 'flex-start' }}>
+                  <button
+                    type="button"
+                    className={`layer-toggle-btn ${showFloodplains ? 'active' : ''}`}
+                    onClick={() => setShowFloodplains(!showFloodplains)}
+                    title="Overlay FEMA Flood Zones (AE, VE, and Shaded X)"
+                  >
+                    <span className="toggle-indicator floodplain" />
+                    <span>Flood Zones (FEMA)</span>
+                  </button>
+                  <button
+                    type="button"
+                    className={`layer-toggle-btn ${showStreams ? 'active' : ''}`}
+                    onClick={() => setShowStreams(!showStreams)}
+                    title="Overlay NC OneMap Streams, Flowlines, and Hydrology"
+                  >
+                    <span className="toggle-indicator stream" />
+                    <span>Streams & Waterways</span>
+                  </button>
+                  <button
+                    type="button"
+                    className={`layer-toggle-btn ${showContours ? 'active' : ''}`}
+                    onClick={() => setShowContours(!showContours)}
+                    title="Overlay NC OneMap Smoothed Vector Elevation Contour Lines"
+                  >
+                    <span className="toggle-indicator elevation" />
+                    <span>Contour Lines (Elevation)</span>
+                  </button>
+                  {(() => {
+                    const countyGis = hasCountyZoning(data.countyName);
+                    const webZoning = data.zoningSource === 'web';
+                    const canToggle = countyGis || webZoning; // tiles for GIS, label for web
+                    const label = countyGis ? "Zoning (County GIS)" : webZoning ? "Zoning (web lookup)" : "Zoning (not published)";
+                    const title = countyGis
+                      ? `Overlay zoning districts from ${data.countyName} County's own GIS server`
+                      : webZoning
+                        ? `Zoning resolved via web search — verify against the local ordinance`
+                        : `${data.countyName} County does not publish a zoning GIS service`;
+                    return (
+                      <button
+                        type="button"
+                        className={`layer-toggle-btn ${canToggle && showZoning ? 'active' : ''} ${canToggle ? '' : 'disabled'}`}
+                        onClick={() => canToggle && setShowZoning(!showZoning)}
+                        disabled={!canToggle}
+                        title={title}
+                      >
+                        <span className="toggle-indicator zoning" />
+                        <span>{label}</span>
+                      </button>
+                    );
+                  })()}
+                  <button
+                    type="button"
+                    className={`layer-toggle-btn ${showOsmFeatures ? 'active' : ''}`}
+                    onClick={() => setShowOsmFeatures(!showOsmFeatures)}
+                    title="Overlay real building footprints, road centerlines, and water bodies from OpenStreetMap"
+                  >
+                    <span className="toggle-indicator osm" />
+                    <span>{osmLoading ? 'Loading Features…' : 'Buildings & Roads (OSM)'}</span>
+                  </button>
+                </div>
+              </div>
+
+              <div className={`map-wrapper ${hasStreetView ? `split-view ${splitOrientation}` : ''}`} style={{ height: splitOrientation === 'stacked' && hasStreetView ? '500px' : '400px', position: 'relative' }}>
+                {!hasGoogleMapsKey ? (
+                  <div className="map-offline-placeholder" onClick={() => window.dispatchEvent(new CustomEvent('open-gis-settings'))}>
+                    <Map size={36} className="offline-map-icon" />
+                    <h4>Map Viewer Offline</h4>
+                    <p>Configure your Google Maps API Key in Account Settings to initialize the interactive satellite map canvas.</p>
+                    <button type="button" className="btn btn-secondary btn-sm" style={{ marginTop: '8px' }}>
+                      Open Settings
+                    </button>
+                  </div>
+                ) : (
+                  <>
+                    <div ref={mapRef} className="gis-map-canvas" />
+                    {hasStreetView && (
+                      <div ref={streetViewRef} className="streetview-canvas" />
+                    )}
+                  </>
+                )}
+              </div>
+
+              <div className="map-legend">
+                <span className="legend-item">
+                  <span className="legend-color boundary" />
+                  <span>Parcel Boundary ({data.gisAcres.toFixed(3)} Acres / {data.grossSf.toLocaleString()} SF)</span>
+                </span>
+              </div>
+            </div>
+          ) : (
+            <div className="results-placeholder" style={{ height: '400px' }}>
+              <div className="radar-animation">
+                <div className="radar-circle circle-1"></div>
+                <div className="radar-circle circle-2"></div>
+                <div className="radar-circle circle-3"></div>
+                <MapPin size={40} className="placeholder-pin" />
+              </div>
+              <h3>Site Feasibility Dashboard</h3>
+              <p>
+                Awaiting query instructions. Type in a North Carolina address to pull spatial boundaries, state-plane coordinates, size computations, and zoning classifications.
+              </p>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Floating AI assistant — always available while you scroll */}
+      <div className={chatOpen ? 'chat-fab-panel open' : 'chat-fab-panel'}>
               <div className="card registry-card chatbot-card gemini-chat-container">
                 <div className="gemini-chat-header">
                   <div className="gemini-logo-wrapper">
@@ -2467,10 +2946,10 @@ Format each section with clear markdown headers, bold text, bullet points, and t
                   </div>
                   <div className="gemini-header-text">
                     <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                      <span className="gemini-title">Gemini</span>
+                      <span className="gemini-title">Land Assistant</span>
                       <span className="gemini-model-badge">3.5 Flash</span>
                     </div>
-                    <span className="gemini-subtitle">Google Search Grounding Enabled</span>
+                    <span className="gemini-subtitle">Gemini 3.5 Flash — Google Search grounded</span>
                   </div>
                 </div>
 
@@ -2676,8 +3155,13 @@ Format each section with clear markdown headers, bold text, bullet points, and t
                             <div className="wave-bar bar-2"></div>
                             <div className="wave-bar bar-3"></div>
                           </div>
-                          <span className="loading-text">Thinking with Google Search...</span>
+                          <span className="loading-text">
+                            {reportTimer ? 'Generating the full feasibility report...' : 'Thinking with Google Search...'}
+                          </span>
                         </div>
+                        {reportTimer && (
+                          <ReportCountdown startedAt={reportTimer.startedAt} etaMs={reportTimer.etaMs} />
+                        )}
                       </div>
                     </div>
                   )}
@@ -2711,194 +3195,24 @@ Format each section with clear markdown headers, bold text, bullet points, and t
                   </div>
                 </form>
               </div>
-
-
-              {/* Informational Guidelines Card */}
-              <div className="card info-card">
-                <h3>Statewide Data Coverage</h3>
-                <ul className="info-list">
-                  <li>
-                    <strong>Google Geocoder:</strong> Pinpoints standard latitude/longitude coordinates from text addresses.
-                  </li>
-                  <li>
-                    <strong>NC OneMap Service:</strong> Queries the official state-wide database intersecting GPS points with registered parcel boundaries.
-                  </li>
-                  <li>
-                    <strong>Charlotte Zoning:</strong> Direct API routing for Mecklenburg county queries returning exact planning classifications (e.g. UMUD, TOD, N1-C).
-                  </li>
-                  <li>
-                    <strong>Other Counties:</strong> Standard fallback instructing to verify local municipal codes.
-                  </li>
-                </ul>
-              </div>
-            </div>
-          ) : (
-            <div className="card info-card fade-in" style={{ height: 'auto', display: 'flex', flexDirection: 'column', justifyContent: 'center' }}>
-              <h3>Statewide Data Coverage</h3>
-              <p style={{ fontSize: '0.9rem', color: '#888', marginBottom: '1.5rem' }}>
-                Antigravity GIS integrates direct parcel coordinate layers and zoning APIs for standard NC counties:
-              </p>
-              <ul className="info-list" style={{ gap: '1.25rem' }}>
-                <li>
-                  <strong>Google Geocoder:</strong> Pinpoints standard latitude/longitude coordinates from text addresses.
-                </li>
-                <li>
-                  <strong>NC OneMap Service:</strong> Queries the official state-wide database intersecting GPS points with registered parcel boundaries.
-                </li>
-                <li>
-                  <strong>Charlotte Zoning:</strong> Direct API routing for Mecklenburg county queries returning exact planning classifications (e.g. UMUD, TOD, N1-C).
-                </li>
-                <li>
-                  <strong>Other Counties:</strong> Standard fallback instructing to verify local municipal codes.
-                </li>
-              </ul>
-            </div>
-          )}
-        </div>
-
-        {/* Right Column: Maps Column */}
-        <div className="dashboard-map-column">
-          {data ? (
-            <div className="card map-card fade-in" style={{ height: 'auto' }}>
-              <div className="map-header" style={{ display: 'flex', flexDirection: 'column', gap: '1rem', alignItems: 'stretch' }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '1rem' }}>
-                  <h3 className="map-title">
-                    <Layers size={18} className="geo-icon" />
-                    <span>GIS Boundary & Aerial Imagery Overlay</span>
-                  </h3>
-                  
-                  {/* Street View Orientation Switcher */}
-                  {hasStreetView && (
-                    <div className="split-toggle-group" style={{ display: 'flex', background: 'var(--bg-card-hover)', padding: '2px', borderRadius: 'var(--radius-sm)', border: '1px solid var(--bg-card-border)' }}>
-                      <button
-                        type="button"
-                        className={`layer-toggle-btn ${splitOrientation === 'side-by-side' ? 'active' : ''}`}
-                        style={{ margin: 0, padding: '0.35rem 0.75rem', fontSize: '0.75rem', borderRadius: 'calc(var(--radius-sm) - 2px)' }}
-                        onClick={() => setSplitOrientation('side-by-side')}
-                        title="Display maps side-by-side"
-                      >
-                        Side-by-Side
-                      </button>
-                      <button
-                        type="button"
-                        className={`layer-toggle-btn ${splitOrientation === 'stacked' ? 'active' : ''}`}
-                        style={{ margin: 0, padding: '0.35rem 0.75rem', fontSize: '0.75rem', borderRadius: 'calc(var(--radius-sm) - 2px)' }}
-                        onClick={() => setSplitOrientation('stacked')}
-                        title="Stack maps vertically"
-                      >
-                        Stacked View
-                      </button>
-                    </div>
-                  )}
-                </div>
-                
-                {/* GIS Layer Toggles */}
-                <div className="map-controls" style={{ alignSelf: 'flex-start' }}>
-                  <button
-                    type="button"
-                    className={`layer-toggle-btn ${showFloodplains ? 'active' : ''}`}
-                    onClick={() => setShowFloodplains(!showFloodplains)}
-                    title="Overlay FEMA Flood Zones (AE, VE, and Shaded X)"
-                  >
-                    <span className="toggle-indicator floodplain" />
-                    <span>Flood Zones (FEMA)</span>
-                  </button>
-                  <button
-                    type="button"
-                    className={`layer-toggle-btn ${showStreams ? 'active' : ''}`}
-                    onClick={() => setShowStreams(!showStreams)}
-                    title="Overlay NC OneMap Streams, Flowlines, and Hydrology"
-                  >
-                    <span className="toggle-indicator stream" />
-                    <span>Streams & Waterways</span>
-                  </button>
-                  <button
-                    type="button"
-                    className={`layer-toggle-btn ${showContours ? 'active' : ''}`}
-                    onClick={() => setShowContours(!showContours)}
-                    title="Overlay NC OneMap Smoothed Vector Elevation Contour Lines"
-                  >
-                    <span className="toggle-indicator elevation" />
-                    <span>Contour Lines (Elevation)</span>
-                  </button>
-                  {(() => {
-                    const countyGis = hasCountyZoning(data.countyName);
-                    const webZoning = data.zoningSource === 'web';
-                    const canToggle = countyGis || webZoning; // tiles for GIS, label for web
-                    const label = countyGis ? "Zoning (County GIS)" : webZoning ? "Zoning (web lookup)" : "Zoning (not published)";
-                    const title = countyGis
-                      ? `Overlay zoning districts from ${data.countyName} County's own GIS server`
-                      : webZoning
-                        ? `Zoning resolved via web search — verify against the local ordinance`
-                        : `${data.countyName} County does not publish a zoning GIS service`;
-                    return (
-                      <button
-                        type="button"
-                        className={`layer-toggle-btn ${canToggle && showZoning ? 'active' : ''} ${canToggle ? '' : 'disabled'}`}
-                        onClick={() => canToggle && setShowZoning(!showZoning)}
-                        disabled={!canToggle}
-                        title={title}
-                      >
-                        <span className="toggle-indicator zoning" />
-                        <span>{label}</span>
-                      </button>
-                    );
-                  })()}
-                  <button
-                    type="button"
-                    className={`layer-toggle-btn ${showOsmFeatures ? 'active' : ''}`}
-                    onClick={() => setShowOsmFeatures(!showOsmFeatures)}
-                    title="Overlay real building footprints, road centerlines, and water bodies from OpenStreetMap"
-                  >
-                    <span className="toggle-indicator osm" />
-                    <span>{osmLoading ? 'Loading Features…' : 'Buildings & Roads (OSM)'}</span>
-                  </button>
-                </div>
-              </div>
-
-              <div className={`map-wrapper ${hasStreetView ? `split-view ${splitOrientation}` : ''}`} style={{ height: splitOrientation === 'stacked' && hasStreetView ? '500px' : '400px', position: 'relative' }}>
-                {!hasGoogleMapsKey ? (
-                  <div className="map-offline-placeholder" onClick={() => window.dispatchEvent(new CustomEvent('open-gis-settings'))}>
-                    <Map size={36} className="offline-map-icon" />
-                    <h4>Map Viewer Offline</h4>
-                    <p>Configure your Google Maps API Key in Account Settings to initialize the interactive satellite map canvas.</p>
-                    <button type="button" className="btn btn-secondary btn-sm" style={{ marginTop: '8px' }}>
-                      Open Settings
-                    </button>
-                  </div>
-                ) : (
-                  <>
-                    <div ref={mapRef} className="gis-map-canvas" />
-                    {hasStreetView && (
-                      <div ref={streetViewRef} className="streetview-canvas" />
-                    )}
-                  </>
-                )}
-              </div>
-
-              <div className="map-legend">
-                <span className="legend-item">
-                  <span className="legend-color boundary" />
-                  <span>Parcel Boundary ({data.gisAcres.toFixed(3)} Acres / {data.grossSf.toLocaleString()} SF)</span>
-                </span>
-              </div>
-            </div>
-          ) : (
-            <div className="results-placeholder" style={{ height: '400px' }}>
-              <div className="radar-animation">
-                <div className="radar-circle circle-1"></div>
-                <div className="radar-circle circle-2"></div>
-                <div className="radar-circle circle-3"></div>
-                <MapPin size={40} className="placeholder-pin" />
-              </div>
-              <h3>Site Feasibility Dashboard</h3>
-              <p>
-                Awaiting query instructions. Type in a North Carolina address to pull spatial boundaries, state-plane coordinates, size computations, and zoning classifications.
-              </p>
-            </div>
-          )}
-        </div>
       </div>
+      <button
+        type="button"
+        className="chat-fab"
+        onClick={() => { const next = !chatOpen; setChatOpen(next); if (next) setChatUnread(false); }}
+        title={chatOpen ? 'Close the AI assistant' : 'Chat with the AI about this property'}
+        aria-label="AI assistant chat"
+      >
+        {chatOpen ? <X size={24} /> : <MessageCircle size={24} />}
+        {!chatOpen && (chatUnread || chatLoading) && <span className={chatLoading ? 'chat-fab-dot pulsing' : 'chat-fab-dot'} />}
+      </button>
+
+      {/* Saved Reports drawer */}
+      <ReportsDrawer
+        isOpen={showReports}
+        onClose={() => setShowReports(false)}
+        renderMarkdown={parseMarkdown}
+      />
     </div>
   );
 };

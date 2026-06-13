@@ -1,43 +1,85 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { FeasibilitySearch } from './components/FeasibilitySearch';
 import { AuthPortal } from './components/AuthPortal';
 import { SettingsDrawer } from './components/SettingsDrawer';
-import { Database, FileJson, Globe, Settings } from 'lucide-react';
+import { Database, FileJson, FolderOpen, Globe, Settings } from 'lucide-react';
+import { getSupabase, isSupabaseConfigured } from './services/supabaseClient';
+import { buildSessionUser, signOutEverywhere, writeSessionMirror } from './services/authService';
 
 
 function App() {
   const [activeUser, setActiveUser] = useState<any>(null);
   const [sessionLoaded, setSessionLoaded] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const lastUserIdRef = useRef<string | null>(null);
 
-  // Load session on startup and listen for settings triggers
+  // Load the session on startup. With Supabase configured this also completes
+  // the Google OAuth redirect and keeps the app in sync with auth changes
+  // (sign-in, sign-out, token refresh) across tabs.
   useEffect(() => {
-    try {
-      const stored = localStorage.getItem('gis_active_user') || sessionStorage.getItem('gis_active_user');
-      if (stored) {
-        setActiveUser(JSON.parse(stored));
+    let unsubscribe: (() => void) | undefined;
+
+    if (isSupabaseConfigured()) {
+      try {
+        const supabase = getSupabase();
+        const { data: sub } = supabase.auth.onAuthStateChange((event, session) => {
+          if (session?.user) {
+            // Supabase re-validates the session whenever the browser tab regains
+            // focus (TOKEN_REFRESHED / repeated SIGNED_IN events). Nothing about
+            // the user changed, so skip the rebuild — otherwise the whole app
+            // re-renders and in-progress form input (e.g. unsaved API keys in
+            // Settings) gets reset.
+            if ((event === 'TOKEN_REFRESHED' || event === 'SIGNED_IN') && lastUserIdRef.current === session.user.id) {
+              setSessionLoaded(true);
+              return;
+            }
+            buildSessionUser(session.user)
+              .then((u) => {
+                lastUserIdRef.current = session.user.id;
+                // Keep the same object reference when nothing changed to avoid
+                // pointless downstream re-renders.
+                setActiveUser((prev: any) => (prev && JSON.stringify(prev) === JSON.stringify(u) ? prev : u));
+              })
+              .finally(() => setSessionLoaded(true));
+          } else {
+            lastUserIdRef.current = null;
+            writeSessionMirror(null);
+            setActiveUser(null);
+            setSessionLoaded(true);
+          }
+        });
+        unsubscribe = () => sub.subscription.unsubscribe();
+        // onAuthStateChange fires INITIAL_SESSION on load, which resolves
+        // sessionLoaded above for both signed-in and signed-out states.
+      } catch (e) {
+        console.error('Supabase session bootstrap failed:', e);
+        setSessionLoaded(true);
       }
-    } catch (e) {
-      console.error("Failed to load user session:", e);
-    } finally {
-      setSessionLoaded(true);
+    } else {
+      // Local fallback mode (Supabase not configured yet).
+      try {
+        const stored = localStorage.getItem('gis_active_user') || sessionStorage.getItem('gis_active_user');
+        if (stored) {
+          setActiveUser(JSON.parse(stored));
+        }
+      } catch (e) {
+        console.error("Failed to load user session:", e);
+      } finally {
+        setSessionLoaded(true);
+      }
     }
 
     const handleOpenSettings = () => setIsSettingsOpen(true);
     window.addEventListener('open-gis-settings', handleOpenSettings);
     return () => {
       window.removeEventListener('open-gis-settings', handleOpenSettings);
+      unsubscribe?.();
     };
   }, []);
 
 
-  const handleLogout = () => {
-    try {
-      localStorage.removeItem('gis_active_user');
-      sessionStorage.removeItem('gis_active_user');
-    } catch (e) {
-      console.error("Failed to clear session:", e);
-    }
+  const handleLogout = async () => {
+    await signOutEverywhere();
     setActiveUser(null);
     setIsSettingsOpen(false);
   };
@@ -87,9 +129,19 @@ function App() {
             </span>
           </div>
 
-          <button 
-            type="button" 
-            onClick={() => setIsSettingsOpen(true)} 
+          <button
+            type="button"
+            onClick={() => window.dispatchEvent(new CustomEvent('open-gis-reports'))}
+            className="header-settings-btn"
+            title="My saved feasibility reports"
+          >
+            <FolderOpen size={18} />
+            <span style={{ fontSize: '0.8rem', fontWeight: 600 }}>Reports</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setIsSettingsOpen(true)}
             className={`header-settings-btn ${!keysConfigured ? 'keys-alert' : ''}`}
             title="Account & API Settings"
           >

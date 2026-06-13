@@ -2933,5 +2933,267 @@ code {
   color: var(--text-muted);
 }
 
+/* ==========================================================================
+   Floating AI assistant bubble + panel
+   ========================================================================== */
+
+.chat-fab {
+  position: fixed;
+  bottom: 22px;
+  right: 22px;
+  z-index: 9000;
+  width: 58px;
+  height: 58px;
+  border-radius: 50%;
+  border: none;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  background: linear-gradient(135deg, #1a73e8 0%, #a530f2 55%, #f43f5e 110%);
+  box-shadow: 0 8px 24px rgba(79, 70, 229, 0.38), 0 2px 6px rgba(0, 0, 0, 0.18);
+  transition: transform 0.18s ease, box-shadow 0.18s ease;
+}
+
+.chat-fab:hover {
+  transform: scale(1.07);
+  box-shadow: 0 12px 30px rgba(79, 70, 229, 0.45), 0 3px 8px rgba(0, 0, 0, 0.2);
+}
+
+.chat-fab:active {
+  transform: scale(0.96);
+}
+
+.chat-fab-dot {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  background: #f43f5e;
+  border: 2px solid #fff;
+}
+
+.chat-fab-dot.pulsing {
+  animation: chatFabPulse 1.2s ease-in-out infinite;
+}
+
+@keyframes chatFabPulse {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(1.35); opacity: 0.55; }
+}
+
+.chat-fab-panel {
+  position: fixed;
+  bottom: 94px;
+  right: 22px;
+  z-index: 8999;
+  width: min(420px, calc(100vw - 32px));
+  height: min(640px, calc(100dvh - 130px));
+  display: none;
+  flex-direction: column;
+  border-radius: 18px;
+  overflow: hidden;
+  background: var(--bg-card, #fff);
+  border: 1px solid var(--bg-card-border, #e2e8f0);
+  box-shadow: 0 24px 60px rgba(15, 23, 42, 0.28), 0 4px 12px rgba(15, 23, 42, 0.12);
+}
+
+.chat-fab-panel.open {
+  display: flex;
+  animation: chatPanelIn 0.22s ease;
+}
+
+@keyframes chatPanelIn {
+  from { opacity: 0; transform: translateY(14px) scale(0.98); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+/* Make the embedded chat card fill the panel */
+.chat-fab-panel .gemini-chat-container {
+  height: 100%;
+  margin: 0;
+  border: none;
+  border-radius: 0;
+  display: flex;
+  flex-direction: column;
+  box-shadow: none;
+}
+
+.chat-fab-panel .gemini-chat-header {
+  flex-shrink: 0;
+}
+
+.chat-fab-panel .chat-messages-container {
+  flex: 1;
+  overflow-y: auto;
+  max-height: none;
+  -webkit-overflow-scrolling: touch;
+}
+
+.chat-fab-panel .gemini-input-form {
+  flex-shrink: 0;
+}
+
+/* Inline AI report card */
+.report-inline-body {
+  max-height: 70vh;
+  overflow-y: auto;
+  padding-right: 6px;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* Markdown tables (report + chat) scroll horizontally instead of overflowing */
+.model-text table,
+.report-inline-body table {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+  white-space: nowrap;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* ==========================================================================
+   Mobile / tablet optimization
+   ========================================================================== */
+
+@media (max-width: 768px) {
+  /* Full-width bottom-sheet style chat panel on phones */
+  .chat-fab-panel {
+    right: 8px;
+    left: 8px;
+    bottom: 86px;
+    width: auto;
+    height: min(72dvh, 600px);
+    border-radius: 16px;
+  }
+
+  .chat-fab {
+    bottom: 16px;
+    right: 16px;
+    width: 54px;
+    height: 54px;
+  }
+
+  /* Comfortable touch targets */
+  .btn-quick-action,
+  .history-tag,
+  .layer-toggle-btn,
+  .county-select,
+  .gemini-send-btn,
+  .drawer-close-btn {
+    min-height: 42px;
+  }
+
+  .registry-quick-actions {
+    flex-wrap: wrap;
+  }
+
+  .registry-quick-actions .btn-quick-action {
+    flex: 1 1 calc(50% - 6px);
+    justify-content: center;
+  }
+
+  /* Stack the search form vertically */
+  .search-form-row {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 10px;
+  }
+
+  .search-form-row .select-wrapper,
+  .search-form-row .county-select,
+  .search-form-row button.btn-primary {
+    width: 100%;
+  }
+
+  .search-form-row button.btn-primary {
+    min-height: 48px;
+  }
+
+  /* Prevent iOS zoom-on-focus (inputs must be >= 16px) */
+  input[type="text"],
+  input[type="email"],
+  input[type="password"],
+  select,
+  .gemini-prompt-input {
+    font-size: 16px !important;
+  }
+
+  /* Tighter cards and headers */
+  .card {
+    padding: 1rem;
+  }
+
+  .search-card h2 {
+    font-size: 1.15rem;
+  }
+
+  .registry-title-name {
+    font-size: 1.25rem;
+    word-break: break-word;
+  }
+
+  .app-header {
+    padding: 0.6rem 0.9rem;
+    gap: 8px;
+  }
+
+  .header-status {
+    display: none; /* status text is too long for phones; the dot lives on Settings */
+  }
+
+  .logo-subtitle {
+    display: none;
+  }
+
+  .drawer-container {
+    width: 100vw !important;
+    max-width: 100vw !important;
+  }
+
+  /* Long values (addresses, legal descriptions) wrap instead of overflowing */
+  .field-value,
+  .registry-row span,
+  .address-text-break {
+    word-break: break-word;
+  }
+
+  .recent-searches .history-tags {
+    overflow-x: auto;
+    flex-wrap: nowrap;
+    padding-bottom: 4px;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .history-tag {
+    flex-shrink: 0;
+  }
+}
+
+@media (max-width: 480px) {
+  .main-content {
+    padding: 0.6rem;
+  }
+
+  .dashboard-content-grid {
+    gap: 0.9rem;
+  }
+
+  .chat-fab-panel {
+    height: min(78dvh, 620px);
+  }
+}
+
+/* Respect the device safe area (iPhone notch / home indicator) */
+@supports (padding: max(0px)) {
+  .chat-fab {
+    bottom: max(16px, env(safe-area-inset-bottom, 0px) + 10px);
+    right: max(16px, env(safe-area-inset-right, 0px) + 6px);
+  }
+}
+
 
 

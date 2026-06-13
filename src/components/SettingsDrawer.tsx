@@ -1,5 +1,7 @@
 import { useState, useEffect } from 'react';
-import { X, Key, User, ShieldAlert, LogOut, CheckCircle, Eye, EyeOff, Info } from 'lucide-react';
+import { X, Key, User, ShieldAlert, LogOut, CheckCircle, Eye, EyeOff, Info, Cloud } from 'lucide-react';
+import { persistUserKeys } from '../services/authService';
+import { isSupabaseConfigured } from '../services/supabaseClient';
 
 interface SettingsDrawerProps {
   activeUser: any;
@@ -13,23 +15,33 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
   const [googleMapsKey, setGoogleMapsKey] = useState('');
   const [geminiKey, setGeminiKey] = useState('');
   const [openTopographyKey, setOpenTopographyKey] = useState('');
+  const [realtyApiKey, setRealtyApiKey] = useState('');
+  const [showRealtyKey, setShowRealtyKey] = useState(false);
   const [showGoogleKey, setShowGoogleKey] = useState(false);
   const [showGeminiKey, setShowGeminiKey] = useState(false);
   const [showTopographyKey, setShowTopographyKey] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState(false);
   const [validationError, setValidationError] = useState<string | null>(null);
 
+  // Initialize the form ONLY when the drawer opens — not on every activeUser
+  // re-render. Supabase refreshes the session when you switch browser tabs,
+  // which produces a new activeUser object; re-initializing on that change
+  // would wipe any keys typed but not yet saved.
   useEffect(() => {
-    if (activeUser && activeUser.keys) {
-      setGoogleMapsKey(activeUser.keys.googleMaps || '');
-      setGeminiKey(activeUser.keys.gemini || '');
-      setOpenTopographyKey(activeUser.keys.openTopography || '');
+    if (isOpen && activeUser) {
+      setGoogleMapsKey(activeUser.keys?.googleMaps || '');
+      setGeminiKey(activeUser.keys?.gemini || '');
+      setOpenTopographyKey(activeUser.keys?.openTopography || '');
+      setRealtyApiKey(activeUser.keys?.realtyApi || '');
+      setValidationError(null);
+      setSaveSuccess(false);
     }
-  }, [activeUser, isOpen]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen]);
 
   if (!isOpen) return null;
 
-  const handleSave = () => {
+  const handleSave = async () => {
     setValidationError(null);
     setSaveSuccess(false);
 
@@ -43,40 +55,29 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
       return;
     }
 
-    // Save user keys in database
-    const usersStr = localStorage.getItem('gis_registered_users') || '[]';
-    const users = JSON.parse(usersStr);
-    
-    const userIndex = users.findIndex((u: any) => u.email.toLowerCase() === activeUser.email.toLowerCase());
-    
     const updatedKeys = {
       googleMaps: googleMapsKey.trim(),
       gemini: geminiKey.trim(),
-      openTopography: openTopographyKey.trim()
+      openTopography: openTopographyKey.trim(),
+      realtyApi: realtyApiKey.trim()
     };
 
-    if (userIndex !== -1) {
-      users[userIndex].keys = updatedKeys;
-      localStorage.setItem('gis_registered_users', JSON.stringify(users));
-    }
+    try {
+      // Persists to the Supabase profile when signed in with a cloud account
+      // (syncs across devices), or to the local store otherwise. Also updates
+      // the running session so the app picks the keys up immediately.
+      const updatedSession = await persistUserKeys(activeUser, updatedKeys);
+      onUpdateUser(updatedSession);
+      setSaveSuccess(true);
 
-    // Update active session
-    const isRemembered = localStorage.getItem('gis_active_user') !== null;
-    const updatedSession = { ...activeUser, keys: updatedKeys };
-    
-    if (isRemembered) {
-      localStorage.setItem('gis_active_user', JSON.stringify(updatedSession));
-    } else {
-      sessionStorage.setItem('gis_active_user', JSON.stringify(updatedSession));
+      // Reload to initialize the Google Maps SDK with the new key
+      setTimeout(() => {
+        window.location.reload();
+      }, 1500);
+    } catch (e: any) {
+      console.error(e);
+      setValidationError(e?.message || 'Failed to save your settings.');
     }
-
-    onUpdateUser(updatedSession);
-    setSaveSuccess(true);
-    
-    // Automatically trigger page reload to initialize the Google Maps SDK with the new key
-    setTimeout(() => {
-      window.location.reload();
-    }, 1500);
   };
 
   return (
@@ -105,6 +106,12 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
               <span className="profile-badge">
                 {activeUser.provider === 'google' ? 'Google Account' : 'Standard Account'}
               </span>
+              {isSupabaseConfigured() && activeUser.userId && (
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', fontSize: '0.68rem', color: '#16a34a', fontWeight: 600, marginLeft: '8px' }}>
+                  <Cloud size={12} />
+                  <span>Cloud synced</span>
+                </span>
+              )}
             </div>
           </div>
 
@@ -112,7 +119,7 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
           <div className="settings-notice">
             <Info size={16} className="notice-icon" />
             <p>
-              Your API keys are stored entirely inside your browser's local sandbox. They are never sent to external servers except direct connections to Google and Gemini APIs.
+              Your API keys are stored entirely inside your browser's local sandbox. They are never sent to external servers except direct connections to the Google, Gemini, and RealtyAPI APIs.
             </p>
           </div>
 
@@ -212,6 +219,33 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
               </div>
               <p className="field-help">Enables customized, deep topographic elevation runs.</p>
             </div>
+
+            {/* RealtyAPI Key (Realtor + Redfin + Zillow sold records) */}
+            <div className="settings-field-group">
+              <div className="field-label-row">
+                <label htmlFor="realtyApiKey">RealtyAPI Key (Realtor + Redfin + Zillow sold records)</label>
+                <span className="badge required">Recommended</span>
+              </div>
+              <div className="field-input-container">
+                <Key className="input-icon" size={16} />
+                <input
+                  id="realtyApiKey"
+                  type={showRealtyKey ? "text" : "password"}
+                  placeholder="rt_..."
+                  value={realtyApiKey}
+                  onChange={(e) => setRealtyApiKey(e.target.value)}
+                />
+                <button
+                  type="button"
+                  className="field-toggle-btn"
+                  onClick={() => setShowRealtyKey(!showRealtyKey)}
+                >
+                  {showRealtyKey ? <EyeOff size={16} /> : <Eye size={16} />}
+                </button>
+              </div>
+              <p className="field-help">Scans Realtor, Redfin, and Zillow closed-sale records by coordinate radius (realtyapi.io) for new-construction sold comps — merged with the Google comp search.</p>
+            </div>
+
           </div>
         </div>
 
