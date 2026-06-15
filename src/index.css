@@ -3261,3 +3261,42 @@ img, svg, video, canvas, table, pre { max-width: 100%; }
   .layer-toggle-btn,
   .registry-tab { padding: 0.55rem 0.9rem; }
 }
+
+/* ==========================================================================
+   Visual polish — softer shadows, cleaner buttons, accessible focus, and
+   more readable AI-report typography (links, lists, emphasis).
+   ========================================================================== */
+:root {
+  --shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.04), 0 6px 16px rgba(15, 23, 42, 0.05);
+  --shadow-md: 0 6px 14px rgba(15, 23, 42, 0.07), 0 16px 32px rgba(15, 23, 42, 0.09);
+}
+
+.card, .registry-card, .registry-header-card {
+  transition: box-shadow .25s ease, border-color .25s ease, transform .2s ease;
+}
+
+/* Consistent, accessible focus for keyboard + tap users. */
+.btn:focus-visible,
+.btn-quick-action:focus-visible,
+.layer-toggle-btn:focus-visible,
+.county-select:focus-visible,
+.input-group input:focus-visible,
+.gemini-prompt-input:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+
+.btn-primary { letter-spacing: .01em; }
+
+/* AI report readability: clear links, emphasis, and list rhythm. */
+.report-inline-body a, .model-text a {
+  color: var(--primary);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  font-weight: 600;
+}
+.report-inline-body a:hover, .model-text a:hover { color: var(--primary-hover); }
+.report-inline-body strong, .model-text strong { color: var(--text-primary); font-weight: 700; }
+.report-inline-body li, .model-text li { line-height: 1.6; margin: .25rem 0; color: var(--text-secondary); }
+.report-inline-body ul, .report-inline-body ol,
+.model-text ul, .model-text ol { margin: .4rem 0 .9rem 0; }

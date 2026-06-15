@@ -379,8 +379,8 @@ export const parseMarkdown = (text: string) => {
       nodes.push(
         <p key={`p-${nodes.length}`} style={{ 
           margin: '0.4rem 0 0.6rem 0', 
-          lineHeight: '1.625', 
-          fontSize: '0.85rem', 
+          lineHeight: '1.72', 
+          fontSize: '0.9rem', 
           color: 'var(--text-primary)' 
         }}>
           {parseInlineMarkdown(textContent)}
@@ -462,22 +462,22 @@ export const parseMarkdown = (text: string) => {
         const level = match[1].length;
         const content = match[2];
         const headingContent = parseInlineMarkdown(content);
-        const style = {
+        const style: React.CSSProperties = {
           color: 'var(--text-primary)',
-          fontWeight: '700',
+          fontWeight: 700,
           fontFamily: 'var(--font-heading)',
-          letterSpacing: '-0.015em',
-          margin: level === 1 ? '1.2rem 0 0.6rem 0' : level === 2 ? '1rem 0 0.5rem 0' : '0.8rem 0 0.4rem 0'
+          letterSpacing: '-0.02em',
+          margin: level === 1 ? '1.6rem 0 0.8rem 0' : level === 2 ? '1.25rem 0 0.5rem 0' : '1rem 0 0.35rem 0'
         };
         switch (level) {
           case 1:
-            nodes.push(<h1 key={`h1-${nodes.length}`} style={{ ...style, fontSize: '1.15rem' }}>{headingContent}</h1>);
+            nodes.push(<h1 key={`h1-${nodes.length}`} style={{ ...style, fontSize: '1.4rem', lineHeight: 1.25, paddingBottom: '0.4rem', borderBottom: '2px solid var(--bg-card-border)' }}>{headingContent}</h1>);
             break;
           case 2:
-            nodes.push(<h2 key={`h2-${nodes.length}`} style={{ ...style, fontSize: '1.05rem' }}>{headingContent}</h2>);
+            nodes.push(<h2 key={`h2-${nodes.length}`} style={{ ...style, fontSize: '1.15rem', lineHeight: 1.3 }}>{headingContent}</h2>);
             break;
           default:
-            nodes.push(<h3 key={`h3-${nodes.length}`} style={{ ...style, fontSize: '0.92rem' }}>{headingContent}</h3>);
+            nodes.push(<h3 key={`h3-${nodes.length}`} style={{ ...style, fontSize: '1rem', color: 'var(--text-secondary)' }}>{headingContent}</h3>);
             break;
         }
         continue;
