@@ -673,41 +673,52 @@ export const FeasibilitySearch: FC = () => {
           ).join('\n')
         : 'No verified comps available.';
 
-      const initialPrompt = `Perform a google search query specifically for the property address and its zip code: "${reportData.inputAddress}". Do NOT search the entire city; focus your search query specifically on the exact property address to retrieve highly precise information.
-You MUST look at multiple listing links (such as Zillow, Redfin, Realtor.com, and local county GIS/tax records) to gather information.
-Extract the following details about the property:
-- Lot size (reconciled across sources in acres/SF)
-- Zoning classification and permitted use
-- Topography (wooded, cleared, slope profile)
-- Utilities (water, sewer, septic, well status)
-- Existing structure details (year built, structure status, teardown/rehab strategy)
-- Access road condition
-- General property condition
+      const initialPrompt = `Produce the AI Land Feasibility Report for "${reportData.inputAddress}" following your Operating Standards exactly. Lead every section with its conclusion, label evidence Verified / Likely / Unknown, and do not finish until all 20 sections are completed or explicitly marked "Unknown — unverifiable due to lack of available evidence."
 
-Reconcile any data differences across the sources. Cite at least 3 distinct listing links you consulted using standard Markdown links (e.g. [Zillow](url), [Redfin](url), [Realtor](url)).
+INVESTIGATE with live Google Search (focused on this exact address + ZIP, not the whole city) and cite sources for anything not in the data packet:
+- Parcel ID, jurisdiction, legal description, and lot size (reconciled in acres/SF)
+- Zoning + permitted uses, and the future land use / comprehensive-plan designation
+- FEMA flood zone / floodplain status
+- Wetlands & environmental constraints (NWI, streams, protected areas)
+- Utilities (public water, sewer vs. septic, well, electric, gas)
+- Road access, frontage, and road condition
+- Topography (wooded/cleared) to corroborate the provided USGS slope data
+- Assigned schools/ratings and neighborhood/location context
+- Market trends and, for land valuation, comparable VACANT-LAND sales
+Reconcile differences across sources and cite at least 3 distinct Markdown links.
 
-Compile this into a highly detailed, comprehensive land feasibility report for ${reportData.inputAddress}. Do NOT just summarize the data. The report must be thorough and precise, written for real estate developers and investors evaluating the site. Focus on development potential (buildability, zoning guidelines, building density, and construction-cost considerations). This is a FEASIBILITY analysis ONLY — do NOT include any wholesaling, assignment-fee, "maximum allowable offer" (MAO), seller-offer-strategy, spread/profit, or exit-strategy content anywhere in the report.
-
-For comparable properties (comps), you MUST use and analyze exactly the following verified comparable properties (comps) that have already been calculated and verified for this parcel. Do NOT search for or list any other comps:
-
+COMPARABLES — use ONLY these verified, already-filtered SOLD comps (closed within 12 months, new construction, zoning-matched, within 5 driving miles). Do NOT search for or substitute any other comps, and never cite a price other than those below:
 ${compsList}
 
-Use exactly these comps to populate the "New Construction Sold Comps Table" in Section 2 — include EVERY comp listed above in the table (do not truncate or sample the list), and show each comp's property TYPE. Derive the market-value indication (median, range, $/sqft, and type mix) from these comps only. Do NOT search for or suggest any different comps, and NEVER cite a sale price other than the exact prices provided above.
+In Section 14 (New Construction Comparable Sales Analysis) present EVERY comp above in a table with: address, sale price, sale date, year built, living-area sqft, lot size (or "Unknown"), distance from subject, and price/sqft — plus one line on why each qualifies. Then derive the median, range, and median $/sqft.
 
-You MUST include markdown tables and/or ASCII charts (e.g. tables for financial spread analysis, developer cost breakdown, setbacks, and development capacity) to make the report highly actionable and visual.
+REQUIRED 20-SECTION STRUCTURE — use these exact numbered headings:
+# 1. Executive Summary
+# 2. Property Overview
+# 3. Parcel Verification
+# 4. Zoning Analysis
+# 5. Future Land Use Analysis
+# 6. Buildability Assessment
+# 7. Topography and Slope Analysis
+# 8. Floodplain Analysis
+# 9. Wetlands and Environmental Constraints
+# 10. Utilities Analysis
+# 11. Road Access and Frontage
+# 12. School and Location Analysis
+# 13. Market Analysis
+# 14. New Construction Comparable Sales Analysis
+# 15. Development Cost Considerations
+# 16. Highest and Best Use
+# 17. Land Valuation
+# 18. Builder/Developer Profitability Analysis
+# 19. Risk Assessment
+# 20. Final Investment Recommendation
 
-STRICT OUTPUT EXCLUSIONS: Do NOT include any "Map & Infrastructure Layer Assets" section, JSON payloads/schemas, raw code blocks, or map-layer asset arrays anywhere. Do NOT mention or announce any "Interactive Assistant Mode", chatbot mode, or session memory anywhere in the report.
+Land Valuation (Section 17) must derive value from comparable land sales, builder lot demand, new-construction economics, market absorption, and highest-and-best-use — not solely county tax values or automated estimates. The Final Investment Recommendation (Section 20) must state whether the property appears buildable, the most likely development strategy, the primary risks, the strongest value drivers, and an overall Feasibility Rating (Excellent / Good / Moderate / Challenging / Poor).
 
-Your report must strictly follow this 7-section structure. Do NOT add any wholesaling, seller-offer, assignment-fee, MAO, spread/profit, or exit-strategy sections:
-# 1. 🧾 Property Overview (Core Data)
-# 2. 🌎 Market Context (including New Construction Sold Comps Table — list each comp's property type)
-# 3. 🧱 Site Development Reality & Construction Cost Estimates (Detailed Table)
-# 4. 📊 Highest & Best Use & Development Capacity
-# 5. 💰 Comparable Sales & Market Value Indication (median, range, and $/sqft from the provided comps, plus the comp type mix — this is a market-value indication only, NOT an offer, MAO, assignment fee, or spread)
-# 6. ⚠️ Risk Factors & Mitigation
-# 7. 🧠 Final Feasibility Summary & Verdict
+The report must ultimately answer: What is the property worth today? What would a builder likely pay? What can realistically be built? What are the primary risks? What approvals and infrastructure improvements may be required? Is the opportunity attractive enough to pursue?
 
-Format each section with clear markdown headers, bold text, bullet points, and tables. Ensure the data is customized for this address based on its GIS attributes (Lot size: ${reportData.gisAcres.toFixed(2)} acres, Zoning: ${reportData.zoningCode}, Owners: ${reportData.ownerName || 'N/A'}). Do not include conversational intro/outro filler.`;
+Format with clear markdown headers, bold key findings, and tables. Subject GIS data: lot size ${reportData.gisAcres.toFixed(2)} acres, zoning ${reportData.zoningCode}, owner ${reportData.ownerName || 'N/A'}. No conversational intro/outro filler, no JSON/code blocks, and no wholesaling/assignment/MAO/spread/exit-strategy content anywhere.`;
 
       const response = await chatWithGemini([{ role: 'user', content: initialPrompt }], reportData);
       recordReportDuration(Date.now() - reportStart); // refine future countdown estimates
