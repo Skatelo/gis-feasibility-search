@@ -1236,7 +1236,7 @@ Format each section with clear markdown headers, bold text, bullet points, and t
         zoom: 18,
         mapTypeId: 'hybrid', // Satellite view with road labels
         tilt: 0,            // Top-down view
-        maxZoom: 19,        // Cap at 19 to prevent blackouts/missing tiles in rural counties
+        maxZoom: 20,        // fallback cap; the adaptive MaxZoomService below lifts this to the sharpest tiles available at the location
         minZoom: 10,
         mapTypeControl: true,
         streetViewControl: false,
@@ -1246,6 +1246,18 @@ Format each section with clear markdown headers, bold text, bullet points, and t
       googleMapInstanceRef.current.setCenter(center);
       googleMapInstanceRef.current.setZoom(18);
     }
+
+    // High-res aerial: query the SHARPEST satellite zoom Google actually has at
+    // this exact location (varies, often 20-23 in developed areas) and lift the
+    // cap to it, so the imagery stays crisp without graying out where tiles end.
+    try {
+      new google.maps.MaxZoomService().getMaxZoomAtLatLng(center, (res: any) => {
+        const map = googleMapInstanceRef.current;
+        if (map && res && res.status === 'OK' && typeof res.zoom === 'number') {
+          map.setOptions({ maxZoom: res.zoom });
+        }
+      });
+    } catch { /* MaxZoomService unavailable — keep the static cap */ }
 
     // 2. Remove old parcel boundary, popup window, and line dimension labels if present
     if (polygonInstanceRef.current) {
