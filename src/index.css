@@ -3197,3 +3197,67 @@ code {
 
 
 
+
+/* ==========================================================================
+   Mobile responsiveness & overflow safety (added for phone layout)
+   Keeps the AI report + comp tables inside the viewport so the page never
+   scales "out of proportion" on mobile when the report renders.
+   ========================================================================== */
+
+/* Nothing wide (tables, images, code) may exceed its container. */
+img, svg, video, canvas, table, pre { max-width: 100%; }
+
+/* Report / chat markdown bodies: allow shrinking, wrap long words/URLs, and
+   let tables scroll inside their own box instead of stretching the page. */
+.model-text,
+.report-inline-body,
+.user-bubble {
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+.model-text pre { overflow-x: auto; }
+
+/* Flex children that hold the report MUST be allowed to shrink — without
+   min-width:0 a wide comps table forces the whole layout wider than the screen. */
+.chat-message,
+.borderless-chat-body,
+.gemini-chat-container,
+.report-card,
+.report-inline-body { min-width: 0; }
+.chat-message { max-width: 100%; }
+
+@media (max-width: 768px) {
+  /* Tighter, full-width cards on phones. */
+  .card,
+  .registry-card,
+  .registry-header-card,
+  .report-card,
+  .chatbot-card { padding: 1.1rem; }
+
+  /* Chat sizes to the screen instead of a fixed 550px. */
+  .gemini-chat-container { height: auto; max-height: 78vh; }
+  .borderless-chat-body { max-height: 60vh; }
+
+  /* Calmer headings/values so they don't dominate small screens. */
+  h1 { font-size: 1.9rem; }
+  .registry-card-header { font-size: 1.05rem; }
+  .registry-title-name { font-size: 1.25rem; }
+  .stat-value { font-size: 1.6rem; }
+  .zoning-badge { font-size: 1.8rem; }
+  .result-address { font-size: 1.25rem; }
+
+  /* Report tables: smaller text + horizontal scroll within the card. */
+  .model-text table,
+  .report-inline-body table { font-size: 0.72rem; }
+  .model-text td,
+  .model-text th,
+  .report-inline-body td,
+  .report-inline-body th { padding: 6px 8px !important; }
+
+  /* Comfortable tap targets. */
+  .btn-quick-action,
+  .layer-toggle-btn,
+  .registry-tab { padding: 0.55rem 0.9rem; }
+}
