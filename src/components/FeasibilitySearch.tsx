@@ -720,10 +720,14 @@ The report must ultimately answer: What is the property worth today? What would 
 
 Format with clear markdown headers, bold key findings, and tables. Subject GIS data: lot size ${reportData.gisAcres.toFixed(2)} acres, zoning ${reportData.zoningCode}, owner ${reportData.ownerName || 'N/A'}. No conversational intro/outro filler, no JSON/code blocks, and no wholesaling/assignment/MAO/spread/exit-strategy content anywhere.`;
 
-      const response = await chatWithGemini([{ role: 'user', content: initialPrompt }], reportData);
+      let streamed = '';
+      const response = await chatWithGemini([{ role: 'user', content: initialPrompt }], reportData, (chunk) => {
+        streamed += chunk;
+        setChatHistory([{ role: 'model', content: streamed }]); // stream tokens into the report as they arrive
+      });
       recordReportDuration(Date.now() - reportStart); // refine future countdown estimates
       const messages: ChatMessage[] = [
-        { role: 'model', content: response.text, sources: response.sources }
+        { role: 'model', content: response.text || streamed, sources: response.sources }
       ];
       // Follow the report with the verified comp-run summary (criteria,
       // per-comp detail, Bottom Line) as its own conversational message.
@@ -765,10 +769,14 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
     setChatLoading(true);
 
     try {
-      const response = await chatWithGemini(updatedHistory, data);
+      let streamed = '';
+      const response = await chatWithGemini(updatedHistory, data, (chunk) => {
+        streamed += chunk;
+        setChatHistory([...updatedHistory, { role: 'model', content: streamed }]);
+      });
       setChatHistory([
         ...updatedHistory,
-        { role: 'model', content: response.text, sources: response.sources }
+        { role: 'model', content: response.text || streamed, sources: response.sources }
       ]);
     } catch (err: any) {
       console.error(err);

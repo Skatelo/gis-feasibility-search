@@ -17,6 +17,8 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
   const [openTopographyKey, setOpenTopographyKey] = useState('');
   const [realtyApiKey, setRealtyApiKey] = useState('');
   const [showRealtyKey, setShowRealtyKey] = useState(false);
+  const [deepSeekKey, setDeepSeekKey] = useState('');
+  const [showDeepSeekKey, setShowDeepSeekKey] = useState(false);
   const [showGoogleKey, setShowGoogleKey] = useState(false);
   const [showGeminiKey, setShowGeminiKey] = useState(false);
   const [showTopographyKey, setShowTopographyKey] = useState(false);
@@ -33,6 +35,7 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
       setGeminiKey(activeUser.keys?.gemini || '');
       setOpenTopographyKey(activeUser.keys?.openTopography || '');
       setRealtyApiKey(activeUser.keys?.realtyApi || '');
+      setDeepSeekKey(activeUser.keys?.deepSeek || '');
       setValidationError(null);
       setSaveSuccess(false);
     }
@@ -59,7 +62,8 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
       googleMaps: googleMapsKey.trim(),
       gemini: geminiKey.trim(),
       openTopography: openTopographyKey.trim(),
-      realtyApi: realtyApiKey.trim()
+      realtyApi: realtyApiKey.trim(),
+      deepSeek: deepSeekKey.trim()
     };
 
     try {
@@ -244,6 +248,32 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
                 </button>
               </div>
               <p className="field-help">Scans Realtor, Redfin, and Zillow closed-sale records by coordinate radius (realtyapi.io) for new-construction sold comps — merged with the Google comp search.</p>
+            </div>
+
+            {/* DeepSeek API Key (powers the Gemini + DeepSeek fusion report) */}
+            <div className="settings-field-group">
+              <div className="field-label-row">
+                <label htmlFor="deepSeekKey">DeepSeek API Key (fusion report)</label>
+                <span className="badge optional">Optional</span>
+              </div>
+              <div className="field-input-container">
+                <Key className="input-icon" size={16} />
+                <input
+                  id="deepSeekKey"
+                  type={showDeepSeekKey ? "text" : "password"}
+                  placeholder="sk-..."
+                  value={deepSeekKey}
+                  onChange={(e) => setDeepSeekKey(e.target.value)}
+                />
+                <button
+                  type="button"
+                  className="field-toggle-btn"
+                  onClick={() => setShowDeepSeekKey(!showDeepSeekKey)}
+                >
+                  {showDeepSeekKey ? <EyeOff size={16} /> : <Eye size={16} />}
+                </button>
+              </div>
+              <p className="field-help">When set, the AI report runs a fusion: Gemini 3.5 Flash and DeepSeek V4 Pro draft in parallel, then Gemini judges and streams the final report. Leave blank to use Gemini only. Get a key at platform.deepseek.com.</p>
             </div>
 
           </div>

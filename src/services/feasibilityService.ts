@@ -7,6 +7,7 @@ export interface UserKeys {
   gemini?: string;
   openTopography?: string;
   realtyApi?: string;
+  deepSeek?: string;
 }
 
 export function getUserKeys(): UserKeys {
@@ -1555,6 +1556,10 @@ function getRealtyApiKey(): string {
   return getUserKeys().realtyApi || (import.meta.env.VITE_REALTYAPI_KEY as string | undefined) || "";
 }
 
+function getDeepSeekKey(): string {
+  return getUserKeys().deepSeek || (import.meta.env.VITE_DEEPSEEK_API_KEY as string | undefined) || "";
+}
+
 // Per-platform property-type vocabularies (exact tokens from each platform's
 // OpenAPI spec). Land / lots are deliberately excluded — comps are completed
 // HOMES only, never vacant land. Zillow's homeType tokens aren't documented, so
@@ -2536,9 +2541,102 @@ export interface ChatMessage {
   sources?: ChatSource[];
 }
 
+// ---------------------------------------------------------------------------
+// Fusion engine (mixture-of-agents): Gemini 3.5 Flash and DeepSeek V4 Pro
+// answer the SAME prompt in PARALLEL, then Gemini 3.5 Flash acts as JUDGE and
+// STREAMS the synthesized final answer. Falls back to single-model Gemini
+// streaming when no DeepSeek key is configured or DeepSeek is unavailable.
+// ---------------------------------------------------------------------------
+
+/** Non-streaming Gemini call — used for the parallel draft. Returns text only. */
+async function geminiGenerateText(url: string, body: any): Promise<string> {
+  const res = await fetchWithTimeout(url, 90000, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(`Gemini API error: ${res.status}`);
+  const data = await res.json();
+  return data.candidates?.[0]?.content?.parts?.map((p: any) => p.text || '').join('') || '';
+}
+
+/** Streams a Gemini SSE response, invoking onToken per chunk; returns full text + sources. */
+async function streamGeminiSSE(url: string, body: any, onToken?: (chunk: string) => void): Promise<{ text: string; sources?: ChatSource[] }> {
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok || !res.body) {
+    const detail = res.ok ? 'no response body' : `${res.status} - ${await res.text()}`;
+    throw new Error(`Gemini API error: ${detail}`);
+  }
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let text = '';
+  const seen = new Set<string>();
+  const sources: ChatSource[] = [];
+  const handle = (obj: any) => {
+    const t = obj?.candidates?.[0]?.content?.parts?.map((x: any) => x.text || '').join('') || '';
+    if (t) { text += t; onToken?.(t); }
+    const chunks = obj?.candidates?.[0]?.groundingMetadata?.groundingChunks;
+    if (Array.isArray(chunks)) {
+      for (const c of chunks) {
+        const uri = c?.web?.uri;
+        if (uri && !seen.has(uri)) { seen.add(uri); sources.push({ title: c.web.title || uri, uri }); }
+      }
+    }
+  };
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let nl: number;
+    while ((nl = buffer.indexOf('\n')) >= 0) {
+      const line = buffer.slice(0, nl).trim();
+      buffer = buffer.slice(nl + 1);
+      if (!line.startsWith('data:')) continue;
+      const payload = line.slice(5).trim();
+      if (!payload || payload === '[DONE]') continue;
+      try { handle(JSON.parse(payload)); } catch { /* JSON split across chunks — ignore */ }
+    }
+  }
+  return { text: text || 'No response generated.', sources: sources.length ? sources : undefined };
+}
+
+/** DeepSeek V4 Pro draft (OpenAI-compatible). null on missing key / error / timeout. */
+async function fetchDeepSeekDraft(systemContent: string, userContent: string, key: string): Promise<string | null> {
+  if (!key) return null;
+  try {
+    const res = await fetchWithTimeout('https://api.deepseek.com/chat/completions', 75000, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${key}` },
+      body: JSON.stringify({
+        model: 'deepseek-v4-pro',
+        messages: [
+          { role: 'system', content: systemContent },
+          { role: 'user', content: userContent },
+        ],
+        thinking: { type: 'disabled' }, // fast draft; the Gemini judge supplies the synthesis/reasoning
+        stream: false,
+        temperature: 0.4,
+        max_tokens: 16384,
+      }),
+    });
+    if (!res.ok) { console.warn(`DeepSeek draft HTTP ${res.status} — fusion will use Gemini only.`); return null; }
+    const data = await res.json();
+    return data?.choices?.[0]?.message?.content || null;
+  } catch (e) {
+    console.warn('DeepSeek draft failed — fusion will use Gemini only:', e);
+    return null;
+  }
+}
+
 export async function chatWithGemini(
   messages: ChatMessage[],
-  reportData: SiteFeasibilityData
+  reportData: SiteFeasibilityData,
+  onToken?: (chunk: string) => void
 ): Promise<{ text: string; sources?: ChatSource[] }> {
 
   const apiKey = getUserKeys().gemini || "";
@@ -2658,47 +2756,25 @@ ${reportData.comps && reportData.comps.length > 0
     });
   }
 
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=${apiKey}`;
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({
-      contents,
-      systemInstruction: {
-        parts: [{ text: systemPrompt }]
-      },
-      tools: [
-        {
-          google_search: {}
-        }
-      ]
-    })
-  });
+  const GEN_BASE = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash`;
+  const baseBody = { contents, systemInstruction: { parts: [{ text: systemPrompt }] }, tools: [{ google_search: {} }] };
 
-  if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(`Gemini API error: ${response.status} - ${errorText}`);
+  // FUSION: when a DeepSeek key is configured, Gemini 3.5 Flash and DeepSeek V4
+  // Pro draft the SAME task IN PARALLEL, then Gemini 3.5 Flash JUDGES and streams
+  // the synthesized answer. Without a DeepSeek key, stream a single Gemini answer.
+  const deepSeekKey = getDeepSeekKey();
+  const lastUser = [...messages].reverse().find((m) => m.role === 'user')?.content || '';
+
+  if (deepSeekKey && lastUser) {
+    const [gDraft, dDraft] = await Promise.all([
+      geminiGenerateText(`${GEN_BASE}:generateContent?key=${apiKey}`, baseBody).catch((e) => { console.warn('Gemini draft failed:', e); return ''; }),
+      fetchDeepSeekDraft(`${systemPrompt}\n\n# PROVIDED DATA PACKET (verified evidence)\n${reportContext}`, lastUser, deepSeekKey),
+    ]);
+    const judgeInstruction = `Two independent senior analysts each produced the DRAFT below for the SAME task. Acting as the JUDGE, synthesize the single best response that fully follows the Operating Standards:\n- Merge the strongest, most evidence-grounded content from both drafts.\n- Resolve any conflict in favor of cited/verified evidence; where they disagree and neither is verifiable, label it Likely or Unknown.\n- Keep the required section structure and the Verified / Likely / Unknown labels.\n- Output ONLY the final report. Do NOT mention drafts, judging, or model names.\n\n===== DRAFT A (Google Gemini 3.5 Flash) =====\n${gDraft || '(unavailable)'}\n\n===== DRAFT B (DeepSeek V4 Pro) =====\n${dDraft || '(DeepSeek draft unavailable — rely on Draft A and the data packet)'}`;
+    const judgeBody = { ...baseBody, contents: [...contents, { role: 'user', parts: [{ text: judgeInstruction }] }] };
+    return await streamGeminiSSE(`${GEN_BASE}:streamGenerateContent?alt=sse&key=${apiKey}`, judgeBody, onToken);
   }
 
-  const resData = await response.json();
-  const text = resData.candidates?.[0]?.content?.parts?.[0]?.text || 'No response generated.';
-
-  // Extract grounding metadata if present
-  const sources: ChatSource[] = [];
-  const groundingMetadata = resData.candidates?.[0]?.groundingMetadata;
-  if (groundingMetadata && groundingMetadata.groundingChunks) {
-    for (const chunk of groundingMetadata.groundingChunks) {
-      if (chunk.web && chunk.web.uri) {
-        sources.push({
-          title: chunk.web.title || chunk.web.uri,
-          uri: chunk.web.uri
-        });
-      }
-    }
-  }
-
-  return { text, sources: sources.length > 0 ? sources : undefined };
+  return await streamGeminiSSE(`${GEN_BASE}:streamGenerateContent?alt=sse&key=${apiKey}`, baseBody, onToken);
 }
 // EOF
