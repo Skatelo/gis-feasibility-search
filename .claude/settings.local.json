@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(node scratch/probe-zoning.mjs https://meckgis.mecklenburgcountync.gov/server/rest/services https://maps.raleighnc.gov/arcgis/rest/services)",
+      "Bash(node scratch/find-roots.mjs Wake=https://maps.wake.gov Wake2=https://services.wake.gov Durham=https://gisweb.durhamnc.gov Durham2=https://maps.durhamnc.gov Guilford=https://gis.guilfordcountync.gov Guilford2=https://data.guilfordcountync.gov Forsyth=https://mws.cityofws.org Buncombe=https://gis.buncombecounty.org Cumberland=https://gis.co.cumberland.nc.us NewHanover=https://maps.nhcgov.com Cabarrus=https://gis.cabarruscounty.us Union=https://gis.unioncountync.gov Iredell=https://maps.co.iredell.nc.us Catawba=https://arcgis2.catawbacountync.gov Gaston=https://gis.gastongov.com Onslow=https://maps.onslowcountync.gov Pitt=https://gisapps.pittcountync.gov Johnston=https://gis.johnstonnc.com)",
+      "Bash(node scratch/probe-zoning.mjs https://maps.wake.gov/arcgis/rest/services/Planning https://gis.buncombecounty.org/arcgis/rest/services/landuse/MapServer https://gis.unioncountync.gov/server/rest/services/Zoning_Map_MIL1/MapServer https://gis.co.cumberland.nc.us/server/rest/services/Planning)",
+      "Bash(node scratch/probe-zoning.mjs https://maps.wake.gov/arcgis/rest/services/Planning https://gis.co.cumberland.nc.us/server/rest/services/Planning/CCZoning/MapServer)",
+      "Bash(node scratch/find-roots.mjs Forsyth=https://maps.cityofws.org Forsyth2=https://gisweb.forsyth.cc Forsyth3=https://www.cityofws.org/gisservices Durham=https://gisweb2.durhamnc.gov Durham2=https://maps2.dconc.gov Durham3=https://gis.dconc.gov Guilford=https://gismaps.guilfordcountync.gov Guilford2=https://www.gis.guilfordcountync.gov NewHanover=https://gis.nhcgov.com Cabarrus=https://gis.cabarruscounty.us Cabarrus2=https://maps.cabarruscounty.us Gaston=https://gisapps.gastongov.com Gaston2=https://maps.gastongov.com Iredell=https://gis.iredellcountync.gov Johnston=https://gis.johnstonnc.com Johnston2=https://maps.johnstonnc.com Pitt=https://gis.pittcountync.gov Brunswick=https://gis.brunswickcountync.gov Henderson=https://gis.hendersoncountync.gov Orange=https://gis.orangecountync.gov Davidson=https://gis.davidsoncountync.gov Rowan=https://rowangis.rowancountync.gov Randolph=https://gis.randolphcountync.gov Alamance=https://gis.alamance-nc.com Catawba2=https://gis.catawbacountync.gov)",
+      "Bash(node scratch/probe-zoning.mjs https://gis.orangecountync.gov/arcgis/rest/services/WebZoningService/MapServer https://gis.randolphcountync.gov/arcgis/rest/services/Planning https://gis.nhcgov.com/server/rest/services https://gis.co.cumberland.nc.us/server/rest/services/Planning/CCZoning/MapServer)",
+      "Bash(node scratch/probe-zoning.mjs https://gis.nhcgov.com/server/rest/services/Layers https://gis.nhcgov.com/server/rest/services/Thematic)",
+      "WebSearch",
+      "Bash(node scratch/find-roots.mjs \"Durham=https://webgis2.durhamnc.gov\")",
+      "Bash(node scratch/probe-zoning.mjs https://gcgis.guilfordcountync.gov/arcgis/rest/services/Planning_Zoning https://maps.co.forsyth.nc.us/arcgis/rest/services/Planning_Inspection/Planning_Inspection/MapServer)",
+      "Bash(node -e \"fetch\\('https://webgis2.durhamnc.gov/server/rest/services?f=json'\\).then\\(r=>r.json\\(\\)\\).then\\(j=>console.log\\(j.folders.join\\(', '\\)\\)\\)\")",
+      "Bash(node scratch/probe-zoning.mjs https://webgis2.durhamnc.gov/server/rest/services/PublicServices)",
+      "Bash(node scratch/probe-zoning.mjs https://gis.gastoncountync.gov/publicgis/rest/services/PublicGIS/Zoning/MapServer https://location.cabarruscounty.us/arcgisservices/rest/services/Zoning/MapServer https://bcgis.brunswickcountync.gov/arcgis/rest/services/Layers/Zoning/MapServer)",
+      "Bash(node scratch/probe-zoning.mjs \"https://webgis2.durhamnc.gov/server/rest/services/OpenDataServices\")"
+    ]
+  }
+}

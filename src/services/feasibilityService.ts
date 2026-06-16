@@ -2605,32 +2605,49 @@ async function streamGeminiSSE(url: string, body: any, onToken?: (chunk: string)
   return { text: text || 'No response generated.', sources: sources.length ? sources : undefined };
 }
 
-/** DeepSeek V4 Pro draft (OpenAI-compatible). null on missing key / error / timeout. */
+/** DeepSeek V4 Pro draft (OpenAI-compatible), with ONE retry on transient errors so
+ *  a flaky request doesn't silently drop DeepSeek from the fusion. Returns null on
+ *  missing key / repeated failure / timeout (the fusion then proceeds Gemini-only). */
 async function fetchDeepSeekDraft(systemContent: string, userContent: string, key: string): Promise<string | null> {
   if (!key) return null;
-  try {
-    const res = await fetchWithTimeout('https://api.deepseek.com/chat/completions', 75000, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${key}` },
-      body: JSON.stringify({
-        model: 'deepseek-v4-pro',
-        messages: [
-          { role: 'system', content: systemContent },
-          { role: 'user', content: userContent },
-        ],
-        thinking: { type: 'disabled' }, // fast draft; the Gemini judge supplies the synthesis/reasoning
-        stream: false,
-        temperature: 0.4,
-        max_tokens: 16384,
-      }),
-    });
-    if (!res.ok) { console.warn(`DeepSeek draft HTTP ${res.status} — fusion will use Gemini only.`); return null; }
-    const data = await res.json();
-    return data?.choices?.[0]?.message?.content || null;
-  } catch (e) {
-    console.warn('DeepSeek draft failed — fusion will use Gemini only:', e);
-    return null;
+  const body = JSON.stringify({
+    model: 'deepseek-v4-pro',
+    messages: [
+      { role: 'system', content: systemContent },
+      { role: 'user', content: userContent },
+    ],
+    thinking: { type: 'disabled' }, // fast draft; the Gemini judge supplies the synthesis/reasoning
+    stream: false,
+    temperature: 0.4,
+    max_tokens: 8000,
+  });
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const res = await fetchWithTimeout('https://api.deepseek.com/chat/completions', 90000, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${key}` },
+        body,
+      });
+      if (res.ok) {
+        const data = await res.json();
+        return data?.choices?.[0]?.message?.content || null;
+      }
+      // Retry transient rate-limit / server errors once; give up on client errors (bad key, etc.).
+      if ((res.status === 429 || res.status >= 500) && attempt === 0) {
+        console.warn(`DeepSeek HTTP ${res.status} — retrying once...`);
+        await new Promise((r) => setTimeout(r, 1500));
+        continue;
+      }
+      console.warn(`DeepSeek HTTP ${res.status} — fusion will use Gemini only.`);
+      return null;
+    } catch (e) {
+      // Network error / timeout — retry once, then fall back gracefully.
+      if (attempt === 0) { console.warn('DeepSeek request error — retrying once:', e); await new Promise((r) => setTimeout(r, 1000)); continue; }
+      console.warn('DeepSeek request failed — fusion will use Gemini only:', e);
+      return null;
+    }
   }
+  return null;
 }
 
 export async function chatWithGemini(
@@ -2668,6 +2685,9 @@ You operate as a senior land acquisition analyst, entitlement consultant, and re
 ## Evidence & Data Sources
 - Treat the PROVIDED DATA PACKET (parcel/GIS, USGS 3DEP slope, county zoning, verified SOLD comps, ownership/tax) as Verified evidence.
 - For topics NOT in the packet — FEMA flood zone, wetlands/environmental, utilities, road access & frontage, schools, market trends, and comparable vacant-land sales — INVESTIGATE with live Google Search and cite the source; if still unconfirmed, label Likely or Unknown.
+- HOA: determine whether the parcel is within a homeowners association; if so report the HOA name, dues, management company, any preferred/featured/approved BUILDER list, and the building requirements, architectural guidelines, and restrictions/covenants (CCRs) — only where publicly available, otherwise label Unknown.
+- ZONING: VERIFY the county-provided zoning code is correct for this exact parcel against the official county/municipal zoning map or ordinance; if the official source disagrees or you cannot confirm it, say so and label Likely/Unknown rather than asserting it.
+- CONSTRUCTION COST: use CURRENT LOCAL costs for this address's metro/county (per-sqft new single-family build cost, site prep, septic/well, utility tie-ins, permit/impact fees) found via Google Search WITH sources — never generic national averages.
 - Buildability from USGS 3DEP (1m) slope: under 15% = Buildable; 15-25% = Requires Special Engineering / increased cost; over 25% = Non-Buildable / high risk.
 
 ## Comparable Sales — use ONLY the verified comps provided
@@ -2683,11 +2703,11 @@ Derive land value from comparable vacant-land sales, builder lot demand, new-con
 End with a clear recommendation stating: whether the property appears buildable, the most likely development strategy, the primary risks, the strongest value drivers, and an overall Feasibility Rating — **Excellent / Good / Moderate / Challenging / Poor**.
 
 ## Output Rules
-- Produce the COMPLETE report in one response, following the required 20-section structure given in the request. Do not stop to ask the user to confirm strategy or preferences.
+- Produce the COMPLETE report in one response, following the required section structure given in the request. Do not stop to ask the user to confirm strategy or preferences.
 - Lead each section with its conclusion. Use clean markdown: numbered section headers, bold key findings, tables for comps/calculations, concise bullets. No JSON, code blocks, map-layer/asset payloads, or "assistant mode" announcements.
 - When linking a comp or address, use its provided verified listing URL if available; otherwise a Google Search URL (https://www.google.com/search?q=ADDRESS). NEVER fabricate a Realtor.com / Zillow / Redfin detail URL.
 - Every dollar figure must trace to a shown input. Do not invent owner names, prices, dates, slopes, or zoning. This is a FEASIBILITY analysis — never include wholesaling, assignment-fee, "maximum allowable offer," or exit-strategy content.
-- Do not finish until all 20 required sections are completed or explicitly marked "Unknown — unverifiable due to lack of available evidence."
+- Do not finish until all required sections are completed or explicitly marked "Unknown — unverifiable due to lack of available evidence."
 
 ## Follow-up
 After the report, answer follow-up questions conversationally from the stored context; use Google Search for niche municipal-code questions. Do not regenerate the full report unless asked.
@@ -2695,7 +2715,7 @@ After the report, answer follow-up questions conversationally from the stored co
 
   // Format report context
   const reportContext = `
-## PROVIDED DATA PACKET — verified evidence to USE in the report (this is DATA, not the report's 20-section layout)
+## PROVIDED DATA PACKET — verified evidence to USE in the report (this is DATA, not the report's section layout)
 
 ### Subject & Buildability Summary
 - Property Location: ${reportData.inputAddress}
@@ -2768,7 +2788,7 @@ ${reportData.comps && reportData.comps.length > 0
   if (deepSeekKey && lastUser) {
     const [gDraft, dDraft] = await Promise.all([
       geminiGenerateText(`${GEN_BASE}:generateContent?key=${apiKey}`, baseBody).catch((e) => { console.warn('Gemini draft failed:', e); return ''; }),
-      fetchDeepSeekDraft(`${systemPrompt}\n\n# PROVIDED DATA PACKET (verified evidence)\n${reportContext}`, lastUser, deepSeekKey),
+      fetchDeepSeekDraft(`${systemPrompt}\n\n# PROVIDED DATA PACKET (verified evidence)\n${reportContext}\n\n# YOUR ROLE\nProvide a substantive but CONCISE expert analytical draft — your key findings, figures, and risks per topic (zoning, HOA/restrictions, buildability, flood, utilities, market, LOCAL construction cost, valuation). A lead analyst synthesizes the final structured report from your input, so you need not format every numbered section.`, lastUser, deepSeekKey),
     ]);
     const judgeInstruction = `Two independent senior analysts each produced the DRAFT below for the SAME task. Acting as the JUDGE, synthesize the single best response that fully follows the Operating Standards:\n- Merge the strongest, most evidence-grounded content from both drafts.\n- Resolve any conflict in favor of cited/verified evidence; where they disagree and neither is verifiable, label it Likely or Unknown.\n- Keep the required section structure and the Verified / Likely / Unknown labels.\n- Output ONLY the final report. Do NOT mention drafts, judging, or model names.\n\n===== DRAFT A (Google Gemini 3.5 Flash) =====\n${gDraft || '(unavailable)'}\n\n===== DRAFT B (DeepSeek V4 Pro) =====\n${dDraft || '(DeepSeek draft unavailable — rely on Draft A and the data packet)'}`;
     const judgeBody = { ...baseBody, contents: [...contents, { role: 'user', parts: [{ text: judgeInstruction }] }] };

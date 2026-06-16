@@ -673,11 +673,11 @@ export const FeasibilitySearch: FC = () => {
           ).join('\n')
         : 'No verified comps available.';
 
-      const initialPrompt = `Produce the AI Land Feasibility Report for "${reportData.inputAddress}" following your Operating Standards exactly. Lead every section with its conclusion, label evidence Verified / Likely / Unknown, and do not finish until all 20 sections are completed or explicitly marked "Unknown — unverifiable due to lack of available evidence."
+      const initialPrompt = `Produce the AI Land Feasibility Report for "${reportData.inputAddress}" following your Operating Standards exactly. Lead every section with its conclusion, label evidence Verified / Likely / Unknown, and do not finish until all required sections are completed or explicitly marked "Unknown — unverifiable due to lack of available evidence."
 
 INVESTIGATE with live Google Search (focused on this exact address + ZIP, not the whole city) and cite sources for anything not in the data packet:
 - Parcel ID, jurisdiction, legal description, and lot size (reconciled in acres/SF)
-- Zoning + permitted uses, and the future land use / comprehensive-plan designation
+- Zoning + permitted uses — VERIFY the county-provided zoning code is CORRECT for THIS parcel against the official county/municipal zoning map or ordinance and flag any discrepancy; plus the future land use / comprehensive-plan designation
 - FEMA flood zone / floodplain status
 - Wetlands & environmental constraints (NWI, streams, protected areas)
 - Utilities (public water, sewer vs. septic, well, electric, gas)
@@ -685,36 +685,39 @@ INVESTIGATE with live Google Search (focused on this exact address + ZIP, not th
 - Topography (wooded/cleared) to corroborate the provided USGS slope data
 - Assigned schools/ratings and neighborhood/location context
 - Market trends and, for land valuation, comparable VACANT-LAND sales
+- HOA: whether the parcel is in a homeowners association; if so, the HOA name, dues, management company, any preferred/featured/approved BUILDER list, and the building requirements / architectural guidelines / restrictions (CCRs) — where publicly available, else mark Unknown
+- CURRENT LOCAL construction costs for this address's metro/county (per-sqft new single-family build cost, site prep, septic/well, utility tie-ins, permit/impact fees) for the Development Cost section — with sources; never generic national averages
 Reconcile differences across sources and cite at least 3 distinct Markdown links.
 
 COMPARABLES — use ONLY these verified, already-filtered SOLD comps (closed within 12 months, new construction, zoning-matched, within 5 driving miles). Do NOT search for or substitute any other comps, and never cite a price other than those below:
 ${compsList}
 
-In Section 14 (New Construction Comparable Sales Analysis) present EVERY comp above in a table with: address, sale price, sale date, year built, living-area sqft, lot size (or "Unknown"), distance from subject, and price/sqft — plus one line on why each qualifies. Then derive the median, range, and median $/sqft.
+In Section 15 (New Construction Comparable Sales Analysis) present EVERY comp above in a table with: address, sale price, sale date, year built, living-area sqft, lot size (or "Unknown"), distance from subject, and price/sqft — plus one line on why each qualifies. Then derive the median, range, and median $/sqft.
 
-REQUIRED 20-SECTION STRUCTURE — use these exact numbered headings:
+REQUIRED SECTION STRUCTURE — use these exact numbered headings:
 # 1. Executive Summary
 # 2. Property Overview
 # 3. Parcel Verification
 # 4. Zoning Analysis
 # 5. Future Land Use Analysis
-# 6. Buildability Assessment
-# 7. Topography and Slope Analysis
-# 8. Floodplain Analysis
-# 9. Wetlands and Environmental Constraints
-# 10. Utilities Analysis
-# 11. Road Access and Frontage
-# 12. School and Location Analysis
-# 13. Market Analysis
-# 14. New Construction Comparable Sales Analysis
-# 15. Development Cost Considerations
-# 16. Highest and Best Use
-# 17. Land Valuation
-# 18. Builder/Developer Profitability Analysis
-# 19. Risk Assessment
-# 20. Final Investment Recommendation
+# 6. HOA, Deed Restrictions & Builder Requirements
+# 7. Buildability Assessment
+# 8. Topography and Slope Analysis
+# 9. Floodplain Analysis
+# 10. Wetlands and Environmental Constraints
+# 11. Utilities Analysis
+# 12. Road Access and Frontage
+# 13. School and Location Analysis
+# 14. Market Analysis
+# 15. New Construction Comparable Sales Analysis
+# 16. Development Cost Considerations
+# 17. Highest and Best Use
+# 18. Land Valuation
+# 19. Builder/Developer Profitability Analysis
+# 20. Risk Assessment
+# 21. Final Investment Recommendation
 
-Land Valuation (Section 17) must derive value from comparable land sales, builder lot demand, new-construction economics, market absorption, and highest-and-best-use — not solely county tax values or automated estimates. The Final Investment Recommendation (Section 20) must state whether the property appears buildable, the most likely development strategy, the primary risks, the strongest value drivers, and an overall Feasibility Rating (Excellent / Good / Moderate / Challenging / Poor).
+Section 6 (HOA, Deed Restrictions & Builder Requirements) must state whether the parcel is in an HOA and, if so, its dues, featured/approved builders, and building restrictions/architectural guidelines (or mark Unknown where not public). Section 16 (Development Cost Considerations) must use CURRENT LOCAL per-sqft construction costs found via Google Search for THIS address's area, with sources — not national averages. Land Valuation (Section 18) must derive value from comparable land sales, builder lot demand, new-construction economics, market absorption, and highest-and-best-use — not solely county tax values or automated estimates. The Final Investment Recommendation (Section 21) must state whether the property appears buildable, the most likely development strategy, the primary risks, the strongest value drivers, and an overall Feasibility Rating (Excellent / Good / Moderate / Challenging / Poor).
 
 The report must ultimately answer: What is the property worth today? What would a builder likely pay? What can realistically be built? What are the primary risks? What approvals and infrastructure improvements may be required? Is the opportunity attractive enough to pursue?
 
