@@ -59,6 +59,28 @@ export interface CompProperty {
   zip?: string;
 }
 
+export interface FloodZoneInfo {
+  /** FEMA flood zone code, e.g. "AE", "VE", "A", "X", or "UNKNOWN". */
+  zone: string;
+  /** True when the point falls in a Special Flood Hazard Area (1% annual chance, high risk). */
+  inSFHA: boolean;
+  /** Zone subtype detail, e.g. "0.2 PCT ANNUAL CHANCE FLOOD HAZARD". */
+  subtype?: string;
+  /** mapped = NFHL returned a zone; no-coverage = outside mapped NFHL; unavailable = service error. */
+  status: 'mapped' | 'no-coverage' | 'unavailable';
+  /** Citable FEMA source link for the coordinate. */
+  sourceUrl: string;
+}
+
+export interface WetlandsInfo {
+  /** true/false when NWI responds; null when the NWI service is unavailable. */
+  present: boolean | null;
+  /** NWI wetland classifications intersecting the point. */
+  types: string[];
+  status: 'mapped' | 'none-at-point' | 'unavailable';
+  sourceUrl: string;
+}
+
 export interface SiteFeasibilityData {
   inputAddress: string;
   parcelId: string;
@@ -95,6 +117,12 @@ export interface SiteFeasibilityData {
   legalDescription?: string;
   totalValueCalculated?: number;
   typeOfTransaction?: string;
+
+  // Environmental constraints (queried by coordinate)
+  /** FEMA NFHL flood zone. */
+  floodZone?: FloodZoneInfo;
+  /** USFWS National Wetlands Inventory result. */
+  wetlands?: WetlandsInfo;
 
   // Slope and Comps details
   slopeProfile?: SlopeProfile;

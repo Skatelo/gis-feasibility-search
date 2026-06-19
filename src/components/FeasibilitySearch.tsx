@@ -678,8 +678,8 @@ export const FeasibilitySearch: FC = () => {
 INVESTIGATE with live Google Search (focused on this exact address + ZIP, not the whole city) and cite sources for anything not in the data packet:
 - Parcel ID, jurisdiction, legal description, and lot size (reconciled in acres/SF)
 - Zoning + permitted uses — VERIFY the county-provided zoning code is CORRECT for THIS parcel against the official county/municipal zoning map or ordinance and flag any discrepancy; plus the future land use / comprehensive-plan designation
-- FEMA flood zone / floodplain status
-- Wetlands & environmental constraints (NWI, streams, protected areas)
+- FEMA flood zone / floodplain status — USE the FEMA NFHL flood zone provided in the data packet (queried by the parcel coordinate) and cite its source link; only research further if the packet marks it unavailable or no-coverage
+- Wetlands & environmental constraints — USE the USFWS NWI wetlands result in the data packet and cite its source; note NWI omits some wetlands so a field delineation is authoritative; also note nearby streams/protected areas if found
 - Utilities (public water, sewer vs. septic, well, electric, gas)
 - Road access, frontage, and road condition
 - Topography (wooded/cleared) to corroborate the provided USGS slope data

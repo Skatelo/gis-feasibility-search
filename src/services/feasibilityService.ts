@@ -1,4 +1,4 @@
-import type { SiteFeasibilityData, SlopeProfile, CompProperty } from '../types/feasibility';
+import type { SiteFeasibilityData, SlopeProfile, CompProperty, FloodZoneInfo, WetlandsInfo } from '../types/feasibility';
 import { fetchCountyZoningCode, hasCountyZoning, normalizeCountyKey } from '../data/ncZoning';
 import { getSupabase, isSupabaseConfigured } from './supabaseClient';
 
@@ -640,6 +640,11 @@ export async function executeLandAnalysis(
   onStageChange?.("Evaluating site topography (USGS 3DEP)...");
   const slopeProfilePromise = fetchOpenTopographySlope(lat, lng, parcelId, boundaryRings);
 
+  // Authoritative environmental constraints, queried by coordinate in parallel:
+  // FEMA National Flood Hazard Layer (flood zone) and USFWS National Wetlands Inventory.
+  const floodZonePromise = fetchFemaFloodZone(lat, lng);
+  const wetlandsPromise = fetchNwiWetlands(lat, lng);
+
   // Zoning is resolved AFTER the base parcel data is emitted (further below) so
   // the GIS results render immediately. Variables declared here; assigned later.
   let zoningCode = "";
@@ -889,6 +894,10 @@ export async function executeLandAnalysis(
   onPartial?.({ comps: compRun.comps, compRunSummary: compRun.summary });
 
   const slopeProfile = await slopeEmitted;
+  const [floodZone, wetlands] = await Promise.all([
+    floodZonePromise.catch(() => undefined),
+    wetlandsPromise.catch(() => undefined),
+  ]);
 
   return {
     ...baseResult,
@@ -898,9 +907,77 @@ export async function executeLandAnalysis(
     zoningSourceUrl,
     gridics,
     slopeProfile,
+    floodZone,
+    wetlands,
     comps: compRun.comps,
     compRunSummary: compRun.summary
   };
+}
+
+/**
+ * FEMA National Flood Hazard Layer (NFHL) — authoritative flood-zone lookup by
+ * coordinate. Returns the effective flood zone, whether the point is in a Special
+ * Flood Hazard Area, and a citable FEMA source link. Degrades gracefully
+ * (status 'unavailable') so the report flags verification instead of guessing.
+ */
+export async function fetchFemaFloodZone(lat: number, lng: number): Promise<FloodZoneInfo> {
+  const sourceUrl = `https://msc.fema.gov/portal/search?AddressQuery=${encodeURIComponent(`${lat}, ${lng}`)}`;
+  try {
+    const url = `https://hazards.fema.gov/arcgis/rest/services/public/NFHL/MapServer/28/query?geometry=${lng},${lat}&geometryType=esriGeometryPoint&inSR=4326&spatialRel=esriSpatialRelIntersects&outFields=FLD_ZONE,ZONE_SUBTY,SFHA_TF&returnGeometry=false&f=json`;
+    const res = await fetchWithTimeout(url, 12000);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    if (data?.error) throw new Error('NFHL query error');
+    const feats: any[] = data?.features || [];
+    if (feats.length === 0) return { zone: 'UNKNOWN', inSFHA: false, status: 'no-coverage', sourceUrl };
+    // If the point straddles zones, prefer the Special Flood Hazard Area record.
+    const chosen = feats.find((f) => String(f?.attributes?.SFHA_TF).toUpperCase() === 'T') || feats[0];
+    const a = chosen.attributes || {};
+    return {
+      zone: a.FLD_ZONE || 'UNKNOWN',
+      inSFHA: String(a.SFHA_TF).toUpperCase() === 'T',
+      subtype: a.ZONE_SUBTY || undefined,
+      status: 'mapped',
+      sourceUrl,
+    };
+  } catch (e) {
+    console.warn('FEMA NFHL flood lookup failed:', e);
+    return { zone: 'UNKNOWN', inSFHA: false, status: 'unavailable', sourceUrl };
+  }
+}
+
+/**
+ * USFWS National Wetlands Inventory (NWI) — wetlands presence/classification by
+ * coordinate. Tries both NWI service hosts; returns present=null with status
+ * 'unavailable' if NWI is down, so the report verifies via the NWI Wetlands
+ * Mapper rather than assuming the site is wetland-free.
+ */
+export async function fetchNwiWetlands(lat: number, lng: number): Promise<WetlandsInfo> {
+  const sourceUrl = 'https://www.fws.gov/program/national-wetlands-inventory/wetlands-mapper';
+  const hosts = [
+    'https://fwspublicservices.wim.usgs.gov/wetlandsmapservice/rest/services/Wetlands/MapServer/0/query',
+    'https://fwsprimary.wim.usgs.gov/server/rest/services/Wetlands/MapServer/0/query',
+  ];
+  for (const base of hosts) {
+    try {
+      const url = `${base}?geometry=${lng},${lat}&geometryType=esriGeometryPoint&inSR=4326&spatialRel=esriSpatialRelIntersects&outFields=WETLAND_TYPE,ATTRIBUTE&returnGeometry=false&f=json`;
+      const res = await fetchWithTimeout(url, 12000);
+      if (!res.ok) continue;
+      const data = await res.json();
+      if (data?.error) continue;
+      const feats: any[] = data?.features || [];
+      const types = Array.from(new Set(feats.map((f) => f?.attributes?.WETLAND_TYPE).filter(Boolean))) as string[];
+      return {
+        present: feats.length > 0,
+        types,
+        status: feats.length > 0 ? 'mapped' : 'none-at-point',
+        sourceUrl,
+      };
+    } catch {
+      // try the next host
+    }
+  }
+  return { present: null, types: [], status: 'unavailable', sourceUrl };
 }
 
 /**
@@ -2683,8 +2760,9 @@ You operate as a senior land acquisition analyst, entitlement consultant, and re
 10. DELIVER EXECUTIVE-LEVEL CONCLUSIONS. Write for land investors, builders, developers, private lenders, and acquisition managers — direct, evidence-based, financially focused.
 
 ## Evidence & Data Sources
-- Treat the PROVIDED DATA PACKET (parcel/GIS, USGS 3DEP slope, county zoning, verified SOLD comps, ownership/tax) as Verified evidence.
-- For topics NOT in the packet — FEMA flood zone, wetlands/environmental, utilities, road access & frontage, schools, market trends, and comparable vacant-land sales — INVESTIGATE with live Google Search and cite the source; if still unconfirmed, label Likely or Unknown.
+- Treat the PROVIDED DATA PACKET (parcel/GIS, USGS 3DEP slope, FEMA flood zone, NWI wetlands, county zoning, verified SOLD comps, ownership/tax) as Verified evidence.
+- For topics NOT in the packet — utilities, road access & frontage, schools, market trends, and comparable vacant-land sales — INVESTIGATE with live Google Search and cite the source; if still unconfirmed, label Likely or Unknown.
+- FLOOD & WETLANDS: the packet carries the AUTHORITATIVE FEMA NFHL flood zone and USFWS NWI wetlands result, queried by the parcel's exact coordinate. USE those values verbatim and CITE the provided source links — do NOT guess or contradict them. Only when the packet marks flood or wetlands "unavailable"/"no-coverage" should you say so and direct verification to the FEMA/NWI source link, labeling the status Unknown rather than assuming the site is flood-free or wetland-free.
 - HOA: determine whether the parcel is within a homeowners association; if so report the HOA name, dues, management company, any preferred/featured/approved BUILDER list, and the building requirements, architectural guidelines, and restrictions/covenants (CCRs) — only where publicly available, otherwise label Unknown.
 - ZONING: VERIFY the county-provided zoning code is correct for this exact parcel against the official county/municipal zoning map or ordinance; if the official source disagrees or you cannot confirm it, say so and label Likely/Unknown rather than asserting it.
 - CONSTRUCTION COST: use CURRENT LOCAL costs for this address's metro/county (per-sqft new single-family build cost, site prep, septic/well, utility tie-ins, permit/impact fees) found via Google Search WITH sources — never generic national averages.
@@ -2713,6 +2791,20 @@ End with a clear recommendation stating: whether the property appears buildable,
 After the report, answer follow-up questions conversationally from the stored context; use Google Search for niche municipal-code questions. Do not regenerate the full report unless asked.
 `;
 
+  // Authoritative flood (FEMA NFHL) & wetlands (USFWS NWI) lines for the packet.
+  const fz = reportData.floodZone;
+  const floodLine = !fz || fz.status === 'unavailable'
+    ? 'FEMA NFHL did not return data at search time — VERIFY at the FEMA source before relying on flood status; do NOT assume the parcel is flood-free.'
+    : fz.status === 'no-coverage'
+      ? `No FEMA flood zone is mapped at this coordinate (unmapped or outside detailed study) — VERIFY via FEMA. Source: ${fz.sourceUrl}`
+      : `Zone ${fz.zone}${fz.subtype ? ` (${fz.subtype})` : ''} — ${fz.inSFHA ? 'IN a Special Flood Hazard Area (high-risk 1% annual-chance floodplain; flood insurance typically required)' : 'NOT in a Special Flood Hazard Area (outside the 1% annual-chance floodplain)'}. Authoritative source (FEMA NFHL, queried by coordinate): ${fz.sourceUrl}`;
+  const wl = reportData.wetlands;
+  const wetlandsLine = !wl || wl.status === 'unavailable'
+    ? 'USFWS NWI service was unavailable at search time — VERIFY at the NWI Wetlands Mapper before concluding; do NOT assume the parcel is wetland-free.'
+    : wl.status === 'none-at-point'
+      ? `No NWI-mapped wetlands intersect the parcel coordinate (NWI omits some small/forested wetlands; a field delineation is the legal authority). Source: ${wl.sourceUrl}`
+      : `NWI-mapped wetlands present at/near the parcel: ${wl.types.join(', ') || 'classification unspecified'}. A jurisdictional delineation is required to confirm extent. Source: ${wl.sourceUrl}`;
+
   // Format report context
   const reportContext = `
 ## PROVIDED DATA PACKET — verified evidence to USE in the report (this is DATA, not the report's section layout)
@@ -2726,6 +2818,10 @@ After the report, answer follow-up questions conversationally from the stored co
 - Average Site Slope: ${reportData.slopeProfile?.avgSlope || 0}%
 - Maximum Site Slope: ${reportData.slopeProfile?.maxSlope || 0}%
 - Physical Feasibility Assessment: Average elevation is ${reportData.slopeProfile?.avgElevation || 0}m (Min: ${reportData.slopeProfile?.minElevation || 0}m, Max: ${reportData.slopeProfile?.maxElevation || 0}m). 
+
+### 2.5 Flood Hazard & Wetlands (FEMA NFHL + USFWS NWI — authoritative, queried by the parcel coordinate. USE these values and cite the sources; only research further if marked unavailable)
+- FEMA Flood Zone: ${floodLine}
+- Wetlands: ${wetlandsLine}
 
 ### 3. Zoning & Estimated Density Allowances
 - Zoning Classification (from county GIS): ${reportData.zoningCode} (${reportData.zoningDescription})
