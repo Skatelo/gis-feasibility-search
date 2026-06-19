@@ -3300,3 +3300,49 @@ img, svg, video, canvas, table, pre { max-width: 100%; }
 .report-inline-body li, .model-text li { line-height: 1.6; margin: .25rem 0; color: var(--text-secondary); }
 .report-inline-body ul, .report-inline-body ol,
 .model-text ul, .model-text ol { margin: .4rem 0 .9rem 0; }
+
+
+/* ==========================================================================
+   FIX: a finished report must never resize the page on mobile/tablet
+   --------------------------------------------------------------------------
+   Root cause: .dashboard-content-grid collapses to a single 1fr column at
+   <=1200px, but grid/flex items default to min-width:auto and refuse to shrink
+   below their content's intrinsic width. When the completed report drops in a
+   wide comps table or a long source URL, that column grows past the viewport
+   and mobile browsers scale the WHOLE page down to fit ("everything resizes").
+   Letting every container in the chain shrink (min-width:0) keeps wide content
+   scrolling inside its own card instead of stretching the layout. Applies at
+   ALL widths so tablets are covered too, not just <=768px phones.
+   ========================================================================== */
+.dashboard-container,
+.dashboard-content-grid,
+.dashboard-sidebar-column,
+.sidebar-scroll-wrapper,
+.dashboard-map-column,
+.card,
+.registry-card,
+.report-card,
+.chatbot-card,
+.gemini-chat-container,
+.message-content,
+.model-text,
+.report-inline-body {
+  min-width: 0;
+  max-width: 100%;
+}
+
+/* Final safety net: clip any residual horizontal overflow at the app root so
+   the layout viewport can never widen past the screen. overflow-x: clip (NOT
+   hidden) does not create a scroll container, so the sticky map column and the
+   fixed chat bubble keep working normally. */
+#root { overflow-x: clip; }
+
+/* Wide report/chat tables scroll inside their card at every screen size. */
+.report-inline-body table,
+.model-text table {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
