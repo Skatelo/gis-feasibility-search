@@ -170,7 +170,7 @@ async function imageUrlToInlineData(url: string): Promise<{ mimeType: string; da
 function visionPrompt(mode: SearchMode): string {
   const shared = `You are an expert real-estate computer-vision analyst. You are given a high-zoom SATELLITE/aerial image and (when available) a STREET VIEW image of a single property. Analyze them as a real-estate investor scanning for opportunities.
 
-Return ONLY a JSON object inside a \`\`\`json code block. Use numeric 0-100 scores (integers) and booleans exactly as specified. If a field cannot be judged from the imagery, use a conservative value and lower your overall "confidence".`;
+Respond with ONLY a single raw JSON object — no prose, no markdown, no code fences. Use numeric 0-100 scores (integers) and booleans exactly as specified. If a field cannot be judged from the imagery, use a conservative value and lower your overall "confidence". The JSON shape to follow is shown below.`;
 
   if (mode === 'house') {
     return `${shared}
@@ -251,15 +251,55 @@ JSON shape:
 slope_score: 0 = flat/buildable, 100 = steep. flood_indicator_score: 0 = none, 100 = strong wetland/flood signal. development_activity_score: 0 = none, 100 = heavy nearby development.`;
 }
 
+/**
+ * Extracts the first balanced JSON object from a model response. Handles raw
+ * JSON (JSON mode), ```json fenced blocks, and JSON embedded in prose. Returns
+ * null if no `{` is found or the object is unbalanced (i.e. the response was
+ * truncated), so the caller can retry rather than silently mis-parse.
+ */
+function extractJsonObject(text: string): string | null {
+  const fence = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+  const body = fence ? fence[1] : text;
+  const start = body.indexOf('{');
+  if (start === -1) return null;
+  let depth = 0;
+  let inStr = false;
+  let esc = false;
+  for (let i = start; i < body.length; i++) {
+    const ch = body[i];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (ch === '\\') esc = true;
+      else if (ch === '"') inStr = false;
+    } else if (ch === '"') {
+      inStr = true;
+    } else if (ch === '{') {
+      depth++;
+    } else if (ch === '}') {
+      depth--;
+      if (depth === 0) return body.slice(start, i + 1);
+    }
+  }
+  return null; // unbalanced — response was cut off
+}
+
 function parseVisionJson(text: string): VisionObservations | null {
-  const m = text.match(/```json\s*([\s\S]*?)\s*```/) || text.match(/\{[\s\S]*\}/);
-  const jsonStr = m ? (m[1] || m[0]) : '';
+  const jsonStr = extractJsonObject(text);
   if (!jsonStr) return null;
+  // Tolerate trailing commas the model occasionally emits before } or ].
+  const cleaned = jsonStr.replace(/,\s*([}\]])/g, '$1');
   try {
-    return JSON.parse(jsonStr) as VisionObservations;
+    return JSON.parse(cleaned) as VisionObservations;
   } catch {
     return null;
   }
+}
+
+/** Pull the text out of a Gemini response, joining multi-part candidates. */
+function extractGeminiText(data: any): string {
+  const parts = data?.candidates?.[0]?.content?.parts;
+  if (!Array.isArray(parts)) return '';
+  return parts.map((p: any) => (typeof p?.text === 'string' ? p.text : '')).join('');
 }
 
 /** Send the acquired imagery to Gemini Vision and return its structured observations. */
@@ -275,22 +315,55 @@ export async function geminiVisionAnalyze(
   const parts: any[] = [{ text: visionPrompt(mode) }];
   for (const img of images) parts.push({ inline_data: { mime_type: img.mimeType, data: img.data } });
 
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      contents: [{ role: 'user', parts }],
-      generationConfig: { temperature: 0.2, maxOutputTokens: 1024 },
-    }),
-  });
-  if (!res.ok) {
-    const detail = await res.text().catch(() => '');
-    throw new Error(`Gemini Vision API error ${res.status}: ${detail.slice(0, 200)}`);
+  // `responseMimeType: application/json` forces clean JSON (no prose / markdown
+  // fences); a generous token budget avoids truncating the object. jsonMode is a
+  // flag so we can fall back to plain mode if the model rejects JSON mode.
+  const callOnce = async (temperature: number, jsonMode: boolean) => {
+    const generationConfig: any = { temperature, maxOutputTokens: 2048 };
+    if (jsonMode) generationConfig.responseMimeType = 'application/json';
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ contents: [{ role: 'user', parts }], generationConfig }),
+    });
+    if (!res.ok) {
+      const detail = await res.text().catch(() => '');
+      const err: any = new Error(`Gemini Vision API error ${res.status}: ${detail.slice(0, 300)}`);
+      err.status = res.status;
+      throw err;
+    }
+    const data = await res.json();
+    // Surface a blocked prompt or empty/truncated candidate clearly.
+    const blockReason = data?.promptFeedback?.blockReason;
+    if (blockReason) throw new Error(`Gemini blocked the request (${blockReason}).`);
+    const finishReason = data?.candidates?.[0]?.finishReason;
+    const text = extractGeminiText(data);
+    return { text, finishReason };
+  };
+
+  // First attempt in JSON mode; if the model rejects JSON mode with a 4xx, retry
+  // in plain mode (the parser handles fenced/embedded JSON too).
+  let last: { text: string; finishReason?: string };
+  try {
+    last = await callOnce(0.2, true);
+  } catch (e: any) {
+    if (e?.status >= 400 && e?.status < 500) last = await callOnce(0.2, false);
+    else throw e;
   }
-  const data = await res.json();
-  const text = data.candidates?.[0]?.content?.parts?.map((p: any) => p.text).join('') || '';
-  const obs = parseVisionJson(text);
-  if (!obs) throw new Error('Gemini Vision returned no parseable JSON observations.');
+  let obs = parseVisionJson(last.text);
+  // On an empty/unparseable/truncated response, retry once at temperature 0.
+  if (!obs) {
+    last = await callOnce(0, true).catch(() => callOnce(0, false));
+    obs = parseVisionJson(last.text);
+  }
+  if (!obs) {
+    const hint =
+      last.finishReason === 'MAX_TOKENS' ? ' (response hit the token limit)'
+      : last.finishReason === 'SAFETY' || last.finishReason === 'RECITATION' ? ` (finishReason: ${last.finishReason})`
+      : last.text.trim() === '' ? ' (model returned an empty response)'
+      : '';
+    throw new Error(`Gemini Vision returned no parseable JSON observations${hint}.`);
+  }
   return obs;
 }
 
