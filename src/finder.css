@@ -246,6 +246,20 @@
 .finder-parcel-row span { display: inline-flex; align-items: center; gap: 4px; }
 .finder-parcel-row svg { color: var(--text-muted); }
 
+.finder-owner {
+  display: inline-flex; align-items: center; gap: 5px; font-size: 0.74rem; color: var(--text-secondary);
+  font-weight: 600;
+}
+.finder-owner svg { color: var(--text-muted); flex-shrink: 0; }
+
+.finder-lead-row { display: flex; flex-wrap: wrap; gap: 5px; }
+.finder-lead-chip {
+  display: inline-flex; align-items: center; gap: 4px;
+  background: rgba(217,119,6,0.08); color: var(--warning); border: 1px solid rgba(217,119,6,0.22);
+  font-size: 0.7rem; font-weight: 700; padding: 3px 8px; border-radius: 999px;
+}
+.finder-lead-chip svg { flex-shrink: 0; }
+
 .finder-env-row { display: flex; flex-wrap: wrap; gap: 6px; }
 .finder-env-badge {
   display: inline-flex; align-items: center; gap: 5px; text-decoration: none;

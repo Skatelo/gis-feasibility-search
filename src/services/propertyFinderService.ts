@@ -64,6 +64,17 @@ export interface ParcelInfo {
   county?: string;
   /** (assessedValue - landValue) / assessedValue — share of value in structures. */
   improvementRatio?: number;
+
+  // GIS-derived distress / motivated-seller lead signals (house mode)
+  ownerName?: string;
+  absenteeOwner?: boolean;
+  outOfState?: boolean;
+  ownerType?: 'individual' | 'estate' | 'company' | 'public';
+  yearsSinceSale?: number;
+  /** 0..100 likelihood-of-distress/motivation score from assessor data. */
+  gisDistress?: number;
+  /** Human-readable lead signals, e.g. "absentee owner (out-of-state)". */
+  gisSignals?: string[];
 }
 
 /** A 0..100 sub-score with a human label and the authoritative source link. */
@@ -88,6 +99,9 @@ export interface PropertyResult {
   reasons: string[];
   recommendation: string;
   analyzedAt: number;
+
+  /** House mode: true only when the home actually LOOKS distressed (vision). */
+  distressed?: boolean;
 
   // Land-mode enrichment
   parcel?: ParcelInfo;
@@ -220,7 +234,7 @@ JSON shape:
   "reasons": ["short phrase", "short phrase"]
 }
 \`\`\`
-For the *_score fields: 0 = pristine/well-maintained, 100 = severe distress.`;
+For the *_score fields: 0 = pristine/well-maintained, 100 = severe distress. Be decisive and honest: a clearly well-maintained, recently built, or pristine home (intact roof, tidy yard, no damage) should score UNDER 15 across the board — do not invent problems. Reserve scores above 50 for genuinely visible deterioration, damage, overgrowth, or abandonment.`;
   }
 
   // land = combined vacant-land + builder-lot assessment
@@ -384,6 +398,84 @@ export function computeDistressScore(o: VisionObservations): number {
   return Math.round(roof * 0.25 + ext * 0.25 + yard * 0.2 + vac * 0.2 + misc * 0.1);
 }
 
+/**
+ * Whether a home actually LOOKS distressed in the imagery — the hard gate so a
+ * perfectly-maintained house is NEVER shown in house mode. True when the weighted
+ * distress score is meaningful, or any single indicator is severe (e.g. a
+ * fire-damaged or clearly vacant home with one dominant problem).
+ */
+export function looksDistressed(o: VisionObservations): boolean {
+  const maxIndicator = Math.max(
+    clamp(num(o.roof_condition_score)),
+    clamp(num(o.exterior_condition_score)),
+    clamp(num(o.yard_condition_score)),
+    clamp(num(o.vacancy_indicator_score, o.vacant ? 70 : 0)),
+    clamp(num(o.misc_distress_score)),
+  );
+  return computeDistressScore(o) >= 38 || maxIndicator >= 65;
+}
+
+export interface GisDistress {
+  score: number; // 0..100 targeting signal (motivation/likelihood, NOT physical condition)
+  absenteeOwner: boolean;
+  outOfState: boolean;
+  ownerType: 'individual' | 'estate' | 'company' | 'public';
+  yearsSinceSale?: number;
+  signals: string[];
+}
+
+const MS_PER_YEAR = 31557600000;
+/** Normalize a city name for comparison ("Gastonia City" → "gastonia"). */
+const normCity = (s?: string) =>
+  String(s || '').toLowerCase().replace(/\b(city|town|township|twp|village)\b/g, '').replace(/[^a-z]/g, '');
+
+/**
+ * GIS / assessor distress-lead score. Uses the parcel's ownership + mailing +
+ * sale-history attributes to flag the motivated-seller signals investors target:
+ * absentee owners, out-of-state owners, estates/heirs (probate), long tenure
+ * (deferred maintenance), and company/landlord ownership. This TARGETS likely
+ * distressed/motivated parcels; it does not claim the structure is physically
+ * distressed (that's the vision step's job).
+ */
+export function computeGisDistress(a: {
+  scity?: string; mcity?: string; mstate?: string; ownname?: string; saleEpoch?: number;
+}): GisDistress {
+  const own = String(a.ownname || '');
+  // Estate/probate = "HEIRS" or a standalone "ESTATE" — but NOT the corporate
+  // phrase "REAL ESTATE" (e.g. "WACHOVIA CORP REAL ESTATE"), which is a company.
+  const isEstate = /\bHEIRS?\b/i.test(own) || (/\bESTATE\b/i.test(own) && !/\bREAL\s+ESTATE\b/i.test(own));
+  const ownerType: GisDistress['ownerType'] =
+    /\b(CITY|TOWN|COUNTY|STATE|HOUSING AUTH|AUTHORITY|CHURCH|MINISTR|USA|UNITED STATES|DEPT|DEPARTMENT|BOARD OF|SCHOOL)\b/i.test(own) ? 'public'
+    : isEstate ? 'estate'
+    : /\b(LLC|INC|CORP|CO|TRUST|LP|LLP|COMPANY|PROPERTIES|HOLDINGS|HOMES|INVESTMENTS?|CAPITAL|GROUP|REALTY|RENTALS?|VENTURES?|PARTNERS)\b/i.test(own) ? 'company'
+    : 'individual';
+
+  const sC = normCity(a.scity), mC = normCity(a.mcity);
+  const mS = String(a.mstate || '').trim().toUpperCase();
+  const outOfState = !!mS && mS !== 'NC';
+  const absenteeOwner = (!!mC && !!sC && mC !== sC) || outOfState;
+  const yearsSinceSale = a.saleEpoch && a.saleEpoch > 0 ? Math.max(0, (Date.now() - a.saleEpoch) / MS_PER_YEAR) : undefined;
+
+  // Government/institution-owned parcels are not wholesale leads.
+  if (ownerType === 'public') {
+    return { score: 0, absenteeOwner, outOfState, ownerType, yearsSinceSale, signals: ['government / institution owned'] };
+  }
+
+  const signals: string[] = [];
+  let score = 0;
+  if (absenteeOwner) { score += 22; signals.push(outOfState ? 'absentee owner (out-of-state)' : 'absentee owner'); }
+  if (outOfState && absenteeOwner) score += 16; // out-of-state stacks
+  if (ownerType === 'estate') { score += 26; signals.push('estate / heirs owner'); }
+  if (ownerType === 'company') { score += 8; signals.push('company / investor owned'); }
+  if (yearsSinceSale !== undefined) {
+    const y = Math.round(yearsSinceSale);
+    if (yearsSinceSale >= 25) { score += 22; signals.push(`owned ${y} yrs`); }
+    else if (yearsSinceSale >= 15) { score += 14; signals.push(`owned ${y} yrs`); }
+    else if (yearsSinceSale >= 8) { score += 7; signals.push(`owned ${y} yrs`); }
+  }
+  return { score: clamp(score), absenteeOwner, outOfState, ownerType, yearsSinceSale, signals };
+}
+
 /** High-risk FEMA Special Flood Hazard Area zone codes (1% annual chance). */
 const SFHA_ZONES = /^(A|AE|AH|AO|AR|A99|V|VE)$/;
 
@@ -447,14 +539,19 @@ export function builderInterestLevel(o: VisionObservations, landScore: number): 
   return 'low';
 }
 
-function buildReasons(mode: SearchMode, o: VisionObservations, flood?: EnvScore, wetlands?: EnvScore): string[] {
+function buildReasons(mode: SearchMode, o: VisionObservations, flood?: EnvScore, wetlands?: EnvScore, gisSignals?: string[]): string[] {
   const r: string[] = [];
   if (mode === 'house') {
-    if (Array.isArray(o.reasons) && o.reasons.length) return o.reasons.slice(0, 6);
-    if (num(o.roof_condition_score) >= 50) r.push('roof deterioration');
-    if (num(o.exterior_condition_score) >= 50) r.push('exterior deterioration');
-    if (num(o.yard_condition_score) >= 50) r.push('overgrown / unkempt yard');
-    if (o.vacant || num(o.vacancy_indicator_score) >= 50) r.push('vacancy indicators');
+    // Visual distress reasons first (what the AI sees), then GIS lead signals.
+    const visual = Array.isArray(o.reasons) && o.reasons.length ? o.reasons.slice(0, 4) : [];
+    if (!visual.length) {
+      if (num(o.roof_condition_score) >= 50) visual.push('roof deterioration');
+      if (num(o.exterior_condition_score) >= 50) visual.push('exterior deterioration');
+      if (num(o.yard_condition_score) >= 50) visual.push('overgrown / unkempt yard');
+      if (o.vacant || num(o.vacancy_indicator_score) >= 50) visual.push('vacancy indicators');
+    }
+    for (const v of visual) if (r.length < 5) r.push(v);
+    if (gisSignals) for (const g of gisSignals) if (r.length < 6 && !r.includes(g)) r.push(g);
   } else {
     if (o.road_frontage) r.push('road frontage');
     if (o.utility_visibility) r.push('utilities nearby');
@@ -534,7 +631,10 @@ export async function analyzeAtPoint(
       observations,
       confidence: clamp(num(observations.confidence, 0.7) * 100, 0, 100) / 100,
       score, scoreLabel: 'Distress Score',
-      reasons: buildReasons(mode, observations),
+      // Only flag as distressed when the home actually LOOKS distressed — this is
+      // what keeps perfectly-fine houses out of the results.
+      distressed: looksDistressed(observations),
+      reasons: buildReasons(mode, observations, undefined, undefined, parcel?.gisSignals),
       recommendation: recommend(mode, score),
       analyzedAt: Date.now(), parcel,
     };
@@ -596,6 +696,14 @@ export interface Candidate {
   landValue: number;
   improvementRatio?: number; // share of value in structures
   saleEpoch?: number;
+  // GIS distress lead signals (house mode)
+  ownerName?: string;
+  absenteeOwner?: boolean;
+  outOfState?: boolean;
+  ownerType?: 'individual' | 'estate' | 'company' | 'public';
+  yearsSinceSale?: number;
+  gisDistress?: number;
+  gisSignals?: string[];
 }
 
 export interface DiscoverParams {
@@ -671,7 +779,7 @@ export async function discoverCandidates(
     `${cfg.parcelUrl}?where=${encodeURIComponent(cfg.extraWhere)}` +
     `&geometry=${xmin},${ymin},${xmax},${ymax}&geometryType=esriGeometryEnvelope&inSR=4326` +
     `&spatialRel=esriSpatialRelIntersects` +
-    `&outFields=${encodeURIComponent('parno,siteadd,scity,gisacres,parval,landval,saledate')}` +
+    `&outFields=${encodeURIComponent('parno,siteadd,scity,mcity,mstate,ownname,gisacres,parval,landval,saledate')}` +
     `&returnGeometry=true&outSR=4326&resultRecordCount=${FETCH_CAP}&f=geojson`;
 
   let features: any[] = [];
@@ -732,7 +840,7 @@ export async function discoverCandidates(
     }
 
     seen.add(parcelId);
-    candidates.push({
+    const cand: Candidate = {
       parcelId,
       address: siteadd ? `${siteadd}${scity ? `, ${scity}` : ''}, NC` : `${scity || county} County parcel ${parcelId}`,
       scity, lat: center2.lat, lng: center2.lng,
@@ -740,7 +848,22 @@ export async function discoverCandidates(
       assessedValue: Number.isFinite(assessedValue) ? assessedValue : 0,
       landValue: Number.isFinite(landValue) ? landValue : 0,
       improvementRatio, saleEpoch: Number.isFinite(saleEpoch) ? saleEpoch : undefined,
-    });
+    };
+    if (mode === 'house') {
+      // GIS distress / motivated-seller targeting from assessor + ownership data.
+      const gd = computeGisDistress({
+        scity, mcity: String(p.mcity ?? ''), mstate: String(p.mstate ?? ''),
+        ownname: String(p.ownname ?? ''), saleEpoch: cand.saleEpoch,
+      });
+      cand.ownerName = String(p.ownname ?? '').trim() || undefined;
+      cand.absenteeOwner = gd.absenteeOwner;
+      cand.outOfState = gd.outOfState;
+      cand.ownerType = gd.ownerType;
+      cand.yearsSinceSale = gd.yearsSinceSale;
+      cand.gisDistress = gd.score;
+      cand.gisSignals = gd.signals;
+    }
+    candidates.push(cand);
   }
 
   if (!candidates.length) {
@@ -755,15 +878,18 @@ export async function discoverCandidates(
   if (mode === 'land') {
     candidates.sort((a, b) => (a.improvementRatio ?? 1) - (b.improvementRatio ?? 1) || b.acres - a.acres);
   } else {
-    // Surface the likeliest houses first: confirmed structures (high improvement
-    // ratio), then real street-addressed parcels, then the rest — and within a
-    // tie, the longest-held parcels (a deferred-maintenance proxy). A real situs
-    // address starts with a non-zero house number ("123 Main St"); discovery
-    // labels unaddressed parcels "<County> County parcel <id>".
+    // Target the likeliest DISTRESSED/MOTIVATED homes first so the vision budget
+    // is spent where it counts: primary sort by the GIS distress-lead score
+    // (absentee/out-of-state/estate/long-tenure), then by a structure signal
+    // (confirmed building > addressed > other), then longest tenure. Vision then
+    // decides which of these actually LOOK distressed.
     const structureSignal = (c: Candidate) =>
       c.improvementRatio !== undefined ? c.improvementRatio : (/^[1-9]/.test(c.address) ? 0.5 : 0.2);
     candidates.sort(
-      (a, b) => structureSignal(b) - structureSignal(a) || (a.saleEpoch ?? Infinity) - (b.saleEpoch ?? Infinity),
+      (a, b) =>
+        (b.gisDistress ?? 0) - (a.gisDistress ?? 0) ||
+        structureSignal(b) - structureSignal(a) ||
+        (a.saleEpoch ?? Infinity) - (b.saleEpoch ?? Infinity),
     );
   }
   return candidates.slice(0, Math.max(1, maxCandidates));
@@ -777,6 +903,9 @@ export function analyzeCandidate(c: Candidate, mode: SearchMode, onStage?: (s: s
       parcel: {
         parcelId: c.parcelId, acres: c.acres, assessedValue: c.assessedValue,
         landValue: c.landValue, improvementRatio: c.improvementRatio,
+        ownerName: c.ownerName, absenteeOwner: c.absenteeOwner, outOfState: c.outOfState,
+        ownerType: c.ownerType, yearsSinceSale: c.yearsSinceSale,
+        gisDistress: c.gisDistress, gisSignals: c.gisSignals,
       },
     },
     onStage,
@@ -791,6 +920,7 @@ export function resultsToCsv(results: PropertyResult[]): string {
   const headers = [
     'address', 'mode', 'score', 'score_label', 'confidence',
     'lat', 'lng', 'parcel_id', 'acres', 'assessed_value', 'land_value',
+    'owner', 'owner_type', 'absentee_owner', 'out_of_state', 'years_owned', 'gis_distress_score',
     'flood_zone', 'flood_score', 'wetlands', 'wetland_score', 'builder_interest',
     'reasons', 'recommendation', 'ai_summary',
   ];
@@ -802,6 +932,8 @@ export function resultsToCsv(results: PropertyResult[]): string {
     r.address, r.mode, r.score, r.scoreLabel, r.confidence.toFixed(2),
     r.lat, r.lng,
     r.parcel?.parcelId ?? '', r.parcel?.acres ?? '', r.parcel?.assessedValue ?? '', r.parcel?.landValue ?? '',
+    r.parcel?.ownerName ?? '', r.parcel?.ownerType ?? '', r.parcel?.absenteeOwner ?? '', r.parcel?.outOfState ?? '',
+    r.parcel?.yearsSinceSale != null ? Math.round(r.parcel.yearsSinceSale) : '', r.parcel?.gisDistress ?? '',
     r.flood?.label ?? '', r.flood?.score ?? '', r.wetlands?.label ?? '', r.wetlands?.score ?? '', r.builderInterest ?? '',
     r.reasons.join('; '), r.recommendation, r.observations.summary || '',
   ].map(esc).join(','));

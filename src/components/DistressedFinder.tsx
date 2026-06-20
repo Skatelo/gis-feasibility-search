@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react';
 import {
   Home, Trees, Search, Loader2, AlertCircle, Download, FileJson, Radar,
-  MapPin, Eye, Sparkles, Target, X, Plus, Trash2, Waves, Droplets, HardHat, Landmark,
+  MapPin, Eye, Sparkles, Target, X, Plus, Trash2, Waves, Droplets, HardHat, Landmark, Flag, User,
 } from 'lucide-react';
 import {
   analyzeProperty, analyzeCandidate, discoverCandidates, resultsToCsv, downloadFile, ncCountyNames,
@@ -9,7 +9,7 @@ import {
 import type { SearchMode, PropertyResult, Candidate, EnvScore } from '../services/propertyFinderService';
 
 const MODES: { id: SearchMode; label: string; icon: typeof Home; blurb: string }[] = [
-  { id: 'house', label: 'Distressed Houses', icon: Home, blurb: 'Wholesale / fix-and-flip / rental acquisition candidates' },
+  { id: 'house', label: 'Distressed Houses', icon: Home, blurb: 'Distressed-only — GIS targets absentee/estate/long-held owners; fine homes are hidden' },
   { id: 'land', label: 'Vacant Land & Builder Lots', icon: Trees, blurb: 'Buildable parcels — access, utilities, slope, FEMA flood & wetlands, nearby development' },
 ];
 
@@ -75,6 +75,16 @@ function ResultCard({ r }: { r: PropertyResult }) {
             <span><Landmark size={12} /> {r.parcel.parcelId || '—'}</span>
             <span>{fmtAcres(r.parcel.acres)}</span>
             <span title="Assessed value">{fmtMoney(r.parcel.assessedValue)}</span>
+          </div>
+        )}
+
+        {/* GIS distress / motivated-seller lead signals (house mode) */}
+        {r.mode === 'house' && r.parcel?.ownerName && (
+          <div className="finder-owner" title="Owner of record (public assessor data)"><User size={12} /> {r.parcel.ownerName}</div>
+        )}
+        {r.mode === 'house' && r.parcel?.gisSignals && r.parcel.gisSignals.length > 0 && (
+          <div className="finder-lead-row">
+            {r.parcel.gisSignals.map((s, i) => <span key={i} className="finder-lead-chip"><Flag size={11} /> {s}</span>)}
           </div>
         )}
 
@@ -204,9 +214,17 @@ export function DistressedFinder() {
   };
 
   const visibleResults = useMemo(
-    () => results.filter((r) => r.mode === mode && r.score >= minScore).sort((a, b) => b.score - a.score),
+    () =>
+      results
+        // House mode: ONLY show homes that actually look distressed (never fine houses).
+        .filter((r) => r.mode === mode && r.score >= minScore && (mode !== 'house' || r.distressed))
+        // Most distressed first; among ties, the strongest GIS motivated-seller lead.
+        .sort((a, b) => b.score - a.score || (b.parcel?.gisDistress ?? 0) - (a.parcel?.gisDistress ?? 0)),
     [results, mode, minScore],
   );
+
+  // For the house-mode empty state: how many homes were analyzed but looked fine.
+  const analyzedHouseCount = useMemo(() => results.filter((r) => r.mode === 'house').length, [results]);
 
   const exportCsv = () => visibleResults.length && downloadFile(`property-finder-${mode}-${Date.now()}.csv`, resultsToCsv(visibleResults), 'text/csv');
   const exportJson = () => visibleResults.length && downloadFile(`property-finder-${mode}-${Date.now()}.json`, JSON.stringify(visibleResults, null, 2), 'application/json');
@@ -356,7 +374,13 @@ export function DistressedFinder() {
         </>
       )}
 
-      {!running && visibleResults.length === 0 && results.some((r) => r.mode === mode) && (
+      {!running && visibleResults.length === 0 && mode === 'house' && analyzedHouseCount > 0 && (
+        <div className="finder-empty">
+          Analyzed {analyzedHouseCount} home{analyzedHouseCount === 1 ? '' : 's'} — none looked distressed (well-maintained
+          homes are hidden by design). Try another area/ZIP, or raise “Max to analyze” to scan more parcels.
+        </div>
+      )}
+      {!running && visibleResults.length === 0 && mode === 'land' && results.some((r) => r.mode === 'land') && (
         <div className="finder-empty">No results at or above a score of {minScore}. Lower the minimum score filter.</div>
       )}
     </div>
