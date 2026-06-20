@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import {
   Home, Trees, Search, Loader2, AlertCircle, Download, FileJson, Radar,
   MapPin, Eye, Sparkles, Target, X, Plus, Trash2, Waves, Droplets, HardHat, Landmark, Flag, User,
@@ -137,6 +137,8 @@ export function DistressedFinder() {
   const [stage, setStage] = useState('');
   const [progress, setProgress] = useState({ done: 0, total: 0 });
   const [minScore, setMinScore] = useState(0);
+  const [scanSummary, setScanSummary] = useState('');
+  const stopRef = useRef(false); // set by the Stop button to halt a long scan
 
   const keysConfigured = useMemo(() => {
     try {
@@ -162,6 +164,7 @@ export function DistressedFinder() {
     const errs: { address: string; message: string }[] = [];
     setProgress({ done: 0, total: jobs.length });
     for (let i = 0; i < jobs.length; i++) {
+      if (stopRef.current) break;
       const job = jobs[i];
       setStage(`(${i + 1}/${jobs.length}) ${job.label}`);
       try {
@@ -175,9 +178,15 @@ export function DistressedFinder() {
     return errs;
   };
 
+  // Safety ceiling on vision calls per scan, so an area with few distressed homes
+  // can't run away with the API budget. The Stop button also halts at any time.
+  const SAFETY_MAX_ANALYSES = 300;
+
   const runAutoScan = async () => {
     setRunning(true);
     setErrors([]);
+    setScanSummary('');
+    stopRef.current = false;
     setStage('Discovering parcels…');
     try {
       const [city, zip] = (() => {
@@ -185,12 +194,62 @@ export function DistressedFinder() {
         if (!v) return [undefined, undefined] as const;
         return /^\d{5}$/.test(v) ? ([undefined, v] as const) : ([v, undefined] as const);
       })();
-      const candidates: Candidate[] = await discoverCandidates(
-        { county, city, zip, mode, radiusMiles: radius, minAcres, maxAcres, maxCandidates: maxAnalyze },
+      const pool: Candidate[] = await discoverCandidates(
+        { county, city, zip, mode, radiusMiles: radius, minAcres, maxAcres },
         (s) => setStage(s),
       );
-      const jobs = candidates.map((c) => ({ label: c.address, run: (onStage: (s: string) => void) => analyzeCandidate(c, mode, onStage) }));
-      const errs = await analyzeBatch(jobs);
+
+      const errs: { address: string; message: string }[] = [];
+
+      if (mode === 'land') {
+        // Land has no "distressed" gate, so analyze the first maxAnalyze parcels.
+        const targets = pool.slice(0, maxAnalyze);
+        setProgress({ done: 0, total: targets.length });
+        let done = 0;
+        for (const c of targets) {
+          if (stopRef.current) break;
+          setStage(`(${done + 1}/${targets.length}) ${c.address}`);
+          try {
+            const res = await analyzeCandidate(c, mode, (s) => setStage(`(${done + 1}/${targets.length}) ${s}`));
+            setResults((prev) => [...prev.filter((p) => !(p.lat === res.lat && p.lng === res.lng && p.mode === res.mode)), res]);
+          } catch (e: any) {
+            errs.push({ address: c.address, message: e?.message || 'Analysis failed' });
+          }
+          done++;
+          setProgress({ done, total: targets.length });
+        }
+        setScanSummary(`Analyzed ${done} of ${pool.length} candidate parcels.`);
+      } else {
+        // HOUSE: keep analyzing the ranked pool until we've FOUND maxAnalyze
+        // distressed homes (or the pool / safety ceiling / Stop button ends it).
+        const ceiling = Math.min(pool.length, SAFETY_MAX_ANALYSES);
+        setProgress({ done: 0, total: maxAnalyze });
+        let analyzed = 0;
+        let found = 0;
+        for (const c of pool) {
+          if (stopRef.current || found >= maxAnalyze || analyzed >= ceiling) break;
+          analyzed++;
+          setStage(`Found ${found}/${maxAnalyze} distressed · analyzing #${analyzed} — ${c.address}`);
+          try {
+            const res = await analyzeCandidate(c, mode, (s) =>
+              setStage(`Found ${found}/${maxAnalyze} distressed · analyzing #${analyzed} — ${s}`),
+            );
+            if (res.distressed) {
+              found++;
+              setResults((prev) => [...prev.filter((p) => !(p.lat === res.lat && p.lng === res.lng && p.mode === res.mode)), res]);
+              setProgress({ done: found, total: maxAnalyze });
+            }
+          } catch (e: any) {
+            errs.push({ address: c.address, message: e?.message || 'Analysis failed' });
+          }
+        }
+        const hitCeiling = analyzed >= ceiling && found < maxAnalyze && !stopRef.current;
+        setScanSummary(
+          `Found ${found} distressed home${found === 1 ? '' : 's'} after analyzing ${analyzed} of ${pool.length} ranked parcels` +
+            (stopRef.current ? ' (stopped).' : hitCeiling ? ` (reached the ${SAFETY_MAX_ANALYSES}-parcel safety limit).` : '.'),
+        );
+      }
+
       setErrors(errs);
     } catch (e: any) {
       setErrors([{ address: `${county}${cityZip ? ` · ${cityZip}` : ''}`, message: e?.message || 'Discovery failed' }]);
@@ -205,6 +264,8 @@ export function DistressedFinder() {
     if (!targets.length) return;
     setRunning(true);
     setErrors([]);
+    setScanSummary('');
+    stopRef.current = false;
     const jobs = targets.map((addr) => ({ label: addr, run: (onStage: (s: string) => void) => analyzeProperty(addr, mode, onStage) }));
     const errs = await analyzeBatch(jobs);
     setErrors(errs);
@@ -212,6 +273,8 @@ export function DistressedFinder() {
     setStage('');
     if (errs.length < targets.length) setQueue([]);
   };
+
+  const stopScan = () => { stopRef.current = true; setStage('Stopping…'); };
 
   const visibleResults = useMemo(
     () =>
@@ -222,9 +285,6 @@ export function DistressedFinder() {
         .sort((a, b) => b.score - a.score || (b.parcel?.gisDistress ?? 0) - (a.parcel?.gisDistress ?? 0)),
     [results, mode, minScore],
   );
-
-  // For the house-mode empty state: how many homes were analyzed but looked fine.
-  const analyzedHouseCount = useMemo(() => results.filter((r) => r.mode === 'house').length, [results]);
 
   const exportCsv = () => visibleResults.length && downloadFile(`property-finder-${mode}-${Date.now()}.csv`, resultsToCsv(visibleResults), 'text/csv');
   const exportJson = () => visibleResults.length && downloadFile(`property-finder-${mode}-${Date.now()}.json`, JSON.stringify(visibleResults, null, 2), 'application/json');
@@ -303,14 +363,21 @@ export function DistressedFinder() {
               </div>
             )}
             <div className="finder-field">
-              <label>Max to analyze: <strong>{maxAnalyze}</strong> <span>(Gemini Vision calls)</span></label>
+              <label>
+                {mode === 'house'
+                  ? <>Distressed homes to find: <strong>{maxAnalyze}</strong> <span>(keeps analyzing until found)</span></>
+                  : <>Parcels to analyze: <strong>{maxAnalyze}</strong> <span>(Gemini Vision calls)</span></>}
+              </label>
               <input type="range" min={4} max={40} step={2} value={maxAnalyze} onChange={(e) => setMaxAnalyze(Number(e.target.value))} />
             </div>
             <div className="finder-area-actions">
-              <button className="finder-btn-primary" onClick={runAutoScan} type="button" disabled={running}>
-                {running ? <Loader2 size={16} className="finder-spin" /> : <Radar size={16} />}
-                {running ? 'Scanning…' : `Scan ${county}${cityZip ? ` · ${cityZip}` : ''}`}
-              </button>
+              {running ? (
+                <button className="finder-btn-stop" onClick={stopScan} type="button"><X size={16} /> Stop scan</button>
+              ) : (
+                <button className="finder-btn-primary" onClick={runAutoScan} type="button">
+                  <Radar size={16} /> Scan {county}{cityZip ? ` · ${cityZip}` : ''}
+                </button>
+              )}
             </div>
           </div>
         ) : (
@@ -351,8 +418,11 @@ export function DistressedFinder() {
             <Loader2 size={14} className="finder-spin" />
             <span>{stage}</span>
             <div className="finder-progress-bar"><div style={{ width: `${progress.total ? (progress.done / progress.total) * 100 : 0}%` }} /></div>
+            <button className="finder-btn-stop finder-btn-stop-sm" onClick={stopScan} type="button"><X size={13} /> Stop</button>
           </div>
         )}
+
+        {!running && scanSummary && <div className="finder-scan-summary">{scanSummary}</div>}
       </div>
 
       {errors.length > 0 && (
@@ -374,10 +444,10 @@ export function DistressedFinder() {
         </>
       )}
 
-      {!running && visibleResults.length === 0 && mode === 'house' && analyzedHouseCount > 0 && (
+      {!running && visibleResults.length === 0 && mode === 'house' && scanSummary && (
         <div className="finder-empty">
-          Analyzed {analyzedHouseCount} home{analyzedHouseCount === 1 ? '' : 's'} — none looked distressed (well-maintained
-          homes are hidden by design). Try another area/ZIP, or raise “Max to analyze” to scan more parcels.
+          Only distressed homes are shown (well-maintained homes are hidden by design). If nothing was found,
+          try another City/ZIP or a different radius — or increase the radius to widen the search.
         </div>
       )}
       {!running && visibleResults.length === 0 && mode === 'land' && results.some((r) => r.mode === 'land') && (

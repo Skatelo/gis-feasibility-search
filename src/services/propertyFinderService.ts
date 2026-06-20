@@ -714,7 +714,6 @@ export interface DiscoverParams {
   radiusMiles: number;   // half-size of the scan box around the area center
   minAcres: number;
   maxAcres: number;
-  maxCandidates: number; // cap on parcels handed to the vision step
 }
 
 function fetchTimeout(url: string, ms: number): Promise<Response> {
@@ -748,15 +747,15 @@ const numOf = (v: unknown): number => {
  * Discover candidate parcels in an area and prefilter them by mode:
  *  - land:  near-vacant parcels (little/no structure value) within the acreage band
  *  - house: developed residential-sized lots (assessment values are sparse in the
- *           statewide layer, so lot size is the gate), ranked so the likeliest
- *           houses are analyzed first within the vision budget
- * Returns the top `maxCandidates` ready for the vision step.
+ *           statewide layer, so lot size is the gate), ranked by GIS distress lead
+ * Returns the FULL ranked candidate pool (the GIS step is not capped) — the
+ * caller decides how many to hand to the vision step.
  */
 export async function discoverCandidates(
   params: DiscoverParams,
   onProgress?: (s: string) => void,
 ): Promise<Candidate[]> {
-  const { county, city, zip, mode, radiusMiles, minAcres, maxAcres, maxCandidates } = params;
+  const { county, city, zip, mode, radiusMiles, minAcres, maxAcres } = params;
   const keys = getUserKeys();
   if (!keys.googleMaps) throw new Error('Google Maps API key required (set it in Account Settings).');
   const cfg = ncCountyConfig[county];
@@ -773,24 +772,40 @@ export async function discoverCandidates(
   const xmin = center.lng - dLng, xmax = center.lng + dLng;
   const ymin = center.lat - dLat, ymax = center.lat + dLat;
 
-  onProgress?.('Querying NC OneMap parcels…');
-  const FETCH_CAP = 3000;
-  const url =
+  // Page through ALL parcels in the envelope so the GIS step isn't capped by the
+  // server's per-request limit. We page until a short page (the last one), the
+  // server stops honoring the offset, or a generous safety ceiling.
+  const baseUrl =
     `${cfg.parcelUrl}?where=${encodeURIComponent(cfg.extraWhere)}` +
     `&geometry=${xmin},${ymin},${xmax},${ymax}&geometryType=esriGeometryEnvelope&inSR=4326` +
     `&spatialRel=esriSpatialRelIntersects` +
     `&outFields=${encodeURIComponent('parno,siteadd,scity,mcity,mstate,ownname,gisacres,parval,landval,saledate')}` +
-    `&returnGeometry=true&outSR=4326&resultRecordCount=${FETCH_CAP}&f=geojson`;
-
-  let features: any[] = [];
-  try {
-    const res = await fetchTimeout(url, 25000);
-    if (!res.ok) throw new Error(`GIS HTTP ${res.status}`);
-    const data = await res.json();
-    if (data?.error) throw new Error(data.error?.message || 'GIS query error');
-    features = Array.isArray(data?.features) ? data.features : [];
-  } catch (e: any) {
-    throw new Error(`NC OneMap parcel query failed (${e?.message || 'timeout'}). Try a smaller radius.`);
+    `&returnGeometry=true&outSR=4326&f=geojson`;
+  const PAGE = 2000;
+  const MAX_PAGES = 8; // up to 16k parcels
+  const features: any[] = [];
+  let prevFirstParno: string | undefined;
+  for (let page = 0; page < MAX_PAGES; page++) {
+    const pageUrl = `${baseUrl}&resultRecordCount=${PAGE}&resultOffset=${page * PAGE}`;
+    let fs: any[] = [];
+    try {
+      const res = await fetchTimeout(pageUrl, 25000);
+      if (!res.ok) throw new Error(`GIS HTTP ${res.status}`);
+      const data = await res.json();
+      if (data?.error) throw new Error(data.error?.message || 'GIS query error');
+      fs = Array.isArray(data?.features) ? data.features : [];
+    } catch (e: any) {
+      if (page === 0) throw new Error(`NC OneMap parcel query failed (${e?.message || 'timeout'}). Try a smaller radius.`);
+      break; // a partial pool is fine
+    }
+    if (!fs.length) break;
+    // Guard against servers that ignore resultOffset (would re-send the first page).
+    const firstParno = String(fs[0]?.properties?.parno ?? '');
+    if (page > 0 && firstParno && firstParno === prevFirstParno) break;
+    prevFirstParno = firstParno;
+    features.push(...fs);
+    onProgress?.(`Querying NC OneMap parcels… (${features.length})`);
+    if (fs.length < PAGE) break; // last page
   }
 
   if (!features.length) throw new Error('No parcels returned for this area. Try a larger radius or a different city/ZIP.');
@@ -892,7 +907,8 @@ export async function discoverCandidates(
         (a.saleEpoch ?? Infinity) - (b.saleEpoch ?? Infinity),
     );
   }
-  return candidates.slice(0, Math.max(1, maxCandidates));
+  // Return the full ranked pool — the caller decides how many to analyze.
+  return candidates;
 }
 
 /** Convenience: turn a discovered candidate into a full analyzed result. */

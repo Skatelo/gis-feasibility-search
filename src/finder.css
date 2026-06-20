@@ -148,6 +148,22 @@
 .finder-btn-secondary:hover:not(:disabled) { background: var(--bg-card-hover); }
 .finder-btn-primary:disabled, .finder-btn-secondary:disabled { opacity: 0.5; cursor: not-allowed; }
 
+.finder-btn-stop {
+  display: inline-flex; align-items: center; gap: 7px;
+  font-family: var(--font-sans); font-weight: 600; font-size: 0.85rem;
+  padding: 10px 18px; border-radius: var(--radius-sm); cursor: pointer;
+  background: var(--error-bg); color: var(--error); border: 1px solid var(--error-border);
+  transition: var(--transition);
+}
+.finder-btn-stop:hover { background: rgba(220, 38, 38, 0.12); }
+.finder-btn-stop-sm { padding: 5px 12px; font-size: 0.78rem; flex-shrink: 0; }
+
+.finder-scan-summary {
+  font-size: 0.82rem; color: var(--text-secondary); font-weight: 600;
+  background: var(--bg-main); border: 1px solid var(--bg-card-border);
+  border-radius: var(--radius-sm); padding: 9px 12px;
+}
+
 .finder-queue { border-top: 1px solid var(--bg-card-border); padding-top: 12px; }
 .finder-queue-head {
   display: flex; justify-content: space-between; align-items: center;
