@@ -13,9 +13,12 @@
 // (the same keys configured in Account Settings for the feasibility search).
 // ---------------------------------------------------------------------------
 
-import { getUserKeys } from './feasibilityService';
+import { getUserKeys, ncCountyConfig, fetchFemaFloodZone, fetchNwiWetlands } from './feasibilityService';
+import type { FloodZoneInfo, WetlandsInfo } from '../types/feasibility';
 
-export type SearchMode = 'house' | 'land' | 'builder';
+// Two modes: distressed houses, and a combined "land" mode that covers both
+// vacant land and builder lots (the spec asked to merge those two).
+export type SearchMode = 'house' | 'land';
 
 /** Structured observations Gemini returns from the imagery (the spec's JSON). */
 export interface VisionObservations {
@@ -52,6 +55,25 @@ export interface PropertyImagery {
   hasStreetView: boolean;
 }
 
+/** Parcel attributes carried over from the GIS discovery step (NC OneMap). */
+export interface ParcelInfo {
+  parcelId?: string;
+  acres?: number;
+  assessedValue?: number;
+  landValue?: number;
+  county?: string;
+  /** (assessedValue - landValue) / assessedValue — share of value in structures. */
+  improvementRatio?: number;
+}
+
+/** A 0..100 sub-score with a human label and the authoritative source link. */
+export interface EnvScore {
+  score: number | null; // null = could not verify (service down / no coverage)
+  label: string;
+  detail: string;
+  sourceUrl: string;
+}
+
 export interface PropertyResult {
   id: string;
   address: string;
@@ -66,6 +88,12 @@ export interface PropertyResult {
   reasons: string[];
   recommendation: string;
   analyzedAt: number;
+
+  // Land-mode enrichment
+  parcel?: ParcelInfo;
+  flood?: EnvScore;          // authoritative FEMA NFHL flood-zone score
+  wetlands?: EnvScore;       // authoritative USFWS NWI wetlands score
+  builderInterest?: 'high' | 'medium' | 'low';
 }
 
 const GEMINI_VISION_MODEL = 'gemini-3.5-flash';
@@ -195,38 +223,10 @@ JSON shape:
 For the *_score fields: 0 = pristine/well-maintained, 100 = severe distress.`;
   }
 
-  if (mode === 'builder') {
-    return `${shared}
-
-This is a BUILDER-LOT assessment: would a homebuilder buy this parcel? Detect whether the parcel is vacant/buildable, road frontage, visible utilities/power lines, tree coverage, water/wetland indicators, terrain slope, flood signals, and especially DEVELOPMENT ACTIVITY nearby (adjacent new construction, graded lots, similar-sized residential lots).
-
-JSON shape:
-\`\`\`json
-{
-  "structures_detected": 0,
-  "vacant": true,
-  "road_frontage": true,
-  "utility_visibility": true,
-  "tree_coverage_percent": 0,
-  "water_or_wetland_indicators": false,
-  "slope_score": 0,
-  "flood_indicator_score": 0,
-  "development_activity_score": 0,
-  "agricultural_use": false,
-  "commercial_use": false,
-  "encroachments": false,
-  "confidence": 0.0,
-  "summary": "one sentence",
-  "reasons": ["short phrase", "short phrase"]
-}
-\`\`\`
-slope_score: 0 = flat, 100 = steep. flood_indicator_score: 0 = none, 100 = strong wetland/flood signal. development_activity_score: 0 = none, 100 = heavy adjacent new construction.`;
-  }
-
-  // land
+  // land = combined vacant-land + builder-lot assessment
   return `${shared}
 
-This is a VACANT-LAND buildability assessment. Detect whether the parcel is vacant/cleared, road frontage / access roads, visible utilities/power lines, tree coverage percentage, water/wetland indicators, terrain slope, flood signals, nearby development, and any agricultural/commercial use or encroachments.
+This is a combined VACANT-LAND and BUILDER-LOT assessment. Detect whether the parcel is vacant/cleared, road frontage / access roads, visible utilities/power lines, tree coverage percentage, water/wetland indicators, terrain slope, flood signals, and especially DEVELOPMENT ACTIVITY nearby (adjacent new construction, graded lots, similar-sized residential lots — the signal a homebuilder would buy here), plus any agricultural/commercial use or encroachments.
 
 JSON shape:
 \`\`\`json
@@ -384,32 +384,73 @@ export function computeDistressScore(o: VisionObservations): number {
   return Math.round(roof * 0.25 + ext * 0.25 + yard * 0.2 + vac * 0.2 + misc * 0.1);
 }
 
-/** Buildability score. Weights: road frontage 20%, utilities 20%, slope 20%, flood 20%, dev proximity 20%. */
-export function computeBuildabilityScore(o: VisionObservations): number {
+/** High-risk FEMA Special Flood Hazard Area zone codes (1% annual chance). */
+const SFHA_ZONES = /^(A|AE|AH|AO|AR|A99|V|VE)$/;
+
+/**
+ * Authoritative flood-zone sub-score (0..100, higher = safer/more buildable)
+ * derived from the FEMA National Flood Hazard Layer. Returns score=null when
+ * FEMA is unverifiable so the caller can fall back to the visual estimate.
+ */
+export function scoreFloodZone(f?: FloodZoneInfo): EnvScore {
+  const sourceUrl = f?.sourceUrl || 'https://msc.fema.gov/portal/search';
+  if (!f || f.status === 'unavailable') return { score: null, label: 'Flood: unverified', detail: 'FEMA NFHL unavailable', sourceUrl };
+  if (f.status === 'no-coverage') return { score: null, label: 'Flood: no NFHL coverage', detail: 'Outside mapped NFHL', sourceUrl };
+  const z = (f.zone || '').toUpperCase();
+  if (f.inSFHA || SFHA_ZONES.test(z)) return { score: 8, label: 'High-risk flood (SFHA)', detail: `FEMA Zone ${z}`, sourceUrl };
+  if (/0\.2/.test(f.subtype || '')) return { score: 68, label: 'Moderate flood risk', detail: `Zone ${z} · 0.2% annual`, sourceUrl };
+  if (z === 'X') return { score: 95, label: 'Minimal flood risk', detail: 'FEMA Zone X', sourceUrl };
+  if (z === 'D') return { score: 50, label: 'Undetermined flood risk', detail: 'FEMA Zone D', sourceUrl };
+  return { score: 80, label: `Flood zone ${z || 'n/a'}`, detail: `FEMA Zone ${z || 'n/a'}`, sourceUrl };
+}
+
+/**
+ * Authoritative wetlands sub-score (0..100, higher = less wetland constraint)
+ * from the USFWS National Wetlands Inventory. score=null when NWI is unverifiable.
+ */
+export function scoreWetlands(w?: WetlandsInfo): EnvScore {
+  const sourceUrl = w?.sourceUrl || 'https://www.fws.gov/program/national-wetlands-inventory/wetlands-mapper';
+  if (!w || w.status === 'unavailable') return { score: null, label: 'Wetlands: unverified', detail: 'USFWS NWI unavailable', sourceUrl };
+  if (w.present === false || w.status === 'none-at-point') return { score: 95, label: 'No mapped wetlands', detail: 'NWI: none at point', sourceUrl };
+  if (w.present) return { score: 18, label: 'Mapped wetlands present', detail: w.types.slice(0, 2).join(', ') || 'NWI wetland at point', sourceUrl };
+  return { score: null, label: 'Wetlands: unverified', detail: '', sourceUrl };
+}
+
+/**
+ * Combined land score (0..100) — merges vacant-land buildability with builder
+ * interest. Weights mirror the spec: road frontage 20%, utilities 20%, slope
+ * 20%, flood 20%, development proximity 20% — but the flood/wetland inputs use
+ * the AUTHORITATIVE FEMA/NWI scores when available, falling back to Gemini's
+ * visual estimate only when those services can't confirm.
+ */
+export function computeLandScore(o: VisionObservations, flood: EnvScore, wetlands: EnvScore): number {
   const frontage = o.road_frontage ? 100 : 25;
   const utilities = o.utility_visibility ? 100 : 40;
-  const slope = clamp(100 - num(o.slope_score));            // flatter = better
-  const flood = clamp(100 - num(o.flood_indicator_score));  // less flood = better
+  const slope = clamp(100 - num(o.slope_score));
+  const floodComponent = flood.score != null ? flood.score : clamp(100 - num(o.flood_indicator_score));
   const dev = clamp(num(o.development_activity_score));
-  let score = frontage * 0.2 + utilities * 0.2 + slope * 0.2 + flood * 0.2 + dev * 0.2;
-  if (o.water_or_wetland_indicators) score -= 8;
+  let score = frontage * 0.2 + utilities * 0.2 + slope * 0.2 + floodComponent * 0.2 + dev * 0.2;
+
+  const wet = wetlands.score != null ? wetlands.score : (o.water_or_wetland_indicators ? 20 : 90);
+  if (wet < 40) score -= 14;
+  else if (wet < 80) score -= 5;
   if (o.encroachments) score -= 6;
+  if (num(o.tree_coverage_percent) > 80) score -= 5; // heavy clearing cost
   return Math.round(clamp(score));
 }
 
-/** Builder-interest score: leans on nearby development + buildability fundamentals. */
-export function computeBuilderScore(o: VisionObservations): number {
-  const build = computeBuildabilityScore(o);
+/** Builder-interest bucket from nearby development activity + buildability. */
+export function builderInterestLevel(o: VisionObservations, landScore: number): 'high' | 'medium' | 'low' {
   const dev = clamp(num(o.development_activity_score));
-  const vacantBonus = o.vacant ? 5 : -10;
-  const treePenalty = num(o.tree_coverage_percent) > 70 ? -8 : 0;
-  return Math.round(clamp(build * 0.5 + dev * 0.5 + vacantBonus + treePenalty));
+  if (dev >= 60 && landScore >= 65) return 'high';
+  if (dev >= 35 || landScore >= 55) return 'medium';
+  return 'low';
 }
 
-function buildReasons(mode: SearchMode, o: VisionObservations): string[] {
-  if (Array.isArray(o.reasons) && o.reasons.length) return o.reasons.slice(0, 6);
+function buildReasons(mode: SearchMode, o: VisionObservations, flood?: EnvScore, wetlands?: EnvScore): string[] {
   const r: string[] = [];
   if (mode === 'house') {
+    if (Array.isArray(o.reasons) && o.reasons.length) return o.reasons.slice(0, 6);
     if (num(o.roof_condition_score) >= 50) r.push('roof deterioration');
     if (num(o.exterior_condition_score) >= 50) r.push('exterior deterioration');
     if (num(o.yard_condition_score) >= 50) r.push('overgrown / unkempt yard');
@@ -418,49 +459,49 @@ function buildReasons(mode: SearchMode, o: VisionObservations): string[] {
     if (o.road_frontage) r.push('road frontage');
     if (o.utility_visibility) r.push('utilities nearby');
     if (num(o.development_activity_score) >= 50) r.push('nearby development activity');
+    // Prefer authoritative environmental flags over the visual guess.
+    if (flood && flood.score != null && flood.score < 40) r.push('FEMA high-risk flood zone');
+    if (wetlands && wetlands.score != null && wetlands.score < 40) r.push('NWI mapped wetlands');
     if (num(o.tree_coverage_percent) >= 60) r.push('heavy tree coverage');
-    if (o.water_or_wetland_indicators) r.push('possible wetlands/water');
+    if (Array.isArray(o.reasons)) for (const x of o.reasons) if (r.length < 6 && !r.includes(x)) r.push(x);
   }
   return r.length ? r : ['see AI summary'];
 }
 
-function recommend(mode: SearchMode, score: number): string {
+function recommend(mode: SearchMode, score: number, flood?: EnvScore): string {
   if (mode === 'house') {
     if (score >= 75) return 'Strong wholesale / fix-and-flip candidate — prioritize outreach';
     if (score >= 50) return 'Moderate distress — worth a closer look / drive-by';
     return 'Low distress — likely owner-occupied / maintained';
   }
-  if (mode === 'builder') {
-    if (score >= 75) return 'High builder interest — comparable to active build areas';
-    if (score >= 50) return 'Possible builder lot — verify utilities & zoning';
-    return 'Unlikely builder target right now';
-  }
-  if (score >= 75) return 'Highly buildable — pursue feasibility / due diligence';
-  if (score >= 50) return 'Buildable with constraints — verify access & utilities';
-  return 'Significant constraints — slope/flood/access concerns';
+  if (flood && flood.score != null && flood.score < 20) return 'In a FEMA flood hazard area — verify before pursuing';
+  if (score >= 75) return 'High-potential lot — pursue feasibility / builder outreach';
+  if (score >= 50) return 'Buildable with constraints — verify access, utilities & zoning';
+  return 'Significant constraints — slope/flood/wetlands/access concerns';
 }
 
 // ---------------------------------------------------------------------------
 // End-to-end: analyze one property
 // ---------------------------------------------------------------------------
 
-export async function analyzeProperty(
-  address: string,
-  mode: SearchMode,
+/**
+ * Core per-point analysis used by both manual address entry and GIS discovery.
+ * Acquires imagery → Gemini Vision → (land) authoritative FEMA flood + NWI
+ * wetlands → score. Coordinates are passed in so discovery doesn't re-geocode.
+ */
+export async function analyzeAtPoint(
+  args: { address: string; lat: number; lng: number; mode: SearchMode; parcel?: ParcelInfo },
   onStage?: (s: string) => void,
 ): Promise<PropertyResult> {
+  const { address, lat, lng, mode, parcel } = args;
   const keys = getUserKeys();
   if (!keys.googleMaps) throw new Error('Google Maps API key required (set it in Account Settings).');
   if (!keys.gemini) throw new Error('Gemini API key required (set it in Account Settings).');
 
-  onStage?.('Geocoding address…');
-  const coords = await geocodeAddress(address, keys.googleMaps);
-  if (!coords) throw new Error(`Could not geocode "${address}".`);
-
   onStage?.('Acquiring satellite + street-view imagery…');
-  const satelliteUrl = buildSatelliteUrl(coords.lat, coords.lng, keys.googleMaps);
-  const svExists = await hasStreetView(coords.lat, coords.lng, keys.googleMaps);
-  const streetViewUrl = svExists ? buildStreetViewUrl(coords.lat, coords.lng, keys.googleMaps) : null;
+  const satelliteUrl = buildSatelliteUrl(lat, lng, keys.googleMaps);
+  const svExists = await hasStreetView(lat, lng, keys.googleMaps);
+  const streetViewUrl = svExists ? buildStreetViewUrl(lat, lng, keys.googleMaps) : null;
 
   onStage?.('Encoding imagery for Gemini Vision…');
   const inlineImages: Array<{ mimeType: string; data: string }> = [];
@@ -471,34 +512,253 @@ export async function analyzeProperty(
     if (sv) inlineImages.push(sv);
   }
 
+  // For land, fetch authoritative FEMA flood + NWI wetlands in parallel with the
+  // (sequential) vision call so it adds no extra wall-clock time.
+  const envPromise: Promise<[FloodZoneInfo | undefined, WetlandsInfo | undefined]> =
+    mode === 'land'
+      ? Promise.all([
+          fetchFemaFloodZone(lat, lng).catch(() => undefined),
+          fetchNwiWetlands(lat, lng).catch(() => undefined),
+        ])
+      : Promise.resolve([undefined, undefined]);
+
   onStage?.('Gemini Vision analyzing imagery…');
   const observations = await geminiVisionAnalyze(inlineImages, mode, keys.gemini);
 
-  const score =
-    mode === 'house' ? computeDistressScore(observations)
-    : mode === 'builder' ? computeBuilderScore(observations)
-    : computeBuildabilityScore(observations);
+  let result: PropertyResult;
+  if (mode === 'house') {
+    const score = computeDistressScore(observations);
+    result = {
+      id: '', address, mode, lat, lng,
+      imagery: { satelliteUrl, streetViewUrl, hasStreetView: svExists },
+      observations,
+      confidence: clamp(num(observations.confidence, 0.7) * 100, 0, 100) / 100,
+      score, scoreLabel: 'Distress Score',
+      reasons: buildReasons(mode, observations),
+      recommendation: recommend(mode, score),
+      analyzedAt: Date.now(), parcel,
+    };
+  } else {
+    onStage?.('Checking FEMA flood + USFWS wetlands…');
+    const [floodInfo, wetInfo] = await envPromise;
+    const flood = scoreFloodZone(floodInfo);
+    const wetlands = scoreWetlands(wetInfo);
+    const score = computeLandScore(observations, flood, wetlands);
+    result = {
+      id: '', address, mode, lat, lng,
+      imagery: { satelliteUrl, streetViewUrl, hasStreetView: svExists },
+      observations,
+      confidence: clamp(num(observations.confidence, 0.7) * 100, 0, 100) / 100,
+      score, scoreLabel: 'Land Score',
+      reasons: buildReasons(mode, observations, flood, wetlands),
+      recommendation: recommend(mode, score, flood),
+      analyzedAt: Date.now(),
+      parcel, flood, wetlands,
+      builderInterest: builderInterestLevel(observations, score),
+    };
+  }
+  result.id = `${mode}-${lat.toFixed(5)},${lng.toFixed(5)}-${Date.now()}`;
+  return result;
+}
 
-  const scoreLabel =
-    mode === 'house' ? 'Distress Score'
-    : mode === 'builder' ? 'Builder Score'
-    : 'Buildability Score';
+/** Manual entry: geocode the address, then run the core analysis. */
+export async function analyzeProperty(
+  address: string,
+  mode: SearchMode,
+  onStage?: (s: string) => void,
+): Promise<PropertyResult> {
+  const keys = getUserKeys();
+  if (!keys.googleMaps) throw new Error('Google Maps API key required (set it in Account Settings).');
+  onStage?.('Geocoding address…');
+  const coords = await geocodeAddress(address, keys.googleMaps);
+  if (!coords) throw new Error(`Could not geocode "${address}".`);
+  return analyzeAtPoint({ address, lat: coords.lat, lng: coords.lng, mode }, onStage);
+}
 
-  return {
-    id: `${mode}-${coords.lat.toFixed(5)},${coords.lng.toFixed(5)}-${Date.now()}`,
-    address,
-    mode,
-    lat: coords.lat,
-    lng: coords.lng,
-    imagery: { satelliteUrl, streetViewUrl, hasStreetView: svExists },
-    observations,
-    confidence: clamp(num(observations.confidence, 0.7) * 100, 0, 100) / 100,
-    score,
-    scoreLabel,
-    reasons: buildReasons(mode, observations),
-    recommendation: recommend(mode, score),
-    analyzedAt: Date.now(),
-  };
+// ---------------------------------------------------------------------------
+// Automatic discovery — find candidate parcels across an area via the NC OneMap
+// GIS parcel layer, then prefilter cheaply on parcel attributes (the spec's
+// "use cheaper filters first; only send high-potential parcels to the expensive
+// AI"). Vision is only run on the survivors.
+// ---------------------------------------------------------------------------
+
+/** All 100 NC county names available for an area scan (sorted). */
+export const ncCountyNames: string[] = Object.keys(ncCountyConfig).sort();
+
+export interface Candidate {
+  parcelId: string;
+  address: string;
+  scity?: string;
+  lat: number;
+  lng: number;
+  acres: number;
+  assessedValue: number;
+  landValue: number;
+  improvementRatio?: number; // share of value in structures
+  saleEpoch?: number;
+}
+
+export interface DiscoverParams {
+  county: string;
+  city?: string;
+  zip?: string;
+  mode: SearchMode;
+  radiusMiles: number;   // half-size of the scan box around the area center
+  minAcres: number;
+  maxAcres: number;
+  maxCandidates: number; // cap on parcels handed to the vision step
+}
+
+function fetchTimeout(url: string, ms: number): Promise<Response> {
+  const c = new AbortController();
+  const t = setTimeout(() => c.abort(), ms);
+  return fetch(url, { signal: c.signal }).finally(() => clearTimeout(t));
+}
+
+/** Representative point (bounding-box center) of a GeoJSON parcel geometry. */
+function geomCenter(geom: any): { lat: number; lng: number } | null {
+  if (!geom) return null;
+  const ring =
+    geom.type === 'Polygon' ? geom.coordinates?.[0]
+    : geom.type === 'MultiPolygon' ? geom.coordinates?.[0]?.[0]
+    : null;
+  if (!ring || !ring.length) return null;
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+  for (const [x, y] of ring) {
+    if (x < minX) minX = x; if (x > maxX) maxX = x;
+    if (y < minY) minY = y; if (y > maxY) maxY = y;
+  }
+  return { lng: (minX + maxX) / 2, lat: (minY + maxY) / 2 };
+}
+
+const numOf = (v: unknown): number => {
+  const n = typeof v === 'string' ? parseFloat(v) : (v as number);
+  return Number.isFinite(n) ? n : NaN;
+};
+
+/**
+ * Discover candidate parcels in an area and prefilter them by mode:
+ *  - land:  near-vacant parcels (little/no structure value) within the acreage band
+ *  - house: parcels with a building, sorted by longest ownership (deferred-maintenance proxy)
+ * Returns the top `maxCandidates` ready for the vision step.
+ */
+export async function discoverCandidates(
+  params: DiscoverParams,
+  onProgress?: (s: string) => void,
+): Promise<Candidate[]> {
+  const { county, city, zip, mode, radiusMiles, minAcres, maxAcres, maxCandidates } = params;
+  const keys = getUserKeys();
+  if (!keys.googleMaps) throw new Error('Google Maps API key required (set it in Account Settings).');
+  const cfg = ncCountyConfig[county];
+  if (!cfg) throw new Error(`Unsupported county: ${county}`);
+
+  onProgress?.('Locating scan area…');
+  const areaQuery = city ? `${city}, NC` : zip ? `${zip}, NC` : `${county} County, NC`;
+  const center = await geocodeAddress(areaQuery, keys.googleMaps);
+  if (!center) throw new Error(`Could not locate "${areaQuery}".`);
+
+  // Build a lat/lng envelope of half-size radiusMiles around the center.
+  const dLat = radiusMiles / 69;
+  const dLng = radiusMiles / (69 * Math.cos((center.lat * Math.PI) / 180) || 1);
+  const xmin = center.lng - dLng, xmax = center.lng + dLng;
+  const ymin = center.lat - dLat, ymax = center.lat + dLat;
+
+  onProgress?.('Querying NC OneMap parcels…');
+  const FETCH_CAP = 3000;
+  const url =
+    `${cfg.parcelUrl}?where=${encodeURIComponent(cfg.extraWhere)}` +
+    `&geometry=${xmin},${ymin},${xmax},${ymax}&geometryType=esriGeometryEnvelope&inSR=4326` +
+    `&spatialRel=esriSpatialRelIntersects` +
+    `&outFields=${encodeURIComponent('parno,siteadd,scity,gisacres,parval,landval,saledate')}` +
+    `&returnGeometry=true&outSR=4326&resultRecordCount=${FETCH_CAP}&f=geojson`;
+
+  let features: any[] = [];
+  try {
+    const res = await fetchTimeout(url, 25000);
+    if (!res.ok) throw new Error(`GIS HTTP ${res.status}`);
+    const data = await res.json();
+    if (data?.error) throw new Error(data.error?.message || 'GIS query error');
+    features = Array.isArray(data?.features) ? data.features : [];
+  } catch (e: any) {
+    throw new Error(`NC OneMap parcel query failed (${e?.message || 'timeout'}). Try a smaller radius.`);
+  }
+
+  if (!features.length) throw new Error('No parcels returned for this area. Try a larger radius or a different city/ZIP.');
+
+  onProgress?.(`Prefiltering ${features.length} parcels…`);
+  const seen = new Set<string>();
+  const candidates: Candidate[] = [];
+  for (const f of features) {
+    const p = f?.properties || {};
+    const parcelId = String(p.parno ?? '').trim();
+    if (!parcelId || seen.has(parcelId)) continue;
+    const center2 = geomCenter(f.geometry);
+    if (!center2) continue;
+
+    const acres = numOf(p.gisacres);
+    const assessedValue = numOf(p.parval);
+    const landValue = numOf(p.landval);
+    const improvementRatio =
+      Number.isFinite(assessedValue) && assessedValue > 0
+        ? clamp((assessedValue - (Number.isFinite(landValue) ? landValue : 0)) / assessedValue, 0, 1)
+        : undefined;
+    const siteadd = String(p.siteadd ?? '').trim();
+    const scity = String(p.scity ?? '').trim();
+    const saleEpoch = numOf(p.saledate);
+
+    if (mode === 'land') {
+      if (!Number.isFinite(acres) || acres < minAcres || acres > maxAcres) continue;
+      // Near-vacant: <15% of value in structures, or no assessment at all.
+      const nearVacant = improvementRatio === undefined ? (landValue > 0 || !(assessedValue > 0)) : improvementRatio < 0.15;
+      if (!nearVacant) continue;
+    } else {
+      // House: must have a building and a real street address (for Street View), reasonable lot.
+      if (!siteadd) continue;
+      if (improvementRatio === undefined || improvementRatio < 0.3) continue;
+      if (Number.isFinite(acres) && acres > 5) continue;
+    }
+
+    seen.add(parcelId);
+    candidates.push({
+      parcelId,
+      address: siteadd ? `${siteadd}${scity ? `, ${scity}` : ''}, NC` : `${scity || county} County parcel ${parcelId}`,
+      scity, lat: center2.lat, lng: center2.lng,
+      acres: Number.isFinite(acres) ? acres : 0,
+      assessedValue: Number.isFinite(assessedValue) ? assessedValue : 0,
+      landValue: Number.isFinite(landValue) ? landValue : 0,
+      improvementRatio, saleEpoch: Number.isFinite(saleEpoch) ? saleEpoch : undefined,
+    });
+  }
+
+  if (!candidates.length) {
+    throw new Error(
+      mode === 'land'
+        ? 'No near-vacant parcels matched in this area/acreage band. Widen the acreage range or radius.'
+        : 'No parcels with structures matched in this area. Try a larger radius.',
+    );
+  }
+
+  // Rank, then cap to the vision budget.
+  if (mode === 'land') {
+    candidates.sort((a, b) => (a.improvementRatio ?? 1) - (b.improvementRatio ?? 1) || b.acres - a.acres);
+  } else {
+    candidates.sort((a, b) => (a.saleEpoch ?? Infinity) - (b.saleEpoch ?? Infinity) || (b.improvementRatio ?? 0) - (a.improvementRatio ?? 0));
+  }
+  return candidates.slice(0, Math.max(1, maxCandidates));
+}
+
+/** Convenience: turn a discovered candidate into a full analyzed result. */
+export function analyzeCandidate(c: Candidate, mode: SearchMode, onStage?: (s: string) => void): Promise<PropertyResult> {
+  return analyzeAtPoint(
+    {
+      address: c.address, lat: c.lat, lng: c.lng, mode,
+      parcel: {
+        parcelId: c.parcelId, acres: c.acres, assessedValue: c.assessedValue,
+        landValue: c.landValue, improvementRatio: c.improvementRatio,
+      },
+    },
+    onStage,
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -508,7 +768,9 @@ export async function analyzeProperty(
 export function resultsToCsv(results: PropertyResult[]): string {
   const headers = [
     'address', 'mode', 'score', 'score_label', 'confidence',
-    'lat', 'lng', 'reasons', 'recommendation', 'ai_summary',
+    'lat', 'lng', 'parcel_id', 'acres', 'assessed_value', 'land_value',
+    'flood_zone', 'flood_score', 'wetlands', 'wetland_score', 'builder_interest',
+    'reasons', 'recommendation', 'ai_summary',
   ];
   const esc = (v: unknown) => {
     const s = String(v ?? '');
@@ -516,7 +778,10 @@ export function resultsToCsv(results: PropertyResult[]): string {
   };
   const rows = results.map((r) => [
     r.address, r.mode, r.score, r.scoreLabel, r.confidence.toFixed(2),
-    r.lat, r.lng, r.reasons.join('; '), r.recommendation, r.observations.summary || '',
+    r.lat, r.lng,
+    r.parcel?.parcelId ?? '', r.parcel?.acres ?? '', r.parcel?.assessedValue ?? '', r.parcel?.landValue ?? '',
+    r.flood?.label ?? '', r.flood?.score ?? '', r.wetlands?.label ?? '', r.wetlands?.score ?? '', r.builderInterest ?? '',
+    r.reasons.join('; '), r.recommendation, r.observations.summary || '',
   ].map(esc).join(','));
   return [headers.join(','), ...rows].join('\n');
 }

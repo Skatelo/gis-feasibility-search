@@ -62,6 +62,39 @@
 .finder-mode-toggle {
   display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px;
 }
+.finder-mode-toggle.finder-mode-2 { grid-template-columns: repeat(2, 1fr); }
+
+/* Auto / Manual tabs */
+.finder-tabs {
+  display: flex; gap: 6px; border-bottom: 1px solid var(--bg-card-border); padding-bottom: 2px;
+}
+.finder-tabs button {
+  display: inline-flex; align-items: center; gap: 6px; border: none; background: transparent;
+  color: var(--text-muted); font-family: var(--font-sans); font-weight: 600; font-size: 0.84rem;
+  padding: 8px 12px; cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -3px;
+}
+.finder-tabs button:hover { color: var(--text-primary); }
+.finder-tabs button.active { color: var(--primary); border-bottom-color: var(--primary); }
+
+/* Area scan form */
+.finder-area-form {
+  display: grid; grid-template-columns: repeat(2, 1fr); gap: 14px 18px;
+}
+.finder-field { display: flex; flex-direction: column; gap: 5px; }
+.finder-field > label { font-size: 0.8rem; font-weight: 600; color: var(--text-secondary); }
+.finder-field > label span { font-weight: 400; color: var(--text-muted); }
+.finder-field select, .finder-field input[type=text], .finder-field input[type=number] {
+  border: 1px solid var(--bg-card-border); border-radius: var(--radius-sm);
+  padding: 9px 11px; font-family: var(--font-sans); font-size: 0.85rem; color: var(--text-primary);
+  background: var(--bg-main);
+}
+.finder-field select:focus, .finder-field input:focus { outline: none; border-color: var(--primary); box-shadow: 0 0 0 3px var(--primary-glow); }
+.finder-field input[type=range] { accent-color: var(--primary); }
+.finder-field-acres .finder-acre-inputs { display: flex; align-items: center; gap: 8px; }
+.finder-acre-inputs input { width: 80px; }
+.finder-acre-inputs span { font-size: 0.8rem; color: var(--text-muted); }
+.finder-area-actions { grid-column: 1 / -1; display: flex; justify-content: flex-end; }
+@media (max-width: 600px) { .finder-area-form { grid-template-columns: 1fr; } }
 .finder-mode-btn {
   display: flex; align-items: flex-start; gap: 12px; text-align: left;
   background: var(--bg-card); border: 1.5px solid var(--bg-card-border);
@@ -205,6 +238,31 @@
 .finder-result-addr { font-weight: 700; font-size: 0.9rem; color: var(--text-primary); word-break: break-word; }
 .finder-confidence { font-size: 0.76rem; color: var(--text-muted); }
 .finder-confidence strong { color: var(--secondary); }
+
+.finder-parcel-row {
+  display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 0.74rem; color: var(--text-secondary);
+  padding: 6px 0; border-top: 1px dashed var(--bg-card-border); border-bottom: 1px dashed var(--bg-card-border);
+}
+.finder-parcel-row span { display: inline-flex; align-items: center; gap: 4px; }
+.finder-parcel-row svg { color: var(--text-muted); }
+
+.finder-env-row { display: flex; flex-wrap: wrap; gap: 6px; }
+.finder-env-badge {
+  display: inline-flex; align-items: center; gap: 5px; text-decoration: none;
+  background: var(--bg-main); border: 1px solid; border-radius: 999px; padding: 3px 9px;
+}
+.finder-env-label { font-size: 0.7rem; font-weight: 600; color: var(--text-primary); }
+.finder-env-score { font-size: 0.7rem; font-weight: 800; }
+.finder-env-badge:hover { background: var(--bg-card-hover); }
+
+.finder-builder-badge {
+  display: inline-flex; align-items: center; gap: 5px; font-size: 0.7rem; font-weight: 700;
+  border-radius: 999px; padding: 3px 9px; border: 1px solid;
+}
+.finder-builder-badge svg { width: 13px; height: 13px; }
+.finder-builder-badge.bi-high { color: var(--success); border-color: var(--success-border); background: var(--success-bg); }
+.finder-builder-badge.bi-medium { color: var(--warning); border-color: rgba(217,119,6,0.25); background: rgba(217,119,6,0.06); }
+.finder-builder-badge.bi-low { color: var(--text-muted); border-color: var(--bg-card-border); background: var(--bg-main); }
 .finder-summary { font-size: 0.82rem; color: var(--text-secondary); margin: 0; }
 .finder-reasons { display: flex; flex-wrap: wrap; gap: 5px; }
 .finder-reason-chip {
