@@ -639,7 +639,9 @@ const numOf = (v: unknown): number => {
 /**
  * Discover candidate parcels in an area and prefilter them by mode:
  *  - land:  near-vacant parcels (little/no structure value) within the acreage band
- *  - house: parcels with a building, sorted by longest ownership (deferred-maintenance proxy)
+ *  - house: developed residential-sized lots (assessment values are sparse in the
+ *           statewide layer, so lot size is the gate), ranked so the likeliest
+ *           houses are analyzed first within the vision budget
  * Returns the top `maxCandidates` ready for the vision step.
  */
 export async function discoverCandidates(
@@ -687,6 +689,7 @@ export async function discoverCandidates(
 
   onProgress?.(`Prefiltering ${features.length} parcels…`);
   const seen = new Set<string>();
+  const seenStreets = new Set<string>(); // collapses condo/townhome units at one address (house mode)
   const candidates: Candidate[] = [];
   for (const f of features) {
     const p = f?.properties || {};
@@ -712,10 +715,20 @@ export async function discoverCandidates(
       const nearVacant = improvementRatio === undefined ? (landValue > 0 || !(assessedValue > 0)) : improvementRatio < 0.15;
       if (!nearVacant) continue;
     } else {
-      // House: must have a building and a real street address (for Street View), reasonable lot.
-      if (!siteadd) continue;
-      if (improvementRatio === undefined || improvementRatio < 0.3) continue;
-      if (Number.isFinite(acres) && acres > 5) continue;
+      // House: a developed, residential-sized lot. The statewide NC OneMap layer
+      // leaves parval/landval EMPTY in many counties (Mecklenburg keeps them in a
+      // separate CAMA layer), so we must NOT require them. Lot size is the gate;
+      // assessment values, when present, only drop clearly-vacant parcels. Vision
+      // then judges actual condition/occupancy.
+      if (Number.isFinite(acres) && (acres < 0.04 || acres > 6)) continue; // slivers / large tracts
+      if (improvementRatio !== undefined && improvementRatio < 0.1) continue; // confirmed raw land
+      // Collapse multiple units sharing one street address (condo/townhome towers)
+      // so a single building can't consume the whole vision budget.
+      const streetKey = siteadd ? siteadd.split(',')[0].trim().toLowerCase().replace(/\s+/g, ' ') : '';
+      if (streetKey) {
+        if (seenStreets.has(streetKey)) continue;
+        seenStreets.add(streetKey);
+      }
     }
 
     seen.add(parcelId);
@@ -734,7 +747,7 @@ export async function discoverCandidates(
     throw new Error(
       mode === 'land'
         ? 'No near-vacant parcels matched in this area/acreage band. Widen the acreage range or radius.'
-        : 'No parcels with structures matched in this area. Try a larger radius.',
+        : 'No residential parcels matched in this area. Try a larger radius or a different city/ZIP.',
     );
   }
 
@@ -742,7 +755,16 @@ export async function discoverCandidates(
   if (mode === 'land') {
     candidates.sort((a, b) => (a.improvementRatio ?? 1) - (b.improvementRatio ?? 1) || b.acres - a.acres);
   } else {
-    candidates.sort((a, b) => (a.saleEpoch ?? Infinity) - (b.saleEpoch ?? Infinity) || (b.improvementRatio ?? 0) - (a.improvementRatio ?? 0));
+    // Surface the likeliest houses first: confirmed structures (high improvement
+    // ratio), then real street-addressed parcels, then the rest — and within a
+    // tie, the longest-held parcels (a deferred-maintenance proxy). A real situs
+    // address starts with a non-zero house number ("123 Main St"); discovery
+    // labels unaddressed parcels "<County> County parcel <id>".
+    const structureSignal = (c: Candidate) =>
+      c.improvementRatio !== undefined ? c.improvementRatio : (/^[1-9]/.test(c.address) ? 0.5 : 0.2);
+    candidates.sort(
+      (a, b) => structureSignal(b) - structureSignal(a) || (a.saleEpoch ?? Infinity) - (b.saleEpoch ?? Infinity),
+    );
   }
   return candidates.slice(0, Math.max(1, maxCandidates));
 }
