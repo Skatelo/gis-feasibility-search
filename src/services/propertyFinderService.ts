@@ -143,6 +143,41 @@ export async function geocodeAddress(address: string, apiKey: string): Promise<{
   return out;
 }
 
+const REVGEO_CACHE_PREFIX = 'gisfs:finder:revgeo:v1:';
+
+/**
+ * Reverse-geocode a coordinate → a human street address via Google Geocoding.
+ * Used to give discovered parcels (especially vacant land, which usually has no
+ * situs address) a real ADDRESS instead of a "County parcel #" label. Prefers a
+ * precise street_address/premise result; cached per rounded coordinate.
+ */
+export async function reverseGeocode(lat: number, lng: number, apiKey: string): Promise<string | null> {
+  const key = `${REVGEO_CACHE_PREFIX}${lat.toFixed(5)},${lng.toFixed(5)}`;
+  try {
+    const raw = localStorage.getItem(key);
+    if (raw) {
+      const v = JSON.parse(raw);
+      if (typeof v?.a === 'string' && Date.now() - (v.t || 0) < 90 * 864e5) return v.a || null;
+    }
+  } catch { /* ignore */ }
+
+  try {
+    const url = `https://maps.googleapis.com/maps/api/geocode/json?latlng=${lat},${lng}&key=${apiKey}`;
+    const res = await fetch(url);
+    if (!res.ok) return null;
+    const data = await res.json();
+    if (data.status !== 'OK' || !Array.isArray(data.results) || !data.results.length) return null;
+    // Prefer the most precise result that has a street number; fall back to the first.
+    const precise = data.results.find((r: any) => r.types?.some((t: string) => ['street_address', 'premise', 'subpremise'].includes(t)));
+    const address: string = (precise || data.results[0]).formatted_address || '';
+    const cleaned = address.replace(/,?\s*USA$/i, '').trim();
+    try { localStorage.setItem(key, JSON.stringify({ a: cleaned, t: Date.now() })); } catch { /* ignore */ }
+    return cleaned || null;
+  } catch {
+    return null;
+  }
+}
+
 /** High-zoom Google satellite tile centered on the parcel. */
 export function buildSatelliteUrl(lat: number, lng: number, apiKey: string, zoom = 19): string {
   const params = new URLSearchParams({
@@ -738,6 +773,8 @@ export interface Candidate {
   landValue: number;
   improvementRatio?: number; // share of value in structures
   saleEpoch?: number;
+  /** True when `address` came from the parcel's situs address (not a fallback). */
+  addressFromSitus?: boolean;
   // GIS distress lead signals (house mode)
   ownerName?: string;
   absenteeOwner?: boolean;
@@ -902,6 +939,7 @@ export async function discoverCandidates(
     const cand: Candidate = {
       parcelId,
       address: siteadd ? `${siteadd}${scity ? `, ${scity}` : ''}, NC` : `${scity || county} County parcel ${parcelId}`,
+      addressFromSitus: !!siteadd,
       scity, lat: center2.lat, lng: center2.lng,
       acres: Number.isFinite(acres) ? acres : 0,
       assessedValue: Number.isFinite(assessedValue) ? assessedValue : 0,
@@ -933,33 +971,27 @@ export async function discoverCandidates(
     );
   }
 
-  // Rank, then cap to the vision budget.
-  if (mode === 'land') {
-    candidates.sort((a, b) => (a.improvementRatio ?? 1) - (b.improvementRatio ?? 1) || b.acres - a.acres);
-  } else {
-    // Target the likeliest DISTRESSED/MOTIVATED homes first so the vision budget
-    // is spent where it counts: primary sort by the GIS distress-lead score
-    // (absentee/out-of-state/estate/long-tenure), then by a structure signal
-    // (confirmed building > addressed > other), then longest tenure. Vision then
-    // decides which of these actually LOOK distressed.
-    const structureSignal = (c: Candidate) =>
-      c.improvementRatio !== undefined ? c.improvementRatio : (/^[1-9]/.test(c.address) ? 0.5 : 0.2);
-    candidates.sort(
-      (a, b) =>
-        (b.gisDistress ?? 0) - (a.gisDistress ?? 0) ||
-        structureSignal(b) - structureSignal(a) ||
-        (a.saleEpoch ?? Infinity) - (b.saleEpoch ?? Infinity),
-    );
-  }
-  // Return the full ranked pool — the caller decides how many to analyze.
+  // No ranking — return candidates in natural GIS order so the scan works
+  // straight through the whole area without prioritizing (or capping) any
+  // subset. The GIS distress signals are still computed for display. The caller
+  // decides how many to analyze.
   return candidates;
 }
 
 /** Convenience: turn a discovered candidate into a full analyzed result. */
-export function analyzeCandidate(c: Candidate, mode: SearchMode, onStage?: (s: string) => void): Promise<PropertyResult> {
+export async function analyzeCandidate(c: Candidate, mode: SearchMode, onStage?: (s: string) => void): Promise<PropertyResult> {
+  // When the parcel has no situs address (common for vacant land), resolve a real
+  // street address from its coordinates instead of showing "County parcel #".
+  let address = c.address;
+  if (!c.addressFromSitus) {
+    onStage?.('Resolving address…');
+    const keys = getUserKeys();
+    const rev = keys.googleMaps ? await reverseGeocode(c.lat, c.lng, keys.googleMaps) : null;
+    if (rev) address = rev;
+  }
   return analyzeAtPoint(
     {
-      address: c.address, lat: c.lat, lng: c.lng, mode,
+      address, lat: c.lat, lng: c.lng, mode,
       parcel: {
         parcelId: c.parcelId, acres: c.acres, assessedValue: c.assessedValue,
         landValue: c.landValue, improvementRatio: c.improvementRatio,
