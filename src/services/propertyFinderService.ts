@@ -488,6 +488,16 @@ const normStreet = (s?: string) =>
 
 const isPoBox = (s?: string) => /\bp\.?\s*o\.?\s*box\b|\bpost\s+office\s+box\b/i.test(String(s || ''));
 
+/** Classify an owner-of-record name into individual / company / estate / public. */
+export function classifyOwner(name?: string): 'individual' | 'company' | 'estate' | 'public' {
+  const own = String(name || '');
+  if (/\b(CITY|TOWN|COUNTY|STATE|HOUSING AUTH|AUTHORITY|CHURCH|MINISTR|USA|UNITED STATES|DEPT|DEPARTMENT|BOARD OF|SCHOOL)\b/i.test(own)) return 'public';
+  // Estate/probate = "HEIRS" or a standalone "ESTATE" — but NOT "REAL ESTATE".
+  if (/\bHEIRS?\b/i.test(own) || (/\bESTATE\b/i.test(own) && !/\bREAL\s+ESTATE\b/i.test(own))) return 'estate';
+  if (/\b(LLC|INC|CORP|CO|TRUST|LP|LLP|COMPANY|PROPERTIES|HOLDINGS|HOMES|INVESTMENTS?|CAPITAL|GROUP|REALTY|RENTALS?|VENTURES?|PARTNERS)\b/i.test(own)) return 'company';
+  return 'individual';
+}
+
 /**
  * GIS / assessor distress-lead score. Uses the parcel's ownership + mailing +
  * sale-history attributes to flag the motivated-seller signals investors target:
@@ -506,15 +516,7 @@ const isPoBox = (s?: string) => /\bp\.?\s*o\.?\s*box\b|\bpost\s+office\s+box\b/i
 export function computeGisDistress(a: {
   siteadd?: string; scity?: string; mailadd?: string; mcity?: string; mstate?: string; ownname?: string; saleEpoch?: number;
 }): GisDistress {
-  const own = String(a.ownname || '');
-  // Estate/probate = "HEIRS" or a standalone "ESTATE" — but NOT the corporate
-  // phrase "REAL ESTATE" (e.g. "WACHOVIA CORP REAL ESTATE"), which is a company.
-  const isEstate = /\bHEIRS?\b/i.test(own) || (/\bESTATE\b/i.test(own) && !/\bREAL\s+ESTATE\b/i.test(own));
-  const ownerType: GisDistress['ownerType'] =
-    /\b(CITY|TOWN|COUNTY|STATE|HOUSING AUTH|AUTHORITY|CHURCH|MINISTR|USA|UNITED STATES|DEPT|DEPARTMENT|BOARD OF|SCHOOL)\b/i.test(own) ? 'public'
-    : isEstate ? 'estate'
-    : /\b(LLC|INC|CORP|CO|TRUST|LP|LLP|COMPANY|PROPERTIES|HOLDINGS|HOMES|INVESTMENTS?|CAPITAL|GROUP|REALTY|RENTALS?|VENTURES?|PARTNERS)\b/i.test(own) ? 'company'
-    : 'individual';
+  const ownerType = classifyOwner(a.ownname);
 
   const mS = String(a.mstate || '').trim().toUpperCase();
   const outOfState = !!mS && mS !== 'NC';
@@ -971,10 +973,25 @@ export async function discoverCandidates(
     );
   }
 
-  // No ranking — return candidates in natural GIS order so the scan works
-  // straight through the whole area without prioritizing (or capping) any
-  // subset. The GIS distress signals are still computed for display. The caller
-  // decides how many to analyze.
+  // Rank the FULL pool best-first (ranking never drops anything — it only orders).
+  // The caller then works straight DOWN the ranked list and keeps going until it
+  // hits its target or the whole area is exhausted, so ranking never caps the scan.
+  if (mode === 'land') {
+    // Most-vacant first (lowest share of value in structures), then larger lots.
+    candidates.sort((a, b) => (a.improvementRatio ?? 1) - (b.improvementRatio ?? 1) || b.acres - a.acres);
+  } else {
+    // Likeliest distressed/motivated first: GIS distress-lead score (absentee/
+    // out-of-state/estate/long-tenure), then a structure signal (confirmed
+    // building > addressed > other), then longest tenure.
+    const structureSignal = (c: Candidate) =>
+      c.improvementRatio !== undefined ? c.improvementRatio : (/^[1-9]/.test(c.address) ? 0.5 : 0.2);
+    candidates.sort(
+      (a, b) =>
+        (b.gisDistress ?? 0) - (a.gisDistress ?? 0) ||
+        structureSignal(b) - structureSignal(a) ||
+        (a.saleEpoch ?? Infinity) - (b.saleEpoch ?? Infinity),
+    );
+  }
   return candidates;
 }
 
@@ -1005,6 +1022,169 @@ export async function analyzeCandidate(c: Candidate, mode: SearchMode, onStage?:
 }
 
 // ---------------------------------------------------------------------------
+// Investor Buyer List — build a cash-buyer / investor list from county GIS+tax
+// records by aggregating parcels per owner. Multi-property owners, LLCs, and
+// out-of-state portfolio holders are the people who BUY investment deals.
+// Pure GIS (no imagery / AI): fast and free, works for any of NC's 100 counties.
+// ---------------------------------------------------------------------------
+
+export interface BuyerListParams {
+  county: string;
+  city?: string;
+  zip?: string;
+  radiusMiles: number;   // envelope half-size; a large radius ≈ the whole county
+  minProperties: number; // keep owners holding at least this many parcels
+}
+
+export interface BuyerRecord {
+  ownerName: string;
+  mailingAddress: string; // street, city, state, zip (as recorded)
+  mailCity?: string;
+  mailState?: string;
+  ownerType: 'individual' | 'company' | 'estate';
+  outOfState: boolean;
+  propertyCount: number;
+  totalAssessedValue: number;
+  exampleProperties: string[];     // up to 6 situs addresses they own
+  mostRecentPurchaseEpoch?: number;
+}
+
+/** Normalize an owner name for grouping (drop punctuation, suffixes, "ET AL"). */
+const normOwner = (s?: string) =>
+  String(s || '')
+    .toUpperCase()
+    .replace(/[^A-Z0-9 &]/g, ' ')
+    .replace(/\b(ET AL|ETAL|ETUX|ET UX|ETVIR|ET VIR|JR|SR|III|II|IV|TRUSTEE|TRUSTEES)\b/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+/**
+ * Build an investor/cash-buyer list for an area from the county GIS parcel/tax
+ * records. Pages through every parcel in the envelope (geometry off, so it's
+ * light enough to cover a city or most of a county), groups parcels by owner
+ * identity (normalized name + mailing street), and returns owners holding at
+ * least `minProperties` parcels — the active landlords/investors to market to.
+ */
+export async function buildBuyerList(
+  params: BuyerListParams,
+  onProgress?: (s: string) => void,
+  shouldStop?: () => boolean,
+): Promise<BuyerRecord[]> {
+  const { county, city, zip, radiusMiles, minProperties } = params;
+  const keys = getUserKeys();
+  if (!keys.googleMaps) throw new Error('Google Maps API key required (set it in Account Settings).');
+  const cfg = ncCountyConfig[county];
+  if (!cfg) throw new Error(`Unsupported county: ${county}`);
+
+  onProgress?.('Locating area…');
+  const areaQuery = city ? `${city}, NC` : zip ? `${zip}, NC` : `${county} County, NC`;
+  const center = await geocodeAddress(areaQuery, keys.googleMaps);
+  if (!center) throw new Error(`Could not locate "${areaQuery}".`);
+
+  const dLat = radiusMiles / 69;
+  const dLng = radiusMiles / (69 * Math.cos((center.lat * Math.PI) / 180) || 1);
+  const env = `${center.lng - dLng},${center.lat - dLat},${center.lng + dLng},${center.lat + dLat}`;
+
+  // No geometry → tiny rows → we can page deeply across a whole city/county.
+  const baseUrl =
+    `${cfg.parcelUrl}?where=${encodeURIComponent(cfg.extraWhere)}` +
+    `&geometry=${env}&geometryType=esriGeometryEnvelope&inSR=4326&spatialRel=esriSpatialRelIntersects` +
+    `&outFields=${encodeURIComponent('parno,siteadd,scity,ownname,mailadd,mcity,mstate,mzip,parval,saledate')}` +
+    `&returnGeometry=false&f=json`;
+  const PAGE = 2000;
+  const MAX_PAGES = 100; // up to 200k parcels — county-scale (rows are tiny w/o geometry)
+
+  type Agg = {
+    ownerName: string; mailadd: string; mcity: string; mstate: string; mzip: string;
+    ownerType: 'individual' | 'company' | 'estate'; outOfState: boolean;
+    count: number; totalAssessed: number; examples: string[]; recentSale?: number;
+  };
+  const groups = new Map<string, Agg>();
+  let scanned = 0;
+  let prevFirstParno: string | undefined;
+
+  for (let page = 0; page < MAX_PAGES; page++) {
+    if (shouldStop?.()) break;
+    const pageUrl = `${baseUrl}&resultRecordCount=${PAGE}&resultOffset=${page * PAGE}`;
+    let rows: any[] = [];
+    try {
+      const res = await fetchTimeout(pageUrl, 25000);
+      if (!res.ok) throw new Error(`GIS HTTP ${res.status}`);
+      const data = await res.json();
+      if (data?.error) throw new Error(data.error?.message || 'GIS query error');
+      rows = Array.isArray(data?.features) ? data.features : [];
+    } catch (e: any) {
+      if (page === 0) throw new Error(`NC OneMap parcel query failed (${e?.message || 'timeout'}). Try a smaller radius.`);
+      break;
+    }
+    if (!rows.length) break;
+    const firstParno = String(rows[0]?.attributes?.parno ?? '');
+    if (page > 0 && firstParno && firstParno === prevFirstParno) break; // offset ignored
+    prevFirstParno = firstParno;
+
+    for (const f of rows) {
+      const a = f.attributes || {};
+      const owner = String(a.ownname ?? '').trim();
+      if (!owner) continue;
+      const ownerType = classifyOwner(owner);
+      if (ownerType === 'public') continue; // governments aren't buyers
+      const mailadd = String(a.mailadd ?? '').trim();
+      const key = `${normOwner(owner)}|${normStreet(mailadd)}`;
+      if (!key.replace('|', '').trim()) continue;
+
+      let g = groups.get(key);
+      if (!g) {
+        const mstate = String(a.mstate ?? '').trim().toUpperCase();
+        g = {
+          ownerName: owner, mailadd, mcity: String(a.mcity ?? '').trim(), mstate,
+          mzip: String(a.mzip ?? '').trim(),
+          ownerType: ownerType === 'estate' ? 'estate' : ownerType, // never 'public' here
+          outOfState: !!mstate && mstate !== 'NC',
+          count: 0, totalAssessed: 0, examples: [],
+        };
+        groups.set(key, g);
+      }
+      g.count++;
+      const pv = numOf(a.parval);
+      if (Number.isFinite(pv)) g.totalAssessed += pv;
+      const situs = String(a.siteadd ?? '').trim();
+      if (situs && g.examples.length < 6 && !g.examples.includes(situs)) g.examples.push(situs);
+      const sale = numOf(a.saledate);
+      if (Number.isFinite(sale) && (g.recentSale == null || sale > g.recentSale)) g.recentSale = sale;
+    }
+    scanned += rows.length;
+    onProgress?.(`Scanning parcels… (${scanned})`);
+    if (rows.length < PAGE) break; // last page
+  }
+
+  if (!scanned) throw new Error('No parcels returned for this area. Try a larger radius or a different city/ZIP.');
+
+  const list: BuyerRecord[] = [];
+  for (const g of groups.values()) {
+    if (g.count < minProperties) continue;
+    const mailingAddress = [g.mailadd, [g.mcity, g.mstate].filter(Boolean).join(', '), g.mzip].filter(Boolean).join(', ');
+    list.push({
+      ownerName: g.ownerName,
+      mailingAddress: mailingAddress || 'N/A',
+      mailCity: g.mcity || undefined,
+      mailState: g.mstate || undefined,
+      ownerType: g.ownerType,
+      outOfState: g.outOfState,
+      propertyCount: g.count,
+      totalAssessedValue: Math.round(g.totalAssessed),
+      exampleProperties: g.examples,
+      mostRecentPurchaseEpoch: g.recentSale,
+    });
+  }
+  if (!list.length) {
+    throw new Error(`No owners hold ${minProperties}+ parcels in this area. Lower the minimum, or widen the radius.`);
+  }
+  // Biggest portfolios first (strongest buyers), then highest total value.
+  list.sort((a, b) => b.propertyCount - a.propertyCount || b.totalAssessedValue - a.totalAssessedValue);
+  return list;
+}
+
+// ---------------------------------------------------------------------------
 // Export
 // ---------------------------------------------------------------------------
 
@@ -1028,6 +1208,27 @@ export function resultsToCsv(results: PropertyResult[]): string {
     r.parcel?.yearsSinceSale != null ? Math.round(r.parcel.yearsSinceSale) : '', r.parcel?.gisDistress ?? '',
     r.flood?.label ?? '', r.flood?.score ?? '', r.wetlands?.label ?? '', r.wetlands?.score ?? '', r.builderInterest ?? '',
     r.reasons.join('; '), r.recommendation, r.observations.summary || '',
+  ].map(esc).join(','));
+  return [headers.join(','), ...rows].join('\n');
+}
+
+export function buyersToCsv(buyers: BuyerRecord[]): string {
+  const headers = [
+    'owner', 'owner_type', 'out_of_state', 'property_count', 'total_assessed_value',
+    'mailing_address', 'mail_city', 'mail_state', 'most_recent_purchase', 'example_properties',
+  ];
+  const esc = (v: unknown) => {
+    const s = String(v ?? '');
+    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  };
+  const fmtDate = (e?: number) => {
+    if (!e) return '';
+    const d = new Date(e);
+    return isNaN(d.getTime()) ? '' : d.toISOString().slice(0, 10);
+  };
+  const rows = buyers.map((b) => [
+    b.ownerName, b.ownerType, b.outOfState, b.propertyCount, b.totalAssessedValue,
+    b.mailingAddress, b.mailCity ?? '', b.mailState ?? '', fmtDate(b.mostRecentPurchaseEpoch), b.exampleProperties.join('; '),
   ].map(esc).join(','));
   return [headers.join(','), ...rows].join('\n');
 }

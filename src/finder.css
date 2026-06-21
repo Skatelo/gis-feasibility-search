@@ -63,6 +63,42 @@
   display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px;
 }
 .finder-mode-toggle.finder-mode-2 { grid-template-columns: repeat(2, 1fr); }
+.finder-mode-toggle.finder-mode-3 { grid-template-columns: repeat(3, 1fr); }
+
+/* Investor buyer-list table */
+.finder-table-wrap {
+  width: 100%; overflow-x: auto; border: 1px solid var(--bg-card-border);
+  border-radius: var(--radius-md); background: var(--bg-card); box-shadow: var(--shadow-sm);
+  -webkit-overflow-scrolling: touch;
+}
+.finder-buyer-table { width: 100%; border-collapse: collapse; font-size: 0.82rem; min-width: 760px; }
+.finder-buyer-table thead th {
+  text-align: left; font-family: var(--font-heading); font-size: 0.72rem; text-transform: uppercase;
+  letter-spacing: 0.04em; color: var(--text-muted); padding: 11px 12px; border-bottom: 1px solid var(--bg-card-border);
+  background: var(--bg-main); position: sticky; top: 0;
+}
+.finder-buyer-table th.num, .finder-buyer-table td.num { text-align: right; white-space: nowrap; }
+.finder-buyer-table tbody td { padding: 10px 12px; border-bottom: 1px solid var(--bg-card-border); color: var(--text-secondary); vertical-align: top; }
+.finder-buyer-table tbody tr:last-child td { border-bottom: none; }
+.finder-buyer-table tbody tr:hover { background: var(--bg-card-hover); }
+.finder-buyer-table td.owner { font-weight: 700; color: var(--text-primary); white-space: nowrap; }
+.finder-buyer-table td.num.strong { font-weight: 800; color: var(--primary); }
+.finder-buyer-table td.addr { color: var(--text-muted); max-width: 240px; }
+.finder-buyer-table td.examples { color: var(--text-muted); font-size: 0.76rem; max-width: 280px; }
+
+.finder-oos-tag {
+  display: inline-block; margin-left: 6px; font-size: 0.64rem; font-weight: 800; color: var(--accent);
+  background: rgba(219, 39, 119, 0.08); border: 1px solid rgba(219, 39, 119, 0.25); border-radius: 4px; padding: 1px 5px;
+}
+.finder-owner-type {
+  display: inline-flex; align-items: center; gap: 4px; font-size: 0.72rem; font-weight: 700; text-transform: capitalize;
+  border-radius: 999px; padding: 2px 9px; border: 1px solid var(--bg-card-border);
+}
+.finder-owner-type.ot-company { color: var(--secondary); background: var(--secondary-glow); border-color: rgba(8,145,178,0.25); }
+.finder-owner-type.ot-estate { color: var(--warning); background: rgba(217,119,6,0.06); border-color: rgba(217,119,6,0.25); }
+.finder-owner-type.ot-individual { color: var(--text-secondary); background: var(--bg-main); }
+
+@media (max-width: 768px) { .finder-mode-toggle.finder-mode-3 { grid-template-columns: 1fr; } }
 
 /* Auto / Manual tabs */
 .finder-tabs {

@@ -1,16 +1,19 @@
 import { useMemo, useRef, useState } from 'react';
 import {
   Home, Trees, Search, Loader2, AlertCircle, Download, FileJson, Radar,
-  MapPin, Eye, Sparkles, Target, X, Plus, Trash2, Waves, Droplets, HardHat, Landmark, Flag, User,
+  MapPin, Eye, Sparkles, Target, X, Plus, Trash2, Waves, Droplets, HardHat, Landmark, Flag, User, Users, Building2,
 } from 'lucide-react';
 import {
-  analyzeProperty, analyzeCandidate, discoverCandidates, resultsToCsv, downloadFile, ncCountyNames,
+  analyzeProperty, analyzeCandidate, discoverCandidates, buildBuyerList, resultsToCsv, buyersToCsv, downloadFile, ncCountyNames,
 } from '../services/propertyFinderService';
-import type { SearchMode, PropertyResult, Candidate, EnvScore } from '../services/propertyFinderService';
+import type { SearchMode, PropertyResult, Candidate, EnvScore, BuyerRecord } from '../services/propertyFinderService';
 
-const MODES: { id: SearchMode; label: string; icon: typeof Home; blurb: string }[] = [
+type UiMode = SearchMode | 'buyers';
+
+const MODES: { id: UiMode; label: string; icon: typeof Home; blurb: string }[] = [
   { id: 'house', label: 'Distressed Houses', icon: Home, blurb: 'Distressed-only — GIS targets absentee/estate/long-held owners; fine homes are hidden' },
   { id: 'land', label: 'Vacant Land & Builder Lots', icon: Trees, blurb: 'Buildable parcels — access, utilities, slope, FEMA flood & wetlands, nearby development' },
+  { id: 'buyers', label: 'Investor Buyer List', icon: Users, blurb: 'Cash buyers from county tax records — owners holding multiple parcels (LLCs, landlords, out-of-state)' },
 ];
 
 function scoreColor(score: number): string {
@@ -115,7 +118,7 @@ function ResultCard({ r }: { r: PropertyResult }) {
 }
 
 export function DistressedFinder() {
-  const [mode, setMode] = useState<SearchMode>('house');
+  const [mode, setMode] = useState<UiMode>('house');
   const [tab, setTab] = useState<'auto' | 'manual'>('auto');
 
   // Area-scan (auto) inputs
@@ -125,6 +128,10 @@ export function DistressedFinder() {
   const [minAcres, setMinAcres] = useState(0.15);
   const [maxAcres, setMaxAcres] = useState(20);
   const [maxAnalyze, setMaxAnalyze] = useState(12);
+
+  // Buyer-list inputs/results
+  const [minProperties, setMinProperties] = useState(3);
+  const [buyers, setBuyers] = useState<BuyerRecord[]>([]);
 
   // Manual inputs
   const [addressInput, setAddressInput] = useState('');
@@ -178,11 +185,9 @@ export function DistressedFinder() {
     return errs;
   };
 
-  // Safety ceiling on vision calls per scan, so an area with few distressed homes
-  // can't run away with the API budget. The Stop button also halts at any time.
-  const SAFETY_MAX_ANALYSES = 300;
-
   const runAutoScan = async () => {
+    // Only the property modes reach this; narrow 'buyers' out of the vision path.
+    const sMode: SearchMode = mode === 'land' ? 'land' : 'house';
     setRunning(true);
     setErrors([]);
     setScanSummary('');
@@ -195,13 +200,13 @@ export function DistressedFinder() {
         return /^\d{5}$/.test(v) ? ([undefined, v] as const) : ([v, undefined] as const);
       })();
       const pool: Candidate[] = await discoverCandidates(
-        { county, city, zip, mode, radiusMiles: radius, minAcres, maxAcres },
+        { county, city, zip, mode: sMode, radiusMiles: radius, minAcres, maxAcres },
         (s) => setStage(s),
       );
 
       const errs: { address: string; message: string }[] = [];
 
-      if (mode === 'land') {
+      if (sMode === 'land') {
         // Land has no "distressed" gate, so analyze the first maxAnalyze parcels.
         const targets = pool.slice(0, maxAnalyze);
         setProgress({ done: 0, total: targets.length });
@@ -210,7 +215,7 @@ export function DistressedFinder() {
           if (stopRef.current) break;
           setStage(`(${done + 1}/${targets.length}) ${c.address}`);
           try {
-            const res = await analyzeCandidate(c, mode, (s) => setStage(`(${done + 1}/${targets.length}) ${s}`));
+            const res = await analyzeCandidate(c, sMode, (s) => setStage(`(${done + 1}/${targets.length}) ${s}`));
             setResults((prev) => [...prev.filter((p) => !(p.lat === res.lat && p.lng === res.lng && p.mode === res.mode)), res]);
           } catch (e: any) {
             errs.push({ address: c.address, message: e?.message || 'Analysis failed' });
@@ -220,19 +225,19 @@ export function DistressedFinder() {
         }
         setScanSummary(`Analyzed ${done} of ${pool.length} candidate parcels.`);
       } else {
-        // HOUSE: keep analyzing the ranked pool until we've FOUND maxAnalyze
-        // distressed homes (or the pool / safety ceiling / Stop button ends it).
-        const ceiling = Math.min(pool.length, SAFETY_MAX_ANALYSES);
+        // HOUSE: work straight DOWN the ranked pool (best leads first) and keep
+        // going until we've FOUND maxAnalyze distressed homes or the WHOLE area
+        // is exhausted (or Stop). Ranking orders the search; it never caps it.
         setProgress({ done: 0, total: maxAnalyze });
         let analyzed = 0;
         let found = 0;
         for (const c of pool) {
-          if (stopRef.current || found >= maxAnalyze || analyzed >= ceiling) break;
+          if (stopRef.current || found >= maxAnalyze) break;
           analyzed++;
-          setStage(`Found ${found}/${maxAnalyze} distressed · analyzing #${analyzed} — ${c.address}`);
+          setStage(`Found ${found}/${maxAnalyze} distressed · analyzing #${analyzed} of ${pool.length} — ${c.address}`);
           try {
-            const res = await analyzeCandidate(c, mode, (s) =>
-              setStage(`Found ${found}/${maxAnalyze} distressed · analyzing #${analyzed} — ${s}`),
+            const res = await analyzeCandidate(c, sMode, (s) =>
+              setStage(`Found ${found}/${maxAnalyze} distressed · analyzing #${analyzed} of ${pool.length} — ${s}`),
             );
             if (res.distressed) {
               found++;
@@ -243,10 +248,9 @@ export function DistressedFinder() {
             errs.push({ address: c.address, message: e?.message || 'Analysis failed' });
           }
         }
-        const hitCeiling = analyzed >= ceiling && found < maxAnalyze && !stopRef.current;
         setScanSummary(
           `Found ${found} distressed home${found === 1 ? '' : 's'} after analyzing ${analyzed} of ${pool.length} ranked parcels` +
-            (stopRef.current ? ' (stopped).' : hitCeiling ? ` (reached the ${SAFETY_MAX_ANALYSES}-parcel safety limit).` : '.'),
+            (stopRef.current ? ' (stopped).' : found >= maxAnalyze ? '.' : ' (whole area scanned).'),
         );
       }
 
@@ -260,18 +264,50 @@ export function DistressedFinder() {
   };
 
   const runManualScan = async () => {
+    const sMode: SearchMode = mode === 'land' ? 'land' : 'house';
     const targets = queue.length ? queue : parseAddresses(addressInput);
     if (!targets.length) return;
     setRunning(true);
     setErrors([]);
     setScanSummary('');
     stopRef.current = false;
-    const jobs = targets.map((addr) => ({ label: addr, run: (onStage: (s: string) => void) => analyzeProperty(addr, mode, onStage) }));
+    const jobs = targets.map((addr) => ({ label: addr, run: (onStage: (s: string) => void) => analyzeProperty(addr, sMode, onStage) }));
     const errs = await analyzeBatch(jobs);
     setErrors(errs);
     setRunning(false);
     setStage('');
     if (errs.length < targets.length) setQueue([]);
+  };
+
+  const runBuyerList = async () => {
+    setRunning(true);
+    setErrors([]);
+    setScanSummary('');
+    setBuyers([]);
+    stopRef.current = false;
+    setStage('Building buyer list…');
+    try {
+      const [city, zip] = (() => {
+        const v = cityZip.trim();
+        if (!v) return [undefined, undefined] as const;
+        return /^\d{5}$/.test(v) ? ([undefined, v] as const) : ([v, undefined] as const);
+      })();
+      const list = await buildBuyerList(
+        { county, city, zip, radiusMiles: Math.max(1, radius), minProperties },
+        (s) => setStage(s),
+        () => stopRef.current,
+      );
+      setBuyers(list);
+      setScanSummary(
+        `${list.length} investor/owner${list.length === 1 ? '' : 's'} holding ${minProperties}+ parcels in ${county}${cityZip ? ` · ${cityZip}` : ''}` +
+          (stopRef.current ? ' (stopped early).' : '.'),
+      );
+    } catch (e: any) {
+      setErrors([{ address: `${county}${cityZip ? ` · ${cityZip}` : ''}`, message: e?.message || 'Buyer-list build failed' }]);
+    } finally {
+      setRunning(false);
+      setStage('');
+    }
   };
 
   const stopScan = () => { stopRef.current = true; setStage('Stopping…'); };
@@ -288,9 +324,12 @@ export function DistressedFinder() {
 
   const exportCsv = () => visibleResults.length && downloadFile(`property-finder-${mode}-${Date.now()}.csv`, resultsToCsv(visibleResults), 'text/csv');
   const exportJson = () => visibleResults.length && downloadFile(`property-finder-${mode}-${Date.now()}.json`, JSON.stringify(visibleResults, null, 2), 'application/json');
+  const exportBuyersCsv = () => buyers.length && downloadFile(`buyer-list-${county}-${Date.now()}.csv`, buyersToCsv(buyers), 'text/csv');
 
   const scoreWord = mode === 'house' ? 'distress' : 'land';
   const manualCount = queue.length || parseAddresses(addressInput).length;
+  const fmtUsd0 = (n: number) => `$${Math.round(n).toLocaleString()}`;
+  const fmtSaleYear = (e?: number) => { if (!e) return '—'; const d = new Date(e); return isNaN(d.getTime()) ? '—' : String(d.getFullYear()); };
 
   return (
     <div className="finder-page">
@@ -313,11 +352,21 @@ export function DistressedFinder() {
       )}
 
       {/* Mode toggle */}
-      <div className="finder-mode-toggle finder-mode-2">
+      <div className="finder-mode-toggle finder-mode-3">
         {MODES.map((m) => {
           const Icon = m.icon;
           return (
-            <button key={m.id} className={`finder-mode-btn ${mode === m.id ? 'active' : ''}`} onClick={() => setMode(m.id)} type="button">
+            <button
+              key={m.id}
+              className={`finder-mode-btn ${mode === m.id ? 'active' : ''}`}
+              onClick={() => {
+                setMode(m.id);
+                // Keep the shared radius valid for each mode's slider range.
+                if (m.id === 'buyers' && radius < 1) setRadius(5);
+                if (m.id !== 'buyers' && radius > 2) setRadius(0.75);
+              }}
+              type="button"
+            >
               <Icon size={20} />
               <div>
                 <div className="finder-mode-label">{m.label}</div>
@@ -330,6 +379,38 @@ export function DistressedFinder() {
 
       {/* Search panel */}
       <div className="finder-search-panel">
+        {mode === 'buyers' ? (
+          <div className="finder-area-form">
+            <div className="finder-field">
+              <label>County</label>
+              <select value={county} onChange={(e) => setCounty(e.target.value)}>
+                {ncCountyNames.map((c) => <option key={c} value={c}>{c}</option>)}
+              </select>
+            </div>
+            <div className="finder-field">
+              <label>City or ZIP <span>(optional — centers the scan; blank = county center)</span></label>
+              <input type="text" value={cityZip} onChange={(e) => setCityZip(e.target.value)} placeholder="Gastonia  ·  or  28052" />
+            </div>
+            <div className="finder-field">
+              <label>Scan radius: <strong>{radius.toFixed(1)} mi</strong> <span>(larger ≈ whole county)</span></label>
+              <input type="range" min={1} max={25} step={1} value={Math.max(1, radius)} onChange={(e) => setRadius(Number(e.target.value))} />
+            </div>
+            <div className="finder-field">
+              <label>Min properties owned: <strong>{minProperties}</strong> <span>(higher = bigger investors only)</span></label>
+              <input type="range" min={2} max={15} step={1} value={minProperties} onChange={(e) => setMinProperties(Number(e.target.value))} />
+            </div>
+            <div className="finder-area-actions">
+              {running ? (
+                <button className="finder-btn-stop" onClick={stopScan} type="button"><X size={16} /> Stop</button>
+              ) : (
+                <button className="finder-btn-primary" onClick={runBuyerList} type="button">
+                  <Users size={16} /> Build buyer list — {county}{cityZip ? ` · ${cityZip}` : ''}
+                </button>
+              )}
+            </div>
+          </div>
+        ) : (
+        <>
         <div className="finder-tabs">
           <button className={tab === 'auto' ? 'active' : ''} onClick={() => setTab('auto')} type="button"><Radar size={15} /> Auto-discover (scan an area)</button>
           <button className={tab === 'manual' ? 'active' : ''} onClick={() => setTab('manual')} type="button"><MapPin size={15} /> Manual addresses</button>
@@ -412,6 +493,8 @@ export function DistressedFinder() {
           <label>Min {scoreWord} score to show: <strong>{minScore}</strong></label>
           <input type="range" min={0} max={100} step={5} value={minScore} onChange={(e) => setMinScore(Number(e.target.value))} />
         </div>
+        </>
+        )}
 
         {running && (
           <div className="finder-progress">
@@ -431,7 +514,7 @@ export function DistressedFinder() {
         </div>
       )}
 
-      {visibleResults.length > 0 && (
+      {mode !== 'buyers' && visibleResults.length > 0 && (
         <>
           <div className="finder-results-head">
             <h3>{visibleResults.length} {MODES.find((m) => m.id === mode)?.label}</h3>
@@ -444,13 +527,56 @@ export function DistressedFinder() {
         </>
       )}
 
-      {!running && visibleResults.length === 0 && mode === 'house' && scanSummary && (
+      {/* Investor buyer list */}
+      {mode === 'buyers' && buyers.length > 0 && (
+        <>
+          <div className="finder-results-head">
+            <h3>{buyers.length.toLocaleString()} Investor Buyers</h3>
+            <div className="finder-export-actions">
+              <button className="finder-btn-secondary" onClick={exportBuyersCsv} type="button"><Download size={15} /> CSV</button>
+            </div>
+          </div>
+          <div className="finder-table-wrap">
+            <table className="finder-buyer-table">
+              <thead>
+                <tr>
+                  <th>Owner</th><th className="num">Props</th><th className="num">Total Assessed</th>
+                  <th>Type</th><th>Mailing Address</th><th className="num">Last Buy</th><th>Example Properties</th>
+                </tr>
+              </thead>
+              <tbody>
+                {buyers.map((b, i) => (
+                  <tr key={`${b.ownerName}-${i}`}>
+                    <td className="owner">
+                      {b.ownerName}
+                      {b.outOfState && <span className="finder-oos-tag">{b.mailState}</span>}
+                    </td>
+                    <td className="num strong">{b.propertyCount}</td>
+                    <td className="num">{fmtUsd0(b.totalAssessedValue)}</td>
+                    <td>
+                      <span className={`finder-owner-type ot-${b.ownerType}`}>
+                        {b.ownerType === 'company' ? <Building2 size={12} /> : b.ownerType === 'estate' ? <Landmark size={12} /> : <User size={12} />}
+                        {b.ownerType}
+                      </span>
+                    </td>
+                    <td className="addr">{b.mailingAddress}</td>
+                    <td className="num">{fmtSaleYear(b.mostRecentPurchaseEpoch)}</td>
+                    <td className="examples">{b.exampleProperties.join(' · ') || '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+
+      {!running && mode !== 'buyers' && visibleResults.length === 0 && mode === 'house' && scanSummary && (
         <div className="finder-empty">
           Only distressed homes are shown (well-maintained homes are hidden by design). If nothing was found,
           try another City/ZIP or a different radius — or increase the radius to widen the search.
         </div>
       )}
-      {!running && visibleResults.length === 0 && mode === 'land' && results.some((r) => r.mode === 'land') && (
+      {!running && mode === 'land' && visibleResults.length === 0 && results.some((r) => r.mode === 'land') && (
         <div className="finder-empty">No results at or above a score of {minScore}. Lower the minimum score filter.</div>
       )}
     </div>
