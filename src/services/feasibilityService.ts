@@ -2788,9 +2788,9 @@ Compute what a builder/developer would realistically PAY FOR THE LAND using a RE
    - STEEP SLOPE: if USGS 3DEP slope ≥15%, add extra grading/retaining/engineering cost (≥25% may be non-buildable). Deduct from land value.
    - WELL & SEPTIC: if no public water/sewer, add well drilling (local $/ft + total) and a septic system install + perc test (local cost). If public water/sewer exists, use tap/impact fees instead.
 4. Soft & selling costs: permits/survey (already in the schedule) plus sales commission (~5–6% of ARV), closing, and construction-loan interest/carry as applicable.
-5. DEVELOPER PROFIT: target 20% of ARV (state it explicitly).
-6. RESIDUAL LAND VALUE (what a builder would pay) = ARV − total hard construction − site-specific adders − soft/selling/financing − developer profit (20% of ARV).
-7. CROSS-CHECK with the rule of thumb: builders typically pay ≈ 20% of ARV for a FINISHED lot. Start from 20% of ARV, then DEDUCT the site-specific adders (trees, slope, well/septic) to get an adjusted raw-land offer; reconcile this with the residual figure and present a defensible RANGE (low/expected/high).
+5. DEVELOPER PROFIT — show THREE scenarios side by side: a little LESS than 20% of ARV (use 15%), EXACTLY 20% of ARV, and MORE than 20% of ARV (use 25%). State each profit dollar figure explicitly.
+6. RESIDUAL LAND VALUE (what a builder would pay) = ARV − total hard construction − site-specific adders − soft/selling/financing − developer profit. Compute it for ALL THREE profit scenarios, yielding THREE land values in a single pro-forma TABLE with a column per scenario (15% / 20% / 25% profit). Note that a LOWER profit margin lets the builder pay MORE for the land, and a higher margin less.
+7. CROSS-CHECK with the rule of thumb: builders typically pay ≈ 20% of ARV for a FINISHED lot. Start from 20% of ARV, then DEDUCT the site-specific adders (trees, slope, well/septic) to get an adjusted raw-land offer; reconcile this with the three residual figures and present a defensible RANGE (low/expected/high) that brackets them.
 This residual land value is standard development feasibility ("what a builder would pay") — it is NOT a wholesale "maximum allowable offer"; do not use wholesaling/assignment terminology. Be EXTREMELY ACCURATE: every figure must trace to a cited current LOCAL source.
 
 ## Land Valuation Standard

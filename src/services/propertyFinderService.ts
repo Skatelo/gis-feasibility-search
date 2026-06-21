@@ -425,9 +425,33 @@ export interface GisDistress {
 }
 
 const MS_PER_YEAR = 31557600000;
-/** Normalize a city name for comparison ("Gastonia City" → "gastonia"). */
-const normCity = (s?: string) =>
-  String(s || '').toLowerCase().replace(/\b(city|town|township|twp|village)\b/g, '').replace(/[^a-z]/g, '');
+
+/**
+ * Normalize a US street address for comparison: lowercase, strip punctuation,
+ * standardize the common street-type and directional abbreviations, drop unit/
+ * suite designators, and collapse whitespace. Lets us tell whether the owner's
+ * MAILING street is the SAME as the property's SITUS street (owner-occupied).
+ */
+const normStreet = (s?: string) =>
+  String(s || '')
+    .toLowerCase()
+    .replace(/[.,#]/g, ' ')
+    .replace(/\b(street|str)\b/g, 'st')
+    .replace(/\b(avenue|av)\b/g, 'ave')
+    .replace(/\broad\b/g, 'rd')
+    .replace(/\bdrive\b/g, 'dr')
+    .replace(/\blane\b/g, 'ln')
+    .replace(/\bboulevard\b/g, 'blvd')
+    .replace(/\bcourt\b/g, 'ct')
+    .replace(/\bcircle\b/g, 'cir')
+    .replace(/\bplace\b/g, 'pl')
+    .replace(/\bhighway\b/g, 'hwy')
+    .replace(/\b(north)\b/g, 'n').replace(/\b(south)\b/g, 's').replace(/\b(east)\b/g, 'e').replace(/\b(west)\b/g, 'w')
+    .replace(/\b(apt|unit|ste|suite|lot|bldg)\b.*$/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+const isPoBox = (s?: string) => /\bp\.?\s*o\.?\s*box\b|\bpost\s+office\s+box\b/i.test(String(s || ''));
 
 /**
  * GIS / assessor distress-lead score. Uses the parcel's ownership + mailing +
@@ -436,9 +460,16 @@ const normCity = (s?: string) =>
  * (deferred maintenance), and company/landlord ownership. This TARGETS likely
  * distressed/motivated parcels; it does not claim the structure is physically
  * distressed (that's the vision step's job).
+ *
+ * ACCURATE absentee detection: an owner is "absentee" only when their MAILING
+ * STREET ADDRESS differs from the property's SITUS STREET ADDRESS (or mail goes
+ * out of state / to a PO box). We do NOT compare cities — the situs-city field
+ * sometimes holds a district name (e.g. "GAST DOWNTOWN SD"), which falsely
+ * flagged on-site owners as absentee. When the mailing street matches the situs
+ * street, the owner lives there → never flagged absentee.
  */
 export function computeGisDistress(a: {
-  scity?: string; mcity?: string; mstate?: string; ownname?: string; saleEpoch?: number;
+  siteadd?: string; scity?: string; mailadd?: string; mcity?: string; mstate?: string; ownname?: string; saleEpoch?: number;
 }): GisDistress {
   const own = String(a.ownname || '');
   // Estate/probate = "HEIRS" or a standalone "ESTATE" — but NOT the corporate
@@ -450,10 +481,18 @@ export function computeGisDistress(a: {
     : /\b(LLC|INC|CORP|CO|TRUST|LP|LLP|COMPANY|PROPERTIES|HOLDINGS|HOMES|INVESTMENTS?|CAPITAL|GROUP|REALTY|RENTALS?|VENTURES?|PARTNERS)\b/i.test(own) ? 'company'
     : 'individual';
 
-  const sC = normCity(a.scity), mC = normCity(a.mcity);
   const mS = String(a.mstate || '').trim().toUpperCase();
   const outOfState = !!mS && mS !== 'NC';
-  const absenteeOwner = (!!mC && !!sC && mC !== sC) || outOfState;
+  const poBox = isPoBox(a.mailadd);
+  // Situs street = portion before the first comma (siteadd may embed city/unit).
+  const situsStreet = normStreet(String(a.siteadd || '').split(',')[0]);
+  const mailStreet = normStreet(a.mailadd);
+  // Owner lives at the property when the mailing street matches the situs street
+  // (and mail isn't out-of-state / a PO box).
+  const ownerOccupied = !!situsStreet && !!mailStreet && situsStreet === mailStreet && !outOfState && !poBox;
+  // Absentee only on confident evidence; when we can't tell (no mailing street),
+  // do NOT flag — better to miss a lead than mislabel a resident.
+  const absenteeOwner = !ownerOccupied && (outOfState || poBox || (!!mailStreet && !!situsStreet && mailStreet !== situsStreet));
   const yearsSinceSale = a.saleEpoch && a.saleEpoch > 0 ? Math.max(0, (Date.now() - a.saleEpoch) / MS_PER_YEAR) : undefined;
 
   // Government/institution-owned parcels are not wholesale leads.
@@ -463,7 +502,10 @@ export function computeGisDistress(a: {
 
   const signals: string[] = [];
   let score = 0;
-  if (absenteeOwner) { score += 22; signals.push(outOfState ? 'absentee owner (out-of-state)' : 'absentee owner'); }
+  if (absenteeOwner) {
+    score += 22;
+    signals.push(outOfState ? 'absentee owner (out-of-state)' : poBox ? 'absentee owner (PO box)' : 'absentee owner');
+  }
   if (outOfState && absenteeOwner) score += 16; // out-of-state stacks
   if (ownerType === 'estate') { score += 26; signals.push('estate / heirs owner'); }
   if (ownerType === 'company') { score += 8; signals.push('company / investor owned'); }
@@ -774,15 +816,17 @@ export async function discoverCandidates(
 
   // Page through ALL parcels in the envelope so the GIS step isn't capped by the
   // server's per-request limit. We page until a short page (the last one), the
-  // server stops honoring the offset, or a generous safety ceiling.
+  // server stops honoring the offset, or a generous safety ceiling. Geometry is
+  // simplified (maxAllowableOffset ≈ 30m) so we only carry a coarse outline for
+  // the centroid — that keeps payloads small enough to page deeply uncapped.
   const baseUrl =
     `${cfg.parcelUrl}?where=${encodeURIComponent(cfg.extraWhere)}` +
     `&geometry=${xmin},${ymin},${xmax},${ymax}&geometryType=esriGeometryEnvelope&inSR=4326` +
     `&spatialRel=esriSpatialRelIntersects` +
-    `&outFields=${encodeURIComponent('parno,siteadd,scity,mcity,mstate,ownname,gisacres,parval,landval,saledate')}` +
-    `&returnGeometry=true&outSR=4326&f=geojson`;
+    `&outFields=${encodeURIComponent('parno,siteadd,scity,mailadd,mcity,mstate,ownname,gisacres,parval,landval,saledate')}` +
+    `&returnGeometry=true&maxAllowableOffset=0.0003&outSR=4326&f=geojson`;
   const PAGE = 2000;
-  const MAX_PAGES = 8; // up to 16k parcels
+  const MAX_PAGES = 30; // up to 60k parcels — effectively uncapped for any realistic scan
   const features: any[] = [];
   let prevFirstParno: string | undefined;
   for (let page = 0; page < MAX_PAGES; page++) {
@@ -867,7 +911,7 @@ export async function discoverCandidates(
     if (mode === 'house') {
       // GIS distress / motivated-seller targeting from assessor + ownership data.
       const gd = computeGisDistress({
-        scity, mcity: String(p.mcity ?? ''), mstate: String(p.mstate ?? ''),
+        siteadd, scity, mailadd: String(p.mailadd ?? ''), mcity: String(p.mcity ?? ''), mstate: String(p.mstate ?? ''),
         ownname: String(p.ownname ?? ''), saleEpoch: cand.saleEpoch,
       });
       cand.ownerName = String(p.ownname ?? '').trim() || undefined;
