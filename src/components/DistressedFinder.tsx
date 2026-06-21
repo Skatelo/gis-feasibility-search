@@ -4,7 +4,8 @@ import {
   MapPin, Eye, Sparkles, Target, X, Plus, Trash2, Waves, Droplets, HardHat, Landmark, Flag, User, Users, Building2,
 } from 'lucide-react';
 import {
-  analyzeProperty, analyzeCandidate, discoverCandidates, buildBuyerList, resultsToCsv, buyersToCsv, downloadFile, ncCountyNames,
+  analyzeProperty, analyzeCandidate, discoverCandidates, buildBuyerList,
+  resultsToCsv, buyersToCsv, downloadFile, ncCountyNames,
 } from '../services/propertyFinderService';
 import type { SearchMode, PropertyResult, Candidate, EnvScore, BuyerRecord } from '../services/propertyFinderService';
 
@@ -131,6 +132,8 @@ export function DistressedFinder() {
 
   // Buyer-list inputs/results
   const [minProperties, setMinProperties] = useState(3);
+  const [dealAddress, setDealAddress] = useState('');
+  const [dealContext, setDealContext] = useState('');
   const [buyers, setBuyers] = useState<BuyerRecord[]>([]);
 
   // Manual inputs
@@ -285,6 +288,8 @@ export function DistressedFinder() {
     setScanSummary('');
     setBuyers([]);
     stopRef.current = false;
+    const deal = dealAddress.trim();
+    setDealContext(deal);
     setStage('Building buyer list…');
     try {
       const [city, zip] = (() => {
@@ -293,17 +298,19 @@ export function DistressedFinder() {
         return /^\d{5}$/.test(v) ? ([undefined, v] as const) : ([v, undefined] as const);
       })();
       const list = await buildBuyerList(
-        { county, city, zip, radiusMiles: Math.max(1, radius), minProperties },
+        { county, city, zip, radiusMiles: Math.max(1, radius), minProperties, dealAddress: deal || undefined },
         (s) => setStage(s),
         () => stopRef.current,
       );
       setBuyers(list);
       setScanSummary(
-        `${list.length} investor/owner${list.length === 1 ? '' : 's'} holding ${minProperties}+ parcels in ${county}${cityZip ? ` · ${cityZip}` : ''}` +
-          (stopRef.current ? ' (stopped early).' : '.'),
+        deal
+          ? `${list.length} investor buyer${list.length === 1 ? '' : 's'} holding ${minProperties}+ parcels within ${Math.max(1, radius)} mi of ${deal}${stopRef.current ? ' (stopped early)' : ''} — closest first.`
+          : `${list.length} investor/owner${list.length === 1 ? '' : 's'} holding ${minProperties}+ parcels in ${county}${cityZip ? ` · ${cityZip}` : ''}` +
+              (stopRef.current ? ' (stopped early).' : '.'),
       );
     } catch (e: any) {
-      setErrors([{ address: `${county}${cityZip ? ` · ${cityZip}` : ''}`, message: e?.message || 'Buyer-list build failed' }]);
+      setErrors([{ address: deal || `${county}${cityZip ? ` · ${cityZip}` : ''}`, message: e?.message || 'Buyer-list build failed' }]);
     } finally {
       setRunning(false);
       setStage('');
@@ -381,15 +388,19 @@ export function DistressedFinder() {
       <div className="finder-search-panel">
         {mode === 'buyers' ? (
           <div className="finder-area-form">
+            <div className="finder-field finder-field-wide">
+              <label>Property you're selling <span>(optional — finds buyers active in its area, closest first)</span></label>
+              <input type="text" value={dealAddress} onChange={(e) => setDealAddress(e.target.value)} placeholder="813 Corriher St, Kannapolis, NC 28081" />
+            </div>
             <div className="finder-field">
-              <label>County</label>
-              <select value={county} onChange={(e) => setCounty(e.target.value)}>
+              <label>County {dealAddress.trim() && <span>(ignored — address sets the area)</span>}</label>
+              <select value={county} onChange={(e) => setCounty(e.target.value)} disabled={!!dealAddress.trim()}>
                 {ncCountyNames.map((c) => <option key={c} value={c}>{c}</option>)}
               </select>
             </div>
             <div className="finder-field">
-              <label>City or ZIP <span>(optional — centers the scan; blank = county center)</span></label>
-              <input type="text" value={cityZip} onChange={(e) => setCityZip(e.target.value)} placeholder="Gastonia  ·  or  28052" />
+              <label>City or ZIP <span>{dealAddress.trim() ? '(ignored — using the address)' : '(optional — centers the scan)'}</span></label>
+              <input type="text" value={cityZip} onChange={(e) => setCityZip(e.target.value)} placeholder="Gastonia  ·  or  28052" disabled={!!dealAddress.trim()} />
             </div>
             <div className="finder-field">
               <label>Scan radius: <strong>{radius.toFixed(1)} mi</strong> <span>(larger ≈ whole county)</span></label>
@@ -404,7 +415,7 @@ export function DistressedFinder() {
                 <button className="finder-btn-stop" onClick={stopScan} type="button"><X size={16} /> Stop</button>
               ) : (
                 <button className="finder-btn-primary" onClick={runBuyerList} type="button">
-                  <Users size={16} /> Build buyer list — {county}{cityZip ? ` · ${cityZip}` : ''}
+                  <Users size={16} /> {dealAddress.trim() ? 'Find buyers near this address' : `Build buyer list — ${county}${cityZip ? ` · ${cityZip}` : ''}`}
                 </button>
               )}
             </div>
@@ -531,7 +542,7 @@ export function DistressedFinder() {
       {mode === 'buyers' && buyers.length > 0 && (
         <>
           <div className="finder-results-head">
-            <h3>{buyers.length.toLocaleString()} Investor Buyers</h3>
+            <h3>{buyers.length.toLocaleString()} Investor Buyers{dealContext ? <span className="finder-deal-context"> near {dealContext}</span> : ''}</h3>
             <div className="finder-export-actions">
               <button className="finder-btn-secondary" onClick={exportBuyersCsv} type="button"><Download size={15} /> CSV</button>
             </div>
@@ -540,6 +551,7 @@ export function DistressedFinder() {
             <table className="finder-buyer-table">
               <thead>
                 <tr>
+                  {dealContext && <th className="num">Near Deal</th>}
                   <th>Owner</th><th className="num">Props</th><th className="num">Total Assessed</th>
                   <th>Type</th><th>Mailing Address</th><th className="num">Last Buy</th><th>Example Properties</th>
                 </tr>
@@ -547,6 +559,15 @@ export function DistressedFinder() {
               <tbody>
                 {buyers.map((b, i) => (
                   <tr key={`${b.ownerName}-${i}`}>
+                    {dealContext && (
+                      <td className="num">
+                        {b.nearestMiles != null
+                          ? <span className={`finder-near-tag ${b.nearestMiles <= 1 ? 'near-hot' : b.nearestMiles <= 3 ? 'near-warm' : ''}`}>
+                              <Target size={11} /> {b.nearestMiles < 0.1 ? '<0.1' : b.nearestMiles.toFixed(1)} mi
+                            </span>
+                          : '—'}
+                      </td>
+                    )}
                     <td className="owner">
                       {b.ownerName}
                       {b.outOfState && <span className="finder-oos-tag">{b.mailState}</span>}

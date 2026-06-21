@@ -1034,6 +1034,10 @@ export interface BuyerListParams {
   zip?: string;
   radiusMiles: number;   // envelope half-size; a large radius ≈ the whole county
   minProperties: number; // keep owners holding at least this many parcels
+  /** Optional deal/subject address (the property you're SELLING). When set, the
+   *  search centers on it and each buyer is tagged with the distance from the
+   *  deal to their nearest holding — so you can target buyers active in the area. */
+  dealAddress?: string;
 }
 
 export interface BuyerRecord {
@@ -1047,6 +1051,18 @@ export interface BuyerRecord {
   totalAssessedValue: number;
   exampleProperties: string[];     // up to 6 situs addresses they own
   mostRecentPurchaseEpoch?: number;
+  /** Miles from the deal address to this owner's NEAREST holding (deal set only). */
+  nearestMiles?: number;
+}
+
+/** Great-circle distance between two lat/lng points, in miles. */
+function haversineMiles(aLat: number, aLng: number, bLat: number, bLng: number): number {
+  const toRad = (d: number) => (d * Math.PI) / 180;
+  const R = 3958.8;
+  const dLat = toRad(bLat - aLat);
+  const dLng = toRad(bLng - aLng);
+  const s = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(aLat)) * Math.cos(toRad(bLat)) * Math.sin(dLng / 2) ** 2;
+  return 2 * R * Math.asin(Math.min(1, Math.sqrt(s)));
 }
 
 /** Normalize an owner name for grouping (drop punctuation, suffixes, "ET AL"). */
@@ -1070,27 +1086,47 @@ export async function buildBuyerList(
   onProgress?: (s: string) => void,
   shouldStop?: () => boolean,
 ): Promise<BuyerRecord[]> {
-  const { county, city, zip, radiusMiles, minProperties } = params;
+  const { county, city, zip, radiusMiles, minProperties, dealAddress } = params;
   const keys = getUserKeys();
   if (!keys.googleMaps) throw new Error('Google Maps API key required (set it in Account Settings).');
   const cfg = ncCountyConfig[county];
   if (!cfg) throw new Error(`Unsupported county: ${county}`);
 
-  onProgress?.('Locating area…');
-  const areaQuery = city ? `${city}, NC` : zip ? `${zip}, NC` : `${county} County, NC`;
-  const center = await geocodeAddress(areaQuery, keys.googleMaps);
-  if (!center) throw new Error(`Could not locate "${areaQuery}".`);
+  // With a deal address, center the search on it (so the buyers are in its area)
+  // and search spatially across county lines. Otherwise center on the city/ZIP/
+  // county and restrict to the selected county.
+  let center: { lat: number; lng: number };
+  let deal: { lat: number; lng: number } | undefined;
+  if (dealAddress && dealAddress.trim()) {
+    onProgress?.('Locating the deal address…');
+    const d = await geocodeAddress(dealAddress.trim(), keys.googleMaps);
+    if (!d) throw new Error(`Could not locate the deal address "${dealAddress.trim()}".`);
+    deal = d;
+    center = { lat: d.lat, lng: d.lng };
+  } else {
+    onProgress?.('Locating area…');
+    const areaQuery = city ? `${city}, NC` : zip ? `${zip}, NC` : `${county} County, NC`;
+    const c = await geocodeAddress(areaQuery, keys.googleMaps);
+    if (!c) throw new Error(`Could not locate "${areaQuery}".`);
+    center = c;
+  }
 
   const dLat = radiusMiles / 69;
   const dLng = radiusMiles / (69 * Math.cos((center.lat * Math.PI) / 180) || 1);
   const env = `${center.lng - dLng},${center.lat - dLat},${center.lng + dLng},${center.lat + dLat}`;
 
-  // No geometry → tiny rows → we can page deeply across a whole city/county.
+  // No deal → no geometry (tiny rows, page deeply across a county). With a deal we
+  // request simplified geometry (geojson) so we can measure each owner's nearest
+  // holding to the deal. `where=1=1` for deal mode keeps it spatial/cross-county.
+  const where = deal ? '1=1' : cfg.extraWhere;
+  const geomParams = deal
+    ? '&returnGeometry=true&maxAllowableOffset=0.0003&outSR=4326&f=geojson'
+    : '&returnGeometry=false&f=json';
   const baseUrl =
-    `${cfg.parcelUrl}?where=${encodeURIComponent(cfg.extraWhere)}` +
+    `${cfg.parcelUrl}?where=${encodeURIComponent(where)}` +
     `&geometry=${env}&geometryType=esriGeometryEnvelope&inSR=4326&spatialRel=esriSpatialRelIntersects` +
     `&outFields=${encodeURIComponent('parno,siteadd,scity,ownname,mailadd,mcity,mstate,mzip,parval,saledate')}` +
-    `&returnGeometry=false&f=json`;
+    geomParams;
   const PAGE = 2000;
   const MAX_PAGES = 100; // up to 200k parcels — county-scale (rows are tiny w/o geometry)
 
@@ -1098,6 +1134,7 @@ export async function buildBuyerList(
     ownerName: string; mailadd: string; mcity: string; mstate: string; mzip: string;
     ownerType: 'individual' | 'company' | 'estate'; outOfState: boolean;
     count: number; totalAssessed: number; examples: string[]; recentSale?: number;
+    minDist?: number;
   };
   const groups = new Map<string, Agg>();
   let scanned = 0;
@@ -1118,12 +1155,14 @@ export async function buildBuyerList(
       break;
     }
     if (!rows.length) break;
-    const firstParno = String(rows[0]?.attributes?.parno ?? '');
+    // f=json rows carry `.attributes`; f=geojson rows carry `.properties` + `.geometry`.
+    const attrsOf = (f: any) => f.attributes || f.properties || {};
+    const firstParno = String(attrsOf(rows[0]).parno ?? '');
     if (page > 0 && firstParno && firstParno === prevFirstParno) break; // offset ignored
     prevFirstParno = firstParno;
 
     for (const f of rows) {
-      const a = f.attributes || {};
+      const a = attrsOf(f);
       const owner = String(a.ownname ?? '').trim();
       if (!owner) continue;
       const ownerType = classifyOwner(owner);
@@ -1151,6 +1190,14 @@ export async function buildBuyerList(
       if (situs && g.examples.length < 6 && !g.examples.includes(situs)) g.examples.push(situs);
       const sale = numOf(a.saledate);
       if (Number.isFinite(sale) && (g.recentSale == null || sale > g.recentSale)) g.recentSale = sale;
+      // Distance from the deal to this holding → track the owner's nearest.
+      if (deal && f.geometry) {
+        const c = geomCenter(f.geometry);
+        if (c) {
+          const d = haversineMiles(deal.lat, deal.lng, c.lat, c.lng);
+          if (g.minDist == null || d < g.minDist) g.minDist = d;
+        }
+      }
     }
     scanned += rows.length;
     onProgress?.(`Scanning parcels… (${scanned})`);
@@ -1174,13 +1221,19 @@ export async function buildBuyerList(
       totalAssessedValue: Math.round(g.totalAssessed),
       exampleProperties: g.examples,
       mostRecentPurchaseEpoch: g.recentSale,
+      nearestMiles: g.minDist != null ? Math.round(g.minDist * 100) / 100 : undefined,
     });
   }
   if (!list.length) {
     throw new Error(`No owners hold ${minProperties}+ parcels in this area. Lower the minimum, or widen the radius.`);
   }
-  // Biggest portfolios first (strongest buyers), then highest total value.
-  list.sort((a, b) => b.propertyCount - a.propertyCount || b.totalAssessedValue - a.totalAssessedValue);
+  if (deal) {
+    // Closest active buyers to the deal first, then biggest portfolios.
+    list.sort((a, b) => (a.nearestMiles ?? Infinity) - (b.nearestMiles ?? Infinity) || b.propertyCount - a.propertyCount);
+  } else {
+    // Biggest portfolios first (strongest buyers), then highest total value.
+    list.sort((a, b) => b.propertyCount - a.propertyCount || b.totalAssessedValue - a.totalAssessedValue);
+  }
   return list;
 }
 
@@ -1214,7 +1267,7 @@ export function resultsToCsv(results: PropertyResult[]): string {
 
 export function buyersToCsv(buyers: BuyerRecord[]): string {
   const headers = [
-    'owner', 'owner_type', 'out_of_state', 'property_count', 'total_assessed_value',
+    'owner', 'owner_type', 'out_of_state', 'property_count', 'total_assessed_value', 'nearest_miles_to_deal',
     'mailing_address', 'mail_city', 'mail_state', 'most_recent_purchase', 'example_properties',
   ];
   const esc = (v: unknown) => {
@@ -1227,7 +1280,7 @@ export function buyersToCsv(buyers: BuyerRecord[]): string {
     return isNaN(d.getTime()) ? '' : d.toISOString().slice(0, 10);
   };
   const rows = buyers.map((b) => [
-    b.ownerName, b.ownerType, b.outOfState, b.propertyCount, b.totalAssessedValue,
+    b.ownerName, b.ownerType, b.outOfState, b.propertyCount, b.totalAssessedValue, b.nearestMiles ?? '',
     b.mailingAddress, b.mailCity ?? '', b.mailState ?? '', fmtDate(b.mostRecentPurchaseEpoch), b.exampleProperties.join('; '),
   ].map(esc).join(','));
   return [headers.join(','), ...rows].join('\n');

@@ -130,7 +130,18 @@
 .finder-acre-inputs input { width: 80px; }
 .finder-acre-inputs span { font-size: 0.8rem; color: var(--text-muted); }
 .finder-area-actions { grid-column: 1 / -1; display: flex; justify-content: flex-end; }
+.finder-field-wide { grid-column: 1 / -1; }
 @media (max-width: 600px) { .finder-area-form { grid-template-columns: 1fr; } }
+
+.finder-deal-context { font-weight: 500; color: var(--text-muted); font-size: 0.9rem; }
+.finder-near-tag {
+  display: inline-flex; align-items: center; gap: 4px; font-weight: 800; font-size: 0.74rem;
+  color: var(--text-secondary); background: var(--bg-main); border: 1px solid var(--bg-card-border);
+  border-radius: 999px; padding: 2px 8px; white-space: nowrap;
+}
+.finder-near-tag svg { opacity: 0.7; }
+.finder-near-tag.near-warm { color: var(--warning); border-color: rgba(217,119,6,0.3); background: rgba(217,119,6,0.07); }
+.finder-near-tag.near-hot { color: var(--success); border-color: var(--success-border); background: var(--success-bg); }
 .finder-mode-btn {
   display: flex; align-items: flex-start; gap: 12px; text-align: left;
   background: var(--bg-card); border: 1.5px solid var(--bg-card-border);
