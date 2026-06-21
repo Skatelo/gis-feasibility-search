@@ -1055,7 +1055,10 @@ export interface BuyerRecord {
   buyerType: 'house' | 'land' | 'mixed' | 'unknown';
   totalAssessedValue: number;
   exampleProperties: string[];     // up to 6 situs addresses they own
+  /** Date (epoch ms) of the owner's most recent purchase across their holdings. */
   mostRecentPurchaseEpoch?: number;
+  /** The property (situs address) acquired in that most recent purchase. */
+  mostRecentProperty?: string;
   /** Miles from the deal address to this owner's NEAREST holding (deal set only). */
   nearestMiles?: number;
 }
@@ -1139,7 +1142,8 @@ export async function buildBuyerList(
     ownerName: string; mailadd: string; mcity: string; mstate: string; mzip: string;
     ownerType: 'individual' | 'company' | 'estate'; outOfState: boolean;
     count: number; houseCount: number; landCount: number;
-    totalAssessed: number; examples: string[]; recentSale?: number;
+    totalAssessed: number; examples: string[];
+    recentSale?: number; recentProperty?: string;
     minDist?: number;
   };
   const groups = new Map<string, Agg>();
@@ -1205,8 +1209,14 @@ export async function buildBuyerList(
       }
       const situs = String(a.siteadd ?? '').trim();
       if (situs && g.examples.length < 6 && !g.examples.includes(situs)) g.examples.push(situs);
+      // Track the owner's MOST RECENT purchase (date + which property). The parcel
+      // layer carries each parcel's last sale date, so the max across an owner's
+      // holdings is their latest acquisition; re-running picks up new deeds.
       const sale = numOf(a.saledate);
-      if (Number.isFinite(sale) && (g.recentSale == null || sale > g.recentSale)) g.recentSale = sale;
+      if (Number.isFinite(sale) && (g.recentSale == null || sale > g.recentSale)) {
+        g.recentSale = sale;
+        g.recentProperty = situs || undefined;
+      }
       // Distance from the deal to this holding → track the owner's nearest.
       if (deal && f.geometry) {
         const c = geomCenter(f.geometry);
@@ -1245,6 +1255,7 @@ export async function buildBuyerList(
       totalAssessedValue: Math.round(g.totalAssessed),
       exampleProperties: g.examples,
       mostRecentPurchaseEpoch: g.recentSale,
+      mostRecentProperty: g.recentProperty,
       nearestMiles: g.minDist != null ? Math.round(g.minDist * 100) / 100 : undefined,
     });
   }
@@ -1293,7 +1304,8 @@ export function buyersToCsv(buyers: BuyerRecord[]): string {
   const headers = [
     'owner', 'owner_type', 'buys', 'house_count', 'land_count', 'out_of_state',
     'property_count', 'total_assessed_value', 'nearest_miles_to_deal',
-    'mailing_address', 'mail_city', 'mail_state', 'most_recent_purchase', 'example_properties',
+    'mailing_address', 'mail_city', 'mail_state',
+    'most_recent_purchase_date', 'most_recent_property', 'example_properties',
   ];
   const esc = (v: unknown) => {
     const s = String(v ?? '');
@@ -1307,7 +1319,8 @@ export function buyersToCsv(buyers: BuyerRecord[]): string {
   const rows = buyers.map((b) => [
     b.ownerName, b.ownerType, b.buyerType, b.houseCount, b.landCount, b.outOfState,
     b.propertyCount, b.totalAssessedValue, b.nearestMiles ?? '',
-    b.mailingAddress, b.mailCity ?? '', b.mailState ?? '', fmtDate(b.mostRecentPurchaseEpoch), b.exampleProperties.join('; '),
+    b.mailingAddress, b.mailCity ?? '', b.mailState ?? '',
+    fmtDate(b.mostRecentPurchaseEpoch), b.mostRecentProperty ?? '', b.exampleProperties.join('; '),
   ].map(esc).join(','));
   return [headers.join(','), ...rows].join('\n');
 }

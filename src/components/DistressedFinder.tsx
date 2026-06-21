@@ -136,6 +136,7 @@ export function DistressedFinder() {
   const [dealContext, setDealContext] = useState('');
   const [buyers, setBuyers] = useState<BuyerRecord[]>([]);
   const [buyerFilter, setBuyerFilter] = useState<'all' | 'house' | 'land'>('all');
+  const [buyerSort, setBuyerSort] = useState<'recent' | 'props' | 'distance'>('recent');
 
   // Manual inputs
   const [addressInput, setAddressInput] = useState('');
@@ -292,6 +293,9 @@ export function DistressedFinder() {
     stopRef.current = false;
     const deal = dealAddress.trim();
     setDealContext(deal);
+    // Default: recent buyers first (this year's buyers up top); with a deal,
+    // default to nearest-to-deal since that's the point of the address search.
+    setBuyerSort(deal ? 'distance' : 'recent');
     setStage('Building buyer list…');
     try {
       const [city, zip] = (() => {
@@ -305,11 +309,13 @@ export function DistressedFinder() {
         () => stopRef.current,
       );
       setBuyers(list);
+      const asOf = new Date().toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
       setScanSummary(
-        deal
+        (deal
           ? `${list.length} investor buyer${list.length === 1 ? '' : 's'} holding ${minProperties}+ parcels within ${Math.max(1, radius)} mi of ${deal}${stopRef.current ? ' (stopped early)' : ''} — closest first.`
           : `${list.length} investor/owner${list.length === 1 ? '' : 's'} holding ${minProperties}+ parcels in ${county}${cityZip ? ` · ${cityZip}` : ''}` +
-              (stopRef.current ? ' (stopped early).' : '.'),
+              (stopRef.current ? ' (stopped early).' : '.')) +
+          ` Live county records as of ${asOf} — rebuild to pick up new transactions.`,
       );
     } catch (e: any) {
       setErrors([{ address: deal || `${county}${cityZip ? ` · ${cityZip}` : ''}`, message: e?.message || 'Buyer-list build failed' }]);
@@ -333,10 +339,19 @@ export function DistressedFinder() {
 
   const exportCsv = () => visibleResults.length && downloadFile(`property-finder-${mode}-${Date.now()}.csv`, resultsToCsv(visibleResults), 'text/csv');
   const exportJson = () => visibleResults.length && downloadFile(`property-finder-${mode}-${Date.now()}.json`, JSON.stringify(visibleResults, null, 2), 'application/json');
-  const visibleBuyers = useMemo(
-    () => buyers.filter((b) => buyerFilter === 'all' || (buyerFilter === 'house' ? b.houseCount > 0 : b.landCount > 0)),
-    [buyers, buyerFilter],
-  );
+  const visibleBuyers = useMemo(() => {
+    const list = buyers.filter((b) => buyerFilter === 'all' || (buyerFilter === 'house' ? b.houseCount > 0 : b.landCount > 0));
+    const sorted = [...list];
+    if (buyerSort === 'recent') {
+      // Most recent buy first — this year's buyers surface at the top.
+      sorted.sort((a, b) => (b.mostRecentPurchaseEpoch ?? 0) - (a.mostRecentPurchaseEpoch ?? 0) || b.propertyCount - a.propertyCount);
+    } else if (buyerSort === 'distance') {
+      sorted.sort((a, b) => (a.nearestMiles ?? Infinity) - (b.nearestMiles ?? Infinity) || b.propertyCount - a.propertyCount);
+    } else {
+      sorted.sort((a, b) => b.propertyCount - a.propertyCount || b.totalAssessedValue - a.totalAssessedValue);
+    }
+    return sorted;
+  }, [buyers, buyerFilter, buyerSort]);
   const buyerCounts = useMemo(
     () => ({ house: buyers.filter((b) => b.houseCount > 0).length, land: buyers.filter((b) => b.landCount > 0).length }),
     [buyers],
@@ -346,7 +361,13 @@ export function DistressedFinder() {
   const scoreWord = mode === 'house' ? 'distress' : 'land';
   const manualCount = queue.length || parseAddresses(addressInput).length;
   const fmtUsd0 = (n: number) => `$${Math.round(n).toLocaleString()}`;
-  const fmtSaleYear = (e?: number) => { if (!e) return '—'; const d = new Date(e); return isNaN(d.getTime()) ? '—' : String(d.getFullYear()); };
+  const currentYear = new Date().getFullYear();
+  const buyYear = (e?: number) => { if (!e) return undefined; const d = new Date(e); return isNaN(d.getTime()) ? undefined : d.getFullYear(); };
+  const fmtSaleDate = (e?: number) => {
+    if (!e) return '—';
+    const d = new Date(e);
+    return isNaN(d.getTime()) ? '—' : d.toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' });
+  };
 
   return (
     <div className="finder-page">
@@ -561,11 +582,21 @@ export function DistressedFinder() {
             </div>
           </div>
 
-          {/* House / land buyer filter */}
-          <div className="finder-buyer-filter">
-            <button className={buyerFilter === 'all' ? 'active' : ''} onClick={() => setBuyerFilter('all')} type="button">All ({buyers.length})</button>
-            <button className={buyerFilter === 'house' ? 'active' : ''} onClick={() => setBuyerFilter('house')} type="button"><Home size={13} /> House buyers ({buyerCounts.house})</button>
-            <button className={buyerFilter === 'land' ? 'active' : ''} onClick={() => setBuyerFilter('land')} type="button"><Trees size={13} /> Land buyers ({buyerCounts.land})</button>
+          {/* House / land buyer filter + sort */}
+          <div className="finder-buyer-controls">
+            <div className="finder-buyer-filter">
+              <button className={buyerFilter === 'all' ? 'active' : ''} onClick={() => setBuyerFilter('all')} type="button">All ({buyers.length})</button>
+              <button className={buyerFilter === 'house' ? 'active' : ''} onClick={() => setBuyerFilter('house')} type="button"><Home size={13} /> House buyers ({buyerCounts.house})</button>
+              <button className={buyerFilter === 'land' ? 'active' : ''} onClick={() => setBuyerFilter('land')} type="button"><Trees size={13} /> Land buyers ({buyerCounts.land})</button>
+            </div>
+            <label className="finder-buyer-sort">
+              Sort
+              <select value={buyerSort} onChange={(e) => setBuyerSort(e.target.value as 'recent' | 'props' | 'distance')}>
+                <option value="recent">Most recent buy</option>
+                {dealContext && <option value="distance">Nearest to deal</option>}
+                <option value="props">Most properties</option>
+              </select>
+            </label>
           </div>
 
           <div className="finder-table-wrap">
@@ -574,7 +605,7 @@ export function DistressedFinder() {
                 <tr>
                   {dealContext && <th className="num">Near Deal</th>}
                   <th>Owner</th><th>Buys</th><th className="num">Props</th><th className="num">Total Assessed</th>
-                  <th>Type</th><th>Mailing Address</th><th className="num">Last Buy</th><th>Example Properties</th>
+                  <th>Type</th><th>Mailing Address</th><th>Most Recent Buy</th><th>Example Properties</th>
                 </tr>
               </thead>
               <tbody>
@@ -609,7 +640,13 @@ export function DistressedFinder() {
                       </span>
                     </td>
                     <td className="addr">{b.mailingAddress}</td>
-                    <td className="num">{fmtSaleYear(b.mostRecentPurchaseEpoch)}</td>
+                    <td className="recent-buy">
+                      <span className="rb-date">
+                        {fmtSaleDate(b.mostRecentPurchaseEpoch)}
+                        {buyYear(b.mostRecentPurchaseEpoch) === currentYear && <span className="rb-new">{currentYear}</span>}
+                      </span>
+                      {b.mostRecentProperty && <span className="rb-prop" title={b.mostRecentProperty}>{b.mostRecentProperty}</span>}
+                    </td>
                     <td className="examples">{b.exampleProperties.join(' · ') || '—'}</td>
                   </tr>
                 ))}

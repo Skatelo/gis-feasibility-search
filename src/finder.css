@@ -135,6 +135,31 @@
 
 .finder-deal-context { font-weight: 500; color: var(--text-muted); font-size: 0.9rem; }
 
+/* House / land buyer filter + sort row */
+.finder-buyer-controls {
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; margin: -4px 0 4px;
+}
+.finder-buyer-sort {
+  display: inline-flex; align-items: center; gap: 7px; font-size: 0.78rem; font-weight: 600; color: var(--text-muted);
+}
+.finder-buyer-sort select {
+  border: 1px solid var(--bg-card-border); border-radius: var(--radius-sm); padding: 6px 9px;
+  font-family: var(--font-sans); font-size: 0.8rem; color: var(--text-primary); background: var(--bg-card); cursor: pointer;
+}
+.finder-buyer-sort select:focus { outline: none; border-color: var(--primary); box-shadow: 0 0 0 3px var(--primary-glow); }
+
+/* Most-recent-buy cell: date + property */
+.finder-buyer-table td.recent-buy { white-space: nowrap; }
+.finder-buyer-table td.recent-buy .rb-date { display: flex; align-items: center; gap: 6px; font-weight: 700; color: var(--text-primary); }
+.finder-buyer-table td.recent-buy .rb-new {
+  font-size: 0.62rem; font-weight: 800; color: #fff; background: var(--success);
+  border-radius: 4px; padding: 1px 5px; letter-spacing: 0.02em;
+}
+.finder-buyer-table td.recent-buy .rb-prop {
+  display: block; font-size: 0.72rem; color: var(--text-muted); max-width: 180px;
+  overflow: hidden; text-overflow: ellipsis;
+}
+
 /* House / land buyer filter chips */
 .finder-buyer-filter { display: flex; flex-wrap: wrap; gap: 8px; margin: -4px 0 4px; }
 .finder-buyer-filter button {
