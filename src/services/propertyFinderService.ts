@@ -1048,6 +1048,11 @@ export interface BuyerRecord {
   ownerType: 'individual' | 'company' | 'estate';
   outOfState: boolean;
   propertyCount: number;
+  /** How many of their parcels are improved (houses) vs vacant (land). */
+  houseCount: number;
+  landCount: number;
+  /** What they buy, from portfolio mix: 'house', 'land', 'mixed', or 'unknown'. */
+  buyerType: 'house' | 'land' | 'mixed' | 'unknown';
   totalAssessedValue: number;
   exampleProperties: string[];     // up to 6 situs addresses they own
   mostRecentPurchaseEpoch?: number;
@@ -1125,7 +1130,7 @@ export async function buildBuyerList(
   const baseUrl =
     `${cfg.parcelUrl}?where=${encodeURIComponent(where)}` +
     `&geometry=${env}&geometryType=esriGeometryEnvelope&inSR=4326&spatialRel=esriSpatialRelIntersects` +
-    `&outFields=${encodeURIComponent('parno,siteadd,scity,ownname,mailadd,mcity,mstate,mzip,parval,saledate')}` +
+    `&outFields=${encodeURIComponent('parno,siteadd,scity,ownname,mailadd,mcity,mstate,mzip,parval,landval,saledate')}` +
     geomParams;
   const PAGE = 2000;
   const MAX_PAGES = 100; // up to 200k parcels — county-scale (rows are tiny w/o geometry)
@@ -1133,7 +1138,8 @@ export async function buildBuyerList(
   type Agg = {
     ownerName: string; mailadd: string; mcity: string; mstate: string; mzip: string;
     ownerType: 'individual' | 'company' | 'estate'; outOfState: boolean;
-    count: number; totalAssessed: number; examples: string[]; recentSale?: number;
+    count: number; houseCount: number; landCount: number;
+    totalAssessed: number; examples: string[]; recentSale?: number;
     minDist?: number;
   };
   const groups = new Map<string, Agg>();
@@ -1179,13 +1185,24 @@ export async function buildBuyerList(
           mzip: String(a.mzip ?? '').trim(),
           ownerType: ownerType === 'estate' ? 'estate' : ownerType, // never 'public' here
           outOfState: !!mstate && mstate !== 'NC',
-          count: 0, totalAssessed: 0, examples: [],
+          count: 0, houseCount: 0, landCount: 0, totalAssessed: 0, examples: [],
         };
         groups.set(key, g);
       }
       g.count++;
       const pv = numOf(a.parval);
+      const lv = numOf(a.landval);
       if (Number.isFinite(pv)) g.totalAssessed += pv;
+      // Classify this parcel as improved (house) vs vacant (land) from the
+      // assessor's land-vs-total value — same near-vacant rule the finder uses
+      // (<15% of value in structures = land). Parcels with no assessment on
+      // record stay unclassified (they count toward the total only).
+      if (Number.isFinite(pv) && pv > 0) {
+        const imp = (pv - (Number.isFinite(lv) && lv > 0 ? lv : 0)) / pv;
+        if (imp < 0.15) g.landCount++; else g.houseCount++;
+      } else if (Number.isFinite(lv) && lv > 0) {
+        g.landCount++;
+      }
       const situs = String(a.siteadd ?? '').trim();
       if (situs && g.examples.length < 6 && !g.examples.includes(situs)) g.examples.push(situs);
       const sale = numOf(a.saledate);
@@ -1218,6 +1235,13 @@ export async function buildBuyerList(
       ownerType: g.ownerType,
       outOfState: g.outOfState,
       propertyCount: g.count,
+      houseCount: g.houseCount,
+      landCount: g.landCount,
+      buyerType:
+        g.houseCount > 0 && g.landCount > 0 ? 'mixed'
+        : g.houseCount > 0 ? 'house'
+        : g.landCount > 0 ? 'land'
+        : 'unknown',
       totalAssessedValue: Math.round(g.totalAssessed),
       exampleProperties: g.examples,
       mostRecentPurchaseEpoch: g.recentSale,
@@ -1267,7 +1291,8 @@ export function resultsToCsv(results: PropertyResult[]): string {
 
 export function buyersToCsv(buyers: BuyerRecord[]): string {
   const headers = [
-    'owner', 'owner_type', 'out_of_state', 'property_count', 'total_assessed_value', 'nearest_miles_to_deal',
+    'owner', 'owner_type', 'buys', 'house_count', 'land_count', 'out_of_state',
+    'property_count', 'total_assessed_value', 'nearest_miles_to_deal',
     'mailing_address', 'mail_city', 'mail_state', 'most_recent_purchase', 'example_properties',
   ];
   const esc = (v: unknown) => {
@@ -1280,7 +1305,8 @@ export function buyersToCsv(buyers: BuyerRecord[]): string {
     return isNaN(d.getTime()) ? '' : d.toISOString().slice(0, 10);
   };
   const rows = buyers.map((b) => [
-    b.ownerName, b.ownerType, b.outOfState, b.propertyCount, b.totalAssessedValue, b.nearestMiles ?? '',
+    b.ownerName, b.ownerType, b.buyerType, b.houseCount, b.landCount, b.outOfState,
+    b.propertyCount, b.totalAssessedValue, b.nearestMiles ?? '',
     b.mailingAddress, b.mailCity ?? '', b.mailState ?? '', fmtDate(b.mostRecentPurchaseEpoch), b.exampleProperties.join('; '),
   ].map(esc).join(','));
   return [headers.join(','), ...rows].join('\n');

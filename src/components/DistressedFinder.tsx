@@ -135,6 +135,7 @@ export function DistressedFinder() {
   const [dealAddress, setDealAddress] = useState('');
   const [dealContext, setDealContext] = useState('');
   const [buyers, setBuyers] = useState<BuyerRecord[]>([]);
+  const [buyerFilter, setBuyerFilter] = useState<'all' | 'house' | 'land'>('all');
 
   // Manual inputs
   const [addressInput, setAddressInput] = useState('');
@@ -287,6 +288,7 @@ export function DistressedFinder() {
     setErrors([]);
     setScanSummary('');
     setBuyers([]);
+    setBuyerFilter('all');
     stopRef.current = false;
     const deal = dealAddress.trim();
     setDealContext(deal);
@@ -331,7 +333,15 @@ export function DistressedFinder() {
 
   const exportCsv = () => visibleResults.length && downloadFile(`property-finder-${mode}-${Date.now()}.csv`, resultsToCsv(visibleResults), 'text/csv');
   const exportJson = () => visibleResults.length && downloadFile(`property-finder-${mode}-${Date.now()}.json`, JSON.stringify(visibleResults, null, 2), 'application/json');
-  const exportBuyersCsv = () => buyers.length && downloadFile(`buyer-list-${county}-${Date.now()}.csv`, buyersToCsv(buyers), 'text/csv');
+  const visibleBuyers = useMemo(
+    () => buyers.filter((b) => buyerFilter === 'all' || (buyerFilter === 'house' ? b.houseCount > 0 : b.landCount > 0)),
+    [buyers, buyerFilter],
+  );
+  const buyerCounts = useMemo(
+    () => ({ house: buyers.filter((b) => b.houseCount > 0).length, land: buyers.filter((b) => b.landCount > 0).length }),
+    [buyers],
+  );
+  const exportBuyersCsv = () => visibleBuyers.length && downloadFile(`buyer-list-${buyerFilter}-${county}-${Date.now()}.csv`, buyersToCsv(visibleBuyers), 'text/csv');
 
   const scoreWord = mode === 'house' ? 'distress' : 'land';
   const manualCount = queue.length || parseAddresses(addressInput).length;
@@ -542,22 +552,33 @@ export function DistressedFinder() {
       {mode === 'buyers' && buyers.length > 0 && (
         <>
           <div className="finder-results-head">
-            <h3>{buyers.length.toLocaleString()} Investor Buyers{dealContext ? <span className="finder-deal-context"> near {dealContext}</span> : ''}</h3>
+            <h3>
+              {visibleBuyers.length.toLocaleString()} {buyerFilter === 'house' ? 'House' : buyerFilter === 'land' ? 'Land' : 'Investor'} Buyers
+              {dealContext ? <span className="finder-deal-context"> near {dealContext}</span> : ''}
+            </h3>
             <div className="finder-export-actions">
               <button className="finder-btn-secondary" onClick={exportBuyersCsv} type="button"><Download size={15} /> CSV</button>
             </div>
           </div>
+
+          {/* House / land buyer filter */}
+          <div className="finder-buyer-filter">
+            <button className={buyerFilter === 'all' ? 'active' : ''} onClick={() => setBuyerFilter('all')} type="button">All ({buyers.length})</button>
+            <button className={buyerFilter === 'house' ? 'active' : ''} onClick={() => setBuyerFilter('house')} type="button"><Home size={13} /> House buyers ({buyerCounts.house})</button>
+            <button className={buyerFilter === 'land' ? 'active' : ''} onClick={() => setBuyerFilter('land')} type="button"><Trees size={13} /> Land buyers ({buyerCounts.land})</button>
+          </div>
+
           <div className="finder-table-wrap">
             <table className="finder-buyer-table">
               <thead>
                 <tr>
                   {dealContext && <th className="num">Near Deal</th>}
-                  <th>Owner</th><th className="num">Props</th><th className="num">Total Assessed</th>
+                  <th>Owner</th><th>Buys</th><th className="num">Props</th><th className="num">Total Assessed</th>
                   <th>Type</th><th>Mailing Address</th><th className="num">Last Buy</th><th>Example Properties</th>
                 </tr>
               </thead>
               <tbody>
-                {buyers.map((b, i) => (
+                {visibleBuyers.map((b, i) => (
                   <tr key={`${b.ownerName}-${i}`}>
                     {dealContext && (
                       <td className="num">
@@ -571,6 +592,13 @@ export function DistressedFinder() {
                     <td className="owner">
                       {b.ownerName}
                       {b.outOfState && <span className="finder-oos-tag">{b.mailState}</span>}
+                    </td>
+                    <td>
+                      <span className={`finder-buys bt-${b.buyerType}`} title={`${b.houseCount} house / improved · ${b.landCount} land / vacant`}>
+                        {b.houseCount > 0 && <span className="buys-h"><Home size={11} /> {b.houseCount}</span>}
+                        {b.landCount > 0 && <span className="buys-l"><Trees size={11} /> {b.landCount}</span>}
+                        {b.houseCount === 0 && b.landCount === 0 && <span className="buys-u">—</span>}
+                      </span>
                     </td>
                     <td className="num strong">{b.propertyCount}</td>
                     <td className="num">{fmtUsd0(b.totalAssessedValue)}</td>
