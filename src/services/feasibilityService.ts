@@ -8,6 +8,7 @@ export interface UserKeys {
   openTopography?: string;
   realtyApi?: string;
   deepSeek?: string;
+  rentCast?: string;
 }
 
 export function getUserKeys(): UserKeys {

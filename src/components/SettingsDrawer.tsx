@@ -19,6 +19,8 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
   const [showRealtyKey, setShowRealtyKey] = useState(false);
   const [deepSeekKey, setDeepSeekKey] = useState('');
   const [showDeepSeekKey, setShowDeepSeekKey] = useState(false);
+  const [rentCastKey, setRentCastKey] = useState('');
+  const [showRentCastKey, setShowRentCastKey] = useState(false);
   const [showGoogleKey, setShowGoogleKey] = useState(false);
   const [showGeminiKey, setShowGeminiKey] = useState(false);
   const [showTopographyKey, setShowTopographyKey] = useState(false);
@@ -36,6 +38,7 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
       setOpenTopographyKey(activeUser.keys?.openTopography || '');
       setRealtyApiKey(activeUser.keys?.realtyApi || '');
       setDeepSeekKey(activeUser.keys?.deepSeek || '');
+      setRentCastKey(activeUser.keys?.rentCast || '');
       setValidationError(null);
       setSaveSuccess(false);
     }
@@ -63,7 +66,8 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
       gemini: geminiKey.trim(),
       openTopography: openTopographyKey.trim(),
       realtyApi: realtyApiKey.trim(),
-      deepSeek: deepSeekKey.trim()
+      deepSeek: deepSeekKey.trim(),
+      rentCast: rentCastKey.trim()
     };
 
     try {
@@ -274,6 +278,32 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
                 </button>
               </div>
               <p className="field-help">When set, the AI report runs a fusion: Gemini 3.5 Flash and DeepSeek V4 Pro draft in parallel, then Gemini judges and streams the final report. Leave blank to use Gemini only. Get a key at platform.deepseek.com.</p>
+            </div>
+
+            {/* RentCast API Key (enriches buyer/deal sale prices) */}
+            <div className="settings-field-group">
+              <div className="field-label-row">
+                <label htmlFor="rentCastKey">RentCast API Key (real sale prices)</label>
+                <span className="badge optional">Optional</span>
+              </div>
+              <div className="field-input-container">
+                <Key className="input-icon" size={16} />
+                <input
+                  id="rentCastKey"
+                  type={showRentCastKey ? "text" : "password"}
+                  placeholder="rc_..."
+                  value={rentCastKey}
+                  onChange={(e) => setRentCastKey(e.target.value)}
+                />
+                <button
+                  type="button"
+                  className="field-toggle-btn"
+                  onClick={() => setShowRentCastKey(!showRentCastKey)}
+                >
+                  {showRentCastKey ? <EyeOff size={16} /> : <Eye size={16} />}
+                </button>
+              </div>
+              <p className="field-help">Enriches the Investor Buyer List with REAL last-sale prices &amp; dates from RentCast (api.rentcast.io), on demand for the buyers you choose. RentCast bills per request and free plans are limited, so enrichment is opt-in and capped. Get a key at app.rentcast.io.</p>
             </div>
 
           </div>

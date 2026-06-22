@@ -125,6 +125,33 @@
 .finder-buyer-table td.counties { white-space: nowrap; font-size: 0.78rem; color: var(--text-secondary); }
 .finder-multi-county { font-weight: 700; color: var(--accent); }
 
+.finder-rentcast-val { font-weight: 800; color: var(--success); white-space: nowrap; }
+.finder-rc-muted { color: var(--text-muted); font-size: 0.74rem; }
+
+/* Saved database banner + deal match */
+.finder-saved-db {
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px;
+  background: var(--bg-main); border: 1px solid var(--bg-card-border); border-radius: var(--radius-sm);
+  padding: 9px 12px; font-size: 0.82rem; color: var(--text-secondary);
+}
+.finder-saved-db span { display: inline-flex; align-items: center; gap: 6px; }
+.finder-saved-db-actions { display: inline-flex; gap: 8px; }
+.finder-saved-db .finder-btn-secondary { padding: 5px 12px; font-size: 0.78rem; }
+.finder-link-danger { background: none; border: none; color: var(--error); cursor: pointer; font-size: 0.78rem; font-weight: 600; }
+.finder-link-danger:hover { text-decoration: underline; }
+
+.finder-deal-match-row { display: flex; gap: 8px; flex-wrap: wrap; }
+.finder-deal-match-row input { flex: 1; min-width: 200px;
+  border: 1px solid var(--bg-card-border); border-radius: var(--radius-sm); padding: 9px 11px;
+  font-family: var(--font-sans); font-size: 0.85rem; color: var(--text-primary); background: var(--bg-main); }
+.finder-deal-match-row input:focus { outline: none; border-color: var(--primary); box-shadow: 0 0 0 3px var(--primary-glow); }
+
+.finder-match-banner {
+  display: flex; align-items: center; gap: 9px; font-size: 0.86rem; color: var(--text-primary);
+  background: var(--primary-glow); border: 1px solid rgba(79,70,229,0.25); border-radius: var(--radius-md); padding: 11px 14px;
+}
+.finder-match-banner svg { color: var(--primary); flex-shrink: 0; }
+
 @media (max-width: 768px) { .finder-mode-toggle.finder-mode-3 { grid-template-columns: 1fr; } }
 
 /* Auto / Manual tabs */

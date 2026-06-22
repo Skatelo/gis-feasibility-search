@@ -1,13 +1,23 @@
-import { useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Home, Trees, Search, Loader2, AlertCircle, Download, FileJson, Radar,
   MapPin, Eye, Sparkles, Target, X, Plus, Trash2, Waves, Droplets, HardHat, Landmark, Flag, User, Users, Building2, Database, Check,
 } from 'lucide-react';
 import {
   analyzeProperty, analyzeCandidate, discoverCandidates, buildBuyerList, buildBuyerDatabase,
+  rentCastLastSale, buyerLookupAddress, geocodeDealCounty,
+  saveBuyerDatabase, loadBuyerDatabase, clearBuyerDatabase,
   resultsToCsv, buyersToCsv, downloadFile, ncCountyNames,
 } from '../services/propertyFinderService';
-import type { SearchMode, PropertyResult, Candidate, EnvScore, BuyerRecord } from '../services/propertyFinderService';
+import type { SearchMode, PropertyResult, Candidate, EnvScore, BuyerRecord, SavedBuyerDatabase } from '../services/propertyFinderService';
+
+/** Read the signed-in user's API keys from local/session storage. */
+function readUserKeys(): { googleMaps?: string; gemini?: string; rentCast?: string } {
+  try {
+    const u = JSON.parse(localStorage.getItem('gis_active_user') || sessionStorage.getItem('gis_active_user') || '{}');
+    return u.keys || {};
+  } catch { return {}; }
+}
 
 type UiMode = SearchMode | 'buyers';
 
@@ -144,6 +154,13 @@ export function DistressedFinder() {
   const [buyerSort, setBuyerSort] = useState<'recent' | 'props' | 'distance' | 'score'>('recent');
   const [buyerScope, setBuyerScope] = useState<'area' | 'database'>('area');
   const [dbCounties, setDbCounties] = useState<string[]>(['Gaston', 'Cabarrus', 'Union', 'Lincoln']);
+  const [savedDb, setSavedDb] = useState<SavedBuyerDatabase | null>(null);
+  const [enriching, setEnriching] = useState(false);
+  const [enrichNote, setEnrichNote] = useState('');
+  // Deal matching against the saved database (county-based, instant).
+  const [dbDealInput, setDbDealInput] = useState('');
+  const [dealMatch, setDealMatch] = useState<{ county?: string; label: string } | null>(null);
+  const [matching, setMatching] = useState(false);
 
   // Manual inputs
   const [addressInput, setAddressInput] = useState('');
@@ -165,6 +182,9 @@ export function DistressedFinder() {
       return !!(u.keys?.googleMaps && u.keys?.gemini);
     } catch { return false; }
   }, []);
+
+  // Load any previously-saved buyer database (IndexedDB) once on mount.
+  useEffect(() => { loadBuyerDatabase().then((db) => { if (db) setSavedDb(db); }).catch(() => {}); }, []);
 
   const parseAddresses = (raw: string): string[] => raw.split(/\r?\n|;/).map((s) => s.trim()).filter(Boolean);
 
@@ -348,10 +368,14 @@ export function DistressedFinder() {
     try {
       const list = await buildBuyerDatabase(dbCounties, minProperties, (s) => setStage(s), () => stopRef.current);
       setBuyers(list);
+      setDealMatch(null);
+      // Persist so deals can be matched instantly later (and across reloads).
+      const dbRecord: SavedBuyerDatabase = { counties: dbCounties, minProperties, builtAt: Date.now(), buyers: list };
+      try { await saveBuyerDatabase(dbRecord); setSavedDb(dbRecord); } catch { /* ignore quota */ }
       const asOf = new Date().toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
       setScanSummary(
         `${list.length.toLocaleString()} investor buyers holding ${minProperties}+ parcels across ${dbCounties.length} ${dbCounties.length === 1 ? 'county' : 'counties'} (${dbCounties.join(', ')})` +
-          `${stopRef.current ? ' — stopped early' : ''}. Ranked by activity score. Live county records as of ${asOf} — rebuild to refresh.`,
+          `${stopRef.current ? ' — stopped early' : ''}. Saved for instant deal matching · ranked by activity score · live as of ${asOf}.`,
       );
     } catch (e: any) {
       setErrors([{ address: dbCounties.join(', '), message: e?.message || 'Buyer database build failed' }]);
@@ -363,6 +387,86 @@ export function DistressedFinder() {
 
   const toggleDbCounty = (c: string) =>
     setDbCounties((prev) => (prev.includes(c) ? prev.filter((x) => x !== c) : [...prev, c]));
+
+  /** Load the previously-saved database instantly (no scan). */
+  const loadSavedDb = () => {
+    if (!savedDb) return;
+    setBuyers(savedDb.buyers);
+    setBuyerScope('database');
+    setBuyerFilter('all');
+    setBuyerClass('all');
+    setBuyerSort('score');
+    setDealContext('');
+    setDealMatch(null);
+    setErrors([]);
+    setDbCounties(savedDb.counties);
+    setScanSummary(
+      `Loaded saved database: ${savedDb.buyers.length.toLocaleString()} buyers across ${savedDb.counties.join(', ')} (built ${new Date(savedDb.builtAt).toLocaleDateString()}). Enter a deal address to match instantly.`,
+    );
+  };
+
+  const deleteSavedDb = async () => { await clearBuyerDatabase(); setSavedDb(null); };
+
+  /** Match a deal address against the loaded database (county-based, instant). */
+  const runDealMatch = async () => {
+    const addr = dbDealInput.trim();
+    if (!addr || !buyers.length) return;
+    setMatching(true);
+    setErrors([]);
+    try {
+      const keys = readUserKeys();
+      if (!keys.googleMaps) throw new Error('Google Maps API key required.');
+      const res = await geocodeDealCounty(addr, keys.googleMaps);
+      if (!res) throw new Error(`Could not locate "${addr}".`);
+      setDealMatch({ county: res.county, label: addr });
+      setBuyerSort('score');
+    } catch (e: any) {
+      setErrors([{ address: addr, message: e?.message || 'Deal match failed' }]);
+    } finally {
+      setMatching(false);
+    }
+  };
+
+  /** Enrich the currently-visible buyers' most-recent sale with RentCast (capped). */
+  const RENTCAST_MAX = 25;
+  const enrichWithRentCast = async () => {
+    const keys = readUserKeys();
+    if (!keys.rentCast) {
+      setErrors([{ address: 'RentCast', message: 'Add your RentCast API key in Account Settings first.' }]);
+      return;
+    }
+    const targets = visibleBuyers.filter((b) => b.rentCastStatus == null && buyerLookupAddress(b)).slice(0, RENTCAST_MAX);
+    if (!targets.length) { setEnrichNote('No visible buyers need enrichment (need a numbered street address).'); return; }
+    setEnriching(true);
+    stopRef.current = false;
+    const updates = new Map<string, Partial<BuyerRecord>>();
+    let done = 0, ok = 0, none = 0, err = 0;
+    for (const b of targets) {
+      if (stopRef.current) break;
+      const addr = buyerLookupAddress(b)!;
+      setEnrichNote(`RentCast ${done + 1}/${targets.length}: ${addr}`);
+      try {
+        const sale = await rentCastLastSale(addr, keys.rentCast);
+        if (sale.found && sale.price) { ok++; updates.set(b.ownerName + '|' + (b.mailingAddress || ''), { rentCastStatus: 'ok', realLastSalePrice: sale.price, realLastSaleDate: sale.dateEpoch }); }
+        else { none++; updates.set(b.ownerName + '|' + (b.mailingAddress || ''), { rentCastStatus: 'none' }); }
+      } catch {
+        err++;
+        updates.set(b.ownerName + '|' + (b.mailingAddress || ''), { rentCastStatus: 'error' });
+      }
+      done++;
+    }
+    setBuyers((prev) => prev.map((b) => {
+      const u = updates.get(b.ownerName + '|' + (b.mailingAddress || ''));
+      return u ? { ...b, ...u } : b;
+    }));
+    setEnriching(false);
+    setEnrichNote(
+      err > 0 && ok === 0 && none === 0
+        ? `RentCast couldn't be reached for any lookup (${err} errors) — check your RentCast API key, plan limits, or that requests aren't blocked.`
+        : `RentCast: ${ok} priced · ${none} no-record · ${err} failed (of ${done}, cached).` +
+            (visibleBuyers.length > RENTCAST_MAX ? ` Showing ${RENTCAST_MAX}/run — narrow the list or run again for more.` : ''),
+    );
+  };
 
   const stopScan = () => { stopRef.current = true; setStage('Stopping…'); };
 
@@ -379,10 +483,12 @@ export function DistressedFinder() {
   const exportCsv = () => visibleResults.length && downloadFile(`property-finder-${mode}-${Date.now()}.csv`, resultsToCsv(visibleResults), 'text/csv');
   const exportJson = () => visibleResults.length && downloadFile(`property-finder-${mode}-${Date.now()}.json`, JSON.stringify(visibleResults, null, 2), 'application/json');
   const visibleBuyers = useMemo(() => {
+    const matchCty = dealMatch?.county?.toLowerCase();
     const list = buyers.filter(
       (b) =>
         (buyerFilter === 'all' || (buyerFilter === 'house' ? b.houseCount > 0 : b.landCount > 0)) &&
-        (buyerClass === 'all' || b.investorClass === buyerClass),
+        (buyerClass === 'all' || b.investorClass === buyerClass) &&
+        (!matchCty || b.counties.some((c) => c.toLowerCase() === matchCty)),
     );
     const sorted = [...list];
     if (buyerSort === 'recent') {
@@ -395,7 +501,7 @@ export function DistressedFinder() {
       sorted.sort((a, b) => b.propertyCount - a.propertyCount || b.totalAssessedValue - a.totalAssessedValue);
     }
     return sorted;
-  }, [buyers, buyerFilter, buyerClass, buyerSort]);
+  }, [buyers, buyerFilter, buyerClass, buyerSort, dealMatch]);
   const buyerCounts = useMemo(
     () => ({ house: buyers.filter((b) => b.houseCount > 0).length, land: buyers.filter((b) => b.landCount > 0).length }),
     [buyers],
@@ -493,6 +599,32 @@ export function DistressedFinder() {
                 </button>
               )}
             </div>
+
+            {/* Saved database (instant load — no re-scan) */}
+            {savedDb && (
+              <div className="finder-saved-db finder-field-wide">
+                <span><Database size={13} /> Saved database: <strong>{savedDb.buyers.length.toLocaleString()}</strong> buyers · {savedDb.counties.join(', ')} · built {new Date(savedDb.builtAt).toLocaleDateString()}</span>
+                <span className="finder-saved-db-actions">
+                  <button type="button" className="finder-btn-secondary" onClick={loadSavedDb} disabled={running}><Database size={14} /> Load</button>
+                  <button type="button" className="finder-link-danger" onClick={deleteSavedDb} disabled={running}>Delete</button>
+                </span>
+              </div>
+            )}
+
+            {/* Instant deal matching against the loaded database */}
+            {buyers.length > 0 && (
+              <div className="finder-field finder-field-wide finder-deal-match">
+                <label>Match a deal address <span>(instant — finds your saved buyers active in the deal's county)</span></label>
+                <div className="finder-deal-match-row">
+                  <input type="text" value={dbDealInput} onChange={(e) => setDbDealInput(e.target.value)} placeholder="813 Corriher St, Kannapolis, NC 28081"
+                    onKeyDown={(e) => { if (e.key === 'Enter') runDealMatch(); }} />
+                  <button type="button" className="finder-btn-secondary" onClick={runDealMatch} disabled={matching || !dbDealInput.trim()}>
+                    {matching ? <Loader2 size={15} className="finder-spin" /> : <Target size={15} />} Match
+                  </button>
+                  {dealMatch && <button type="button" className="finder-link-danger" onClick={() => { setDealMatch(null); setDbDealInput(''); }}>Clear</button>}
+                </div>
+              </div>
+            )}
           </div>
           ) : (
           <div className="finder-area-form">
@@ -651,15 +783,29 @@ export function DistressedFinder() {
       {/* Investor buyer list */}
       {mode === 'buyers' && buyers.length > 0 && (
         <>
+          {dealMatch && (
+            <div className="finder-match-banner">
+              <Target size={15} />
+              <span>Most likely buyers for <strong>{dealMatch.label}</strong>{dealMatch.county ? <> — active in <strong>{dealMatch.county} County</strong></> : ' — county undetermined, showing all'}. Use the House/Land filter to match what you're selling.</span>
+            </div>
+          )}
           <div className="finder-results-head">
             <h3>
               {visibleBuyers.length.toLocaleString()} {buyerFilter === 'house' ? 'House' : buyerFilter === 'land' ? 'Land' : 'Investor'} Buyers
               {dealContext ? <span className="finder-deal-context"> near {dealContext}</span> : ''}
             </h3>
             <div className="finder-export-actions">
+              {enriching ? (
+                <button className="finder-btn-stop" onClick={stopScan} type="button"><X size={15} /> Stop</button>
+              ) : (
+                <button className="finder-btn-secondary" onClick={enrichWithRentCast} type="button" title="Fetch real last-sale prices for the visible buyers from RentCast">
+                  <Sparkles size={15} /> Enrich $ (RentCast)
+                </button>
+              )}
               <button className="finder-btn-secondary" onClick={exportBuyersCsv} type="button"><Download size={15} /> CSV</button>
             </div>
           </div>
+          {(enriching || enrichNote) && <div className="finder-scan-summary">{enriching ? <><Loader2 size={13} className="finder-spin" /> {enrichNote}</> : enrichNote}</div>}
 
           {/* House / land buyer filter + class filter + sort */}
           <div className="finder-buyer-controls">
@@ -698,7 +844,7 @@ export function DistressedFinder() {
                   {dealContext && <th className="num">Near Deal</th>}
                   <th className="num">Score</th><th>Owner</th><th>Class</th><th>Buys</th><th className="num">Props</th>
                   {buyerScope === 'database' && <th>Counties</th>}
-                  <th className="num">Avg Value</th><th>Most Recent Buy</th><th>Mailing Address</th><th>Example Properties</th>
+                  <th className="num">Avg Value</th><th className="num">RentCast $</th><th>Most Recent Buy</th><th>Mailing Address</th><th>Example Properties</th>
                 </tr>
               </thead>
               <tbody>
@@ -740,6 +886,12 @@ export function DistressedFinder() {
                       </td>
                     )}
                     <td className="num">{b.avgAssessedValue > 0 ? fmtUsd0(b.avgAssessedValue) : '—'}</td>
+                    <td className="num">
+                      {b.realLastSalePrice ? <span className="finder-rentcast-val">{fmtUsd0(b.realLastSalePrice)}</span>
+                        : b.rentCastStatus === 'none' ? <span className="finder-rc-muted">no record</span>
+                        : b.rentCastStatus === 'error' ? <span className="finder-rc-muted">—</span>
+                        : ''}
+                    </td>
                     <td className="recent-buy">
                       <span className="rb-date">
                         {fmtSaleDate(b.mostRecentPurchaseEpoch)}

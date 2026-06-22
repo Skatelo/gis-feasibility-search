@@ -15,6 +15,7 @@
 
 import { getUserKeys, ncCountyConfig, fetchFemaFloodZone, fetchNwiWetlands } from './feasibilityService';
 import type { FloodZoneInfo, WetlandsInfo } from '../types/feasibility';
+import { idbGet, idbSet, idbDel } from './idb';
 
 // Two modes: distressed houses, and a combined "land" mode that covers both
 // vacant land and builder lots (the spec asked to merge those two).
@@ -1061,8 +1062,18 @@ export interface BuyerRecord {
   mostRecentPurchaseEpoch?: number;
   /** The property (situs address) acquired in that most recent purchase. */
   mostRecentProperty?: string;
+  /** Situs city of that most recent property (used to build a full RentCast address). */
+  mostRecentPropertyCity?: string;
   /** Miles from the deal address to this owner's NEAREST holding (deal set only). */
   nearestMiles?: number;
+
+  // RentCast enrichment (filled on demand)
+  /** Real last-sale price of the most-recent property (RentCast). */
+  realLastSalePrice?: number;
+  /** Real last-sale date (epoch ms) of the most-recent property (RentCast). */
+  realLastSaleDate?: number;
+  /** 'ok' = enriched, 'none' = RentCast had no record, 'error' = lookup failed. */
+  rentCastStatus?: 'ok' | 'none' | 'error';
 
   // Investor profile
   /** NC counties this owner holds parcels in (from the scanned set). */
@@ -1138,7 +1149,7 @@ type BuyerAgg = {
   ownerType: 'individual' | 'company' | 'estate'; outOfState: boolean;
   count: number; houseCount: number; landCount: number;
   totalAssessed: number; assessedCount: number; examples: string[];
-  recentSale?: number; recentProperty?: string;
+  recentSale?: number; recentProperty?: string; recentPropertyCity?: string;
   counties: Set<string>; minDist?: number;
 };
 
@@ -1191,6 +1202,7 @@ function aggregateParcel(
   if (Number.isFinite(sale) && (g.recentSale == null || sale > g.recentSale)) {
     g.recentSale = sale;
     g.recentProperty = situs || undefined;
+    g.recentPropertyCity = String(a.scity ?? '').trim() || undefined;
   }
   if (dealPt && geometry) {
     const c = geomCenter(geometry);
@@ -1229,6 +1241,7 @@ function finalizeBuyers(groups: Map<string, BuyerAgg>, minProperties: number): B
       exampleProperties: g.examples,
       mostRecentPurchaseEpoch: g.recentSale,
       mostRecentProperty: g.recentProperty,
+      mostRecentPropertyCity: g.recentPropertyCity,
       nearestMiles: g.minDist != null ? Math.round(g.minDist * 100) / 100 : undefined,
       counties,
       isLLC: inv.isLLC, isBuilder: inv.isBuilder, isDeveloper: inv.isDeveloper, isRepeat: inv.isRepeat,
@@ -1374,7 +1387,7 @@ export async function buildBuyerDatabase(
     if (!cfg) continue;
     const baseUrl =
       `${cfg.parcelUrl}?where=${encodeURIComponent(`cntyname = '${county}'`)}` +
-      `&outFields=${encodeURIComponent('parno,cntyname,siteadd,ownname,mailadd,mcity,mstate,mzip,parval,landval,saledate')}` +
+      `&outFields=${encodeURIComponent('parno,cntyname,siteadd,scity,ownname,mailadd,mcity,mstate,mzip,parval,landval,saledate')}` +
       `&returnGeometry=false&f=json`;
     let prevFirstParno: string | undefined;
     let countyScanned = 0;
@@ -1416,6 +1429,117 @@ export async function buildBuyerDatabase(
 }
 
 // ---------------------------------------------------------------------------
+// RentCast enrichment — real last-sale price/date for a property (api.rentcast.io).
+// On-demand and per-address (RentCast bills per request), so used to enrich the
+// buyers you choose, not whole counties. Cached 30 days to avoid re-billing.
+// ---------------------------------------------------------------------------
+
+export interface RentCastSale { found: boolean; price?: number; dateEpoch?: number; }
+
+const RENTCAST_CACHE = 'gisfs:rentcast:v1:';
+
+export async function rentCastLastSale(address: string, apiKey: string): Promise<RentCastSale> {
+  const norm = address.toLowerCase().replace(/\s+/g, ' ').trim();
+  const ckey = RENTCAST_CACHE + norm;
+  try {
+    const raw = localStorage.getItem(ckey);
+    if (raw) {
+      const v = JSON.parse(raw);
+      if (v && Date.now() - (v.t || 0) < 30 * 864e5) return v.d as RentCastSale;
+    }
+  } catch { /* ignore */ }
+
+  const url = `https://api.rentcast.io/v1/properties?address=${encodeURIComponent(address)}`;
+  const r = await fetch(url, { headers: { 'X-Api-Key': apiKey, accept: 'application/json' } });
+  if (r.status === 404) {
+    const d: RentCastSale = { found: false };
+    try { localStorage.setItem(ckey, JSON.stringify({ d, t: Date.now() })); } catch { /* ignore */ }
+    return d;
+  }
+  if (!r.ok) throw new Error(`RentCast ${r.status}`);
+  const data = await r.json();
+  const rec = Array.isArray(data) ? data[0] : (data?.properties?.[0] ?? data);
+  const price = Number(rec?.lastSalePrice);
+  const dParsed = rec?.lastSaleDate ? Date.parse(rec.lastSaleDate) : NaN;
+  const d: RentCastSale = {
+    found: !!rec,
+    price: Number.isFinite(price) && price > 0 ? price : undefined,
+    dateEpoch: Number.isFinite(dParsed) ? dParsed : undefined,
+  };
+  try { localStorage.setItem(ckey, JSON.stringify({ d, t: Date.now() })); } catch { /* ignore */ }
+  return d;
+}
+
+/** Full address for a buyer's most-recent property, for a RentCast lookup. */
+export function buyerLookupAddress(b: BuyerRecord): string | null {
+  const street = (b.mostRecentProperty || '').trim();
+  if (!street || !/^[1-9]/.test(street)) return null; // need a real house number
+  const city = (b.mostRecentPropertyCity || b.mailCity || '').trim();
+  return `${street}${city ? `, ${city}` : ''}, NC`;
+}
+
+/** Geocode an address AND extract its NC county (for matching against the database). */
+export async function geocodeDealCounty(
+  address: string,
+  apiKey: string,
+): Promise<{ lat: number; lng: number; county?: string } | null> {
+  const url = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(address)}&key=${apiKey}`;
+  const res = await fetch(url);
+  if (!res.ok) return null;
+  const data = await res.json();
+  if (data.status !== 'OK' || !data.results?.[0]) return null;
+  const r = data.results[0];
+  const loc = r.geometry?.location;
+  if (!loc) return null;
+  const comp = (r.address_components || []).find((c: any) => c.types?.includes('administrative_area_level_2'));
+  const county = comp?.long_name ? String(comp.long_name).replace(/\s+County$/i, '').trim() : undefined;
+  return { lat: loc.lat, lng: loc.lng, county };
+}
+
+// ---------------------------------------------------------------------------
+// Persisted buyer database (IndexedDB) — so deals can be matched instantly.
+// ---------------------------------------------------------------------------
+
+export interface SavedBuyerDatabase {
+  counties: string[];
+  minProperties: number;
+  builtAt: number;
+  buyers: BuyerRecord[];
+}
+
+const BUYER_DB_KEY = 'buyerDatabase:v1';
+
+export async function saveBuyerDatabase(db: SavedBuyerDatabase): Promise<void> {
+  await idbSet(BUYER_DB_KEY, db);
+}
+export async function loadBuyerDatabase(): Promise<SavedBuyerDatabase | undefined> {
+  try { return await idbGet<SavedBuyerDatabase>(BUYER_DB_KEY); } catch { return undefined; }
+}
+export async function clearBuyerDatabase(): Promise<void> {
+  try { await idbDel(BUYER_DB_KEY); } catch { /* ignore */ }
+}
+
+/**
+ * Match a deal against the saved buyer database: returns buyers active in the
+ * deal's county (optionally only those who buy the deal's property type), best
+ * (highest score / most recent) first — the "most likely buyers" for the deal.
+ */
+export function matchBuyersToDeal(
+  db: SavedBuyerDatabase,
+  county: string | undefined,
+  dealType: 'house' | 'land' | 'any',
+): BuyerRecord[] {
+  const cty = (county || '').toLowerCase();
+  return db.buyers
+    .filter((b) => {
+      const inCounty = !cty || b.counties.some((c) => c.toLowerCase() === cty);
+      const typeOk = dealType === 'any' || (dealType === 'land' ? b.landCount > 0 : b.houseCount > 0);
+      return inCounty && typeOk;
+    })
+    .sort((a, b) => b.buyerScore - a.buyerScore || (b.mostRecentPurchaseEpoch ?? 0) - (a.mostRecentPurchaseEpoch ?? 0));
+}
+
+// ---------------------------------------------------------------------------
 // Export
 // ---------------------------------------------------------------------------
 
@@ -1448,6 +1572,7 @@ export function buyersToCsv(buyers: BuyerRecord[]): string {
     'owner', 'investor_class', 'buyer_score', 'is_llc', 'is_builder', 'is_developer', 'is_repeat',
     'buys', 'house_count', 'land_count', 'counties', 'out_of_state',
     'property_count', 'avg_assessed_value', 'total_assessed_value', 'nearest_miles_to_deal',
+    'rentcast_last_sale_price', 'rentcast_last_sale_date',
     'mailing_address', 'mail_city', 'mail_state',
     'most_recent_purchase_date', 'most_recent_property', 'example_properties',
   ];
@@ -1464,6 +1589,7 @@ export function buyersToCsv(buyers: BuyerRecord[]): string {
     b.ownerName, b.investorClass, b.buyerScore, b.isLLC, b.isBuilder, b.isDeveloper, b.isRepeat,
     b.buyerType, b.houseCount, b.landCount, b.counties.join('; '), b.outOfState,
     b.propertyCount, b.avgAssessedValue, b.totalAssessedValue, b.nearestMiles ?? '',
+    b.realLastSalePrice ?? '', fmtDate(b.realLastSaleDate),
     b.mailingAddress, b.mailCity ?? '', b.mailState ?? '',
     fmtDate(b.mostRecentPurchaseEpoch), b.mostRecentProperty ?? '', b.exampleProperties.join('; '),
   ].map(esc).join(','));
