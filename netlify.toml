@@ -3,8 +3,13 @@
   command = "npm run build"
   publish = "dist"
 
+# Serverless functions (e.g. the RentCast proxy that avoids browser CORS).
+[functions]
+  directory = "netlify/functions"
+
 # Serve index.html for every path so client routing + the Supabase OAuth
-# redirect (detectSessionInUrl) work after deploy.
+# redirect (detectSessionInUrl) work after deploy. Netlify routes
+# /.netlify/functions/* before redirects, so this doesn't intercept functions.
 [[redirects]]
   from = "/*"
   to = "/index.html"

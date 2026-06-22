@@ -5,7 +5,7 @@ import {
 } from 'lucide-react';
 import {
   analyzeProperty, analyzeCandidate, discoverCandidates, buildBuyerList, buildBuyerDatabase,
-  rentCastLastSale, buyerLookupAddress, geocodeDealCounty,
+  rentCastLastSale, buyerLookupAddress, geocodeDealCounty, matchBuyersToDeal,
   saveBuyerDatabase, loadBuyerDatabase, clearBuyerDatabase,
   resultsToCsv, buyersToCsv, downloadFile, ncCountyNames,
 } from '../services/propertyFinderService';
@@ -480,6 +480,15 @@ export function DistressedFinder() {
     [results, mode, minScore],
   );
 
+  // The most likely buyers for these finder hits, drawn from the saved buyer
+  // database, matched by the scan county + deal type (house vs land).
+  const dealBuyers = useMemo(() => {
+    if (!savedDb || (mode !== 'house' && mode !== 'land')) return null;
+    const type: 'house' | 'land' = mode === 'land' ? 'land' : 'house';
+    const matched = matchBuyersToDeal(savedDb, county, type);
+    return { county, type, list: matched.slice(0, 8), total: matched.length };
+  }, [savedDb, mode, county]);
+
   const exportCsv = () => visibleResults.length && downloadFile(`property-finder-${mode}-${Date.now()}.csv`, resultsToCsv(visibleResults), 'text/csv');
   const exportJson = () => visibleResults.length && downloadFile(`property-finder-${mode}-${Date.now()}.json`, JSON.stringify(visibleResults, null, 2), 'application/json');
   const visibleBuyers = useMemo(() => {
@@ -776,6 +785,39 @@ export function DistressedFinder() {
               <button className="finder-btn-secondary" onClick={exportJson} type="button"><FileJson size={15} /> JSON</button>
             </div>
           </div>
+
+          {/* Most likely buyers for these deals, from the saved buyer database */}
+          {dealBuyers ? (
+            <div className="finder-dealbuyers">
+              <div className="finder-dealbuyers-head">
+                <Users size={15} />
+                <strong>Most likely buyers</strong> for these {county} {dealBuyers.type === 'land' ? 'land' : 'house'} deals
+                <span className="finder-dealbuyers-count">{dealBuyers.total} in your database</span>
+              </div>
+              {dealBuyers.list.length > 0 ? (
+                <div className="finder-dealbuyers-list">
+                  {dealBuyers.list.map((b, i) => (
+                    <div key={`${b.ownerName}-${i}`} className="finder-dealbuyer">
+                      <span className={`finder-score-pill ${b.buyerScore >= 70 ? 'sc-hot' : b.buyerScore >= 45 ? 'sc-warm' : ''}`}>{b.buyerScore}</span>
+                      <span className="db-name">{b.ownerName}{b.outOfState && <span className="finder-oos-tag">{b.mailState}</span>}</span>
+                      <span className={`finder-owner-type ot-${b.investorClass}`}>{b.investorClass}</span>
+                      <span className="db-meta">{b.propertyCount} props · last buy {fmtSaleDate(b.mostRecentPurchaseEpoch)}</span>
+                      <span className="db-mail">{b.mailingAddress}</span>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="finder-dealbuyers-empty">
+                  Your saved database doesn't cover <strong>{county}</strong>. Build one including it in <strong>Buyers → Multi-county database</strong>.
+                </div>
+              )}
+            </div>
+          ) : (mode === 'house' || mode === 'land') ? (
+            <div className="finder-dealbuyers-hint">
+              <Users size={14} /> Build an investor <strong>buyer database</strong> (Buyers tab → Multi-county database) and it'll auto-match the most likely buyers to deals like these.
+            </div>
+          ) : null}
+
           <div className="finder-results-grid">{visibleResults.map((r) => <ResultCard key={r.id} r={r} />)}</div>
         </>
       )}

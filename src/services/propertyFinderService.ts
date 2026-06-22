@@ -1449,8 +1449,21 @@ export async function rentCastLastSale(address: string, apiKey: string): Promise
     }
   } catch { /* ignore */ }
 
-  const url = `https://api.rentcast.io/v1/properties?address=${encodeURIComponent(address)}`;
-  const r = await fetch(url, { headers: { 'X-Api-Key': apiKey, accept: 'application/json' } });
+  // Prefer the serverless proxy (RentCast doesn't send browser CORS headers).
+  // Fall back to a direct call if the function isn't deployed (e.g. local dev),
+  // which the SPA fallback would answer with HTML instead of JSON.
+  const directUrl = `https://api.rentcast.io/v1/properties?address=${encodeURIComponent(address)}`;
+  const proxyUrl = `/.netlify/functions/rentcast?address=${encodeURIComponent(address)}`;
+  let r: Response;
+  try {
+    const pr = await fetch(proxyUrl, { headers: { 'x-rentcast-key': apiKey } });
+    const ct = pr.headers.get('content-type') || '';
+    r = (pr.ok || pr.status === 404) && ct.includes('json')
+      ? pr
+      : await fetch(directUrl, { headers: { 'X-Api-Key': apiKey, accept: 'application/json' } });
+  } catch {
+    r = await fetch(directUrl, { headers: { 'X-Api-Key': apiKey, accept: 'application/json' } });
+  }
   if (r.status === 404) {
     const d: RentCastSale = { found: false };
     try { localStorage.setItem(ckey, JSON.stringify({ d, t: Date.now() })); } catch { /* ignore */ }
