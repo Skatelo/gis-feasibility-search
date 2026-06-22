@@ -1,15 +1,19 @@
 import { useMemo, useRef, useState } from 'react';
 import {
   Home, Trees, Search, Loader2, AlertCircle, Download, FileJson, Radar,
-  MapPin, Eye, Sparkles, Target, X, Plus, Trash2, Waves, Droplets, HardHat, Landmark, Flag, User, Users, Building2,
+  MapPin, Eye, Sparkles, Target, X, Plus, Trash2, Waves, Droplets, HardHat, Landmark, Flag, User, Users, Building2, Database, Check,
 } from 'lucide-react';
 import {
-  analyzeProperty, analyzeCandidate, discoverCandidates, buildBuyerList,
+  analyzeProperty, analyzeCandidate, discoverCandidates, buildBuyerList, buildBuyerDatabase,
   resultsToCsv, buyersToCsv, downloadFile, ncCountyNames,
 } from '../services/propertyFinderService';
 import type { SearchMode, PropertyResult, Candidate, EnvScore, BuyerRecord } from '../services/propertyFinderService';
 
 type UiMode = SearchMode | 'buyers';
+
+// Charlotte-metro + western Piedmont counties for the multi-county buyer database.
+const METRO_COUNTIES = ['Gaston', 'Mecklenburg', 'Cabarrus', 'Union', 'Lincoln', 'Iredell', 'Catawba', 'Cleveland', 'Rowan', 'Stanly'];
+const BIG_COUNTIES = new Set(['Mecklenburg', 'Wake', 'Guilford', 'Forsyth']); // large → slower scan
 
 const MODES: { id: UiMode; label: string; icon: typeof Home; blurb: string }[] = [
   { id: 'house', label: 'Distressed Houses', icon: Home, blurb: 'Distressed-only — GIS targets absentee/estate/long-held owners; fine homes are hidden' },
@@ -136,7 +140,10 @@ export function DistressedFinder() {
   const [dealContext, setDealContext] = useState('');
   const [buyers, setBuyers] = useState<BuyerRecord[]>([]);
   const [buyerFilter, setBuyerFilter] = useState<'all' | 'house' | 'land'>('all');
-  const [buyerSort, setBuyerSort] = useState<'recent' | 'props' | 'distance'>('recent');
+  const [buyerClass, setBuyerClass] = useState<'all' | 'llc' | 'builder' | 'developer' | 'individual'>('all');
+  const [buyerSort, setBuyerSort] = useState<'recent' | 'props' | 'distance' | 'score'>('recent');
+  const [buyerScope, setBuyerScope] = useState<'area' | 'database'>('area');
+  const [dbCounties, setDbCounties] = useState<string[]>(['Gaston', 'Cabarrus', 'Union', 'Lincoln']);
 
   // Manual inputs
   const [addressInput, setAddressInput] = useState('');
@@ -290,6 +297,7 @@ export function DistressedFinder() {
     setScanSummary('');
     setBuyers([]);
     setBuyerFilter('all');
+    setBuyerClass('all');
     stopRef.current = false;
     const deal = dealAddress.trim();
     setDealContext(deal);
@@ -325,6 +333,37 @@ export function DistressedFinder() {
     }
   };
 
+  const runBuyerDatabase = async () => {
+    if (!dbCounties.length) return;
+    setRunning(true);
+    setErrors([]);
+    setScanSummary('');
+    setBuyers([]);
+    setBuyerFilter('all');
+    setBuyerClass('all');
+    setDealContext('');
+    setBuyerSort('score');
+    stopRef.current = false;
+    setStage('Building buyer database…');
+    try {
+      const list = await buildBuyerDatabase(dbCounties, minProperties, (s) => setStage(s), () => stopRef.current);
+      setBuyers(list);
+      const asOf = new Date().toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+      setScanSummary(
+        `${list.length.toLocaleString()} investor buyers holding ${minProperties}+ parcels across ${dbCounties.length} ${dbCounties.length === 1 ? 'county' : 'counties'} (${dbCounties.join(', ')})` +
+          `${stopRef.current ? ' — stopped early' : ''}. Ranked by activity score. Live county records as of ${asOf} — rebuild to refresh.`,
+      );
+    } catch (e: any) {
+      setErrors([{ address: dbCounties.join(', '), message: e?.message || 'Buyer database build failed' }]);
+    } finally {
+      setRunning(false);
+      setStage('');
+    }
+  };
+
+  const toggleDbCounty = (c: string) =>
+    setDbCounties((prev) => (prev.includes(c) ? prev.filter((x) => x !== c) : [...prev, c]));
+
   const stopScan = () => { stopRef.current = true; setStage('Stopping…'); };
 
   const visibleResults = useMemo(
@@ -340,18 +379,23 @@ export function DistressedFinder() {
   const exportCsv = () => visibleResults.length && downloadFile(`property-finder-${mode}-${Date.now()}.csv`, resultsToCsv(visibleResults), 'text/csv');
   const exportJson = () => visibleResults.length && downloadFile(`property-finder-${mode}-${Date.now()}.json`, JSON.stringify(visibleResults, null, 2), 'application/json');
   const visibleBuyers = useMemo(() => {
-    const list = buyers.filter((b) => buyerFilter === 'all' || (buyerFilter === 'house' ? b.houseCount > 0 : b.landCount > 0));
+    const list = buyers.filter(
+      (b) =>
+        (buyerFilter === 'all' || (buyerFilter === 'house' ? b.houseCount > 0 : b.landCount > 0)) &&
+        (buyerClass === 'all' || b.investorClass === buyerClass),
+    );
     const sorted = [...list];
     if (buyerSort === 'recent') {
-      // Most recent buy first — this year's buyers surface at the top.
       sorted.sort((a, b) => (b.mostRecentPurchaseEpoch ?? 0) - (a.mostRecentPurchaseEpoch ?? 0) || b.propertyCount - a.propertyCount);
     } else if (buyerSort === 'distance') {
       sorted.sort((a, b) => (a.nearestMiles ?? Infinity) - (b.nearestMiles ?? Infinity) || b.propertyCount - a.propertyCount);
+    } else if (buyerSort === 'score') {
+      sorted.sort((a, b) => b.buyerScore - a.buyerScore || b.propertyCount - a.propertyCount);
     } else {
       sorted.sort((a, b) => b.propertyCount - a.propertyCount || b.totalAssessedValue - a.totalAssessedValue);
     }
     return sorted;
-  }, [buyers, buyerFilter, buyerSort]);
+  }, [buyers, buyerFilter, buyerClass, buyerSort]);
   const buyerCounts = useMemo(
     () => ({ house: buyers.filter((b) => b.houseCount > 0).length, land: buyers.filter((b) => b.landCount > 0).length }),
     [buyers],
@@ -418,6 +462,39 @@ export function DistressedFinder() {
       {/* Search panel */}
       <div className="finder-search-panel">
         {mode === 'buyers' ? (
+        <>
+          <div className="finder-tabs">
+            <button className={buyerScope === 'area' ? 'active' : ''} onClick={() => setBuyerScope('area')} type="button"><MapPin size={15} /> Area / deal address</button>
+            <button className={buyerScope === 'database' ? 'active' : ''} onClick={() => setBuyerScope('database')} type="button"><Database size={15} /> Multi-county database</button>
+          </div>
+
+          {buyerScope === 'database' ? (
+          <div className="finder-area-form">
+            <div className="finder-field finder-field-wide">
+              <label>Counties to scan <span>(merges the same owner across counties; large counties take a few minutes)</span></label>
+              <div className="finder-county-chips">
+                {METRO_COUNTIES.map((c) => (
+                  <button key={c} type="button" className={dbCounties.includes(c) ? 'active' : ''} onClick={() => toggleDbCounty(c)}>
+                    {dbCounties.includes(c) ? <Check size={12} /> : null} {c}{BIG_COUNTIES.has(c) ? ' ·lg' : ''}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div className="finder-field">
+              <label>Min properties owned: <strong>{minProperties}</strong></label>
+              <input type="range" min={2} max={15} step={1} value={minProperties} onChange={(e) => setMinProperties(Number(e.target.value))} />
+            </div>
+            <div className="finder-area-actions">
+              {running ? (
+                <button className="finder-btn-stop" onClick={stopScan} type="button"><X size={16} /> Stop</button>
+              ) : (
+                <button className="finder-btn-primary" onClick={runBuyerDatabase} type="button" disabled={!dbCounties.length}>
+                  <Database size={16} /> Build database — {dbCounties.length} {dbCounties.length === 1 ? 'county' : 'counties'}
+                </button>
+              )}
+            </div>
+          </div>
+          ) : (
           <div className="finder-area-form">
             <div className="finder-field finder-field-wide">
               <label>Property you're selling <span>(optional — finds buyers active in its area, closest first)</span></label>
@@ -451,6 +528,8 @@ export function DistressedFinder() {
               )}
             </div>
           </div>
+          )}
+        </>
         ) : (
         <>
         <div className="finder-tabs">
@@ -582,21 +661,34 @@ export function DistressedFinder() {
             </div>
           </div>
 
-          {/* House / land buyer filter + sort */}
+          {/* House / land buyer filter + class filter + sort */}
           <div className="finder-buyer-controls">
             <div className="finder-buyer-filter">
               <button className={buyerFilter === 'all' ? 'active' : ''} onClick={() => setBuyerFilter('all')} type="button">All ({buyers.length})</button>
               <button className={buyerFilter === 'house' ? 'active' : ''} onClick={() => setBuyerFilter('house')} type="button"><Home size={13} /> House buyers ({buyerCounts.house})</button>
               <button className={buyerFilter === 'land' ? 'active' : ''} onClick={() => setBuyerFilter('land')} type="button"><Trees size={13} /> Land buyers ({buyerCounts.land})</button>
             </div>
-            <label className="finder-buyer-sort">
-              Sort
-              <select value={buyerSort} onChange={(e) => setBuyerSort(e.target.value as 'recent' | 'props' | 'distance')}>
-                <option value="recent">Most recent buy</option>
-                {dealContext && <option value="distance">Nearest to deal</option>}
-                <option value="props">Most properties</option>
-              </select>
-            </label>
+            <div className="finder-buyer-side">
+              <label className="finder-buyer-sort">
+                Type
+                <select value={buyerClass} onChange={(e) => setBuyerClass(e.target.value as typeof buyerClass)}>
+                  <option value="all">All</option>
+                  <option value="llc">LLCs</option>
+                  <option value="builder">Builders</option>
+                  <option value="developer">Developers</option>
+                  <option value="individual">Individuals</option>
+                </select>
+              </label>
+              <label className="finder-buyer-sort">
+                Sort
+                <select value={buyerSort} onChange={(e) => setBuyerSort(e.target.value as typeof buyerSort)}>
+                  <option value="score">Activity score</option>
+                  <option value="recent">Most recent buy</option>
+                  {dealContext && <option value="distance">Nearest to deal</option>}
+                  <option value="props">Most properties</option>
+                </select>
+              </label>
+            </div>
           </div>
 
           <div className="finder-table-wrap">
@@ -604,8 +696,9 @@ export function DistressedFinder() {
               <thead>
                 <tr>
                   {dealContext && <th className="num">Near Deal</th>}
-                  <th>Owner</th><th>Buys</th><th className="num">Props</th><th className="num">Total Assessed</th>
-                  <th>Type</th><th>Mailing Address</th><th>Most Recent Buy</th><th>Example Properties</th>
+                  <th className="num">Score</th><th>Owner</th><th>Class</th><th>Buys</th><th className="num">Props</th>
+                  {buyerScope === 'database' && <th>Counties</th>}
+                  <th className="num">Avg Value</th><th>Most Recent Buy</th><th>Mailing Address</th><th>Example Properties</th>
                 </tr>
               </thead>
               <tbody>
@@ -620,9 +713,18 @@ export function DistressedFinder() {
                           : '—'}
                       </td>
                     )}
+                    <td className="num">
+                      <span className={`finder-score-pill ${b.buyerScore >= 70 ? 'sc-hot' : b.buyerScore >= 45 ? 'sc-warm' : ''}`}>{b.buyerScore}</span>
+                    </td>
                     <td className="owner">
                       {b.ownerName}
                       {b.outOfState && <span className="finder-oos-tag">{b.mailState}</span>}
+                    </td>
+                    <td>
+                      <span className={`finder-owner-type ot-${b.investorClass}`}>
+                        {b.investorClass === 'builder' ? <HardHat size={12} /> : b.investorClass === 'developer' ? <Building2 size={12} /> : b.investorClass === 'llc' ? <Landmark size={12} /> : <User size={12} />}
+                        {b.investorClass}
+                      </span>
                     </td>
                     <td>
                       <span className={`finder-buys bt-${b.buyerType}`} title={`${b.houseCount} house / improved · ${b.landCount} land / vacant`}>
@@ -632,14 +734,12 @@ export function DistressedFinder() {
                       </span>
                     </td>
                     <td className="num strong">{b.propertyCount}</td>
-                    <td className="num">{fmtUsd0(b.totalAssessedValue)}</td>
-                    <td>
-                      <span className={`finder-owner-type ot-${b.ownerType}`}>
-                        {b.ownerType === 'company' ? <Building2 size={12} /> : b.ownerType === 'estate' ? <Landmark size={12} /> : <User size={12} />}
-                        {b.ownerType}
-                      </span>
-                    </td>
-                    <td className="addr">{b.mailingAddress}</td>
+                    {buyerScope === 'database' && (
+                      <td className="counties" title={b.counties.join(', ')}>
+                        {b.counties.length > 1 ? <span className="finder-multi-county">{b.counties.length} counties</span> : (b.counties[0] || '—')}
+                      </td>
+                    )}
+                    <td className="num">{b.avgAssessedValue > 0 ? fmtUsd0(b.avgAssessedValue) : '—'}</td>
                     <td className="recent-buy">
                       <span className="rb-date">
                         {fmtSaleDate(b.mostRecentPurchaseEpoch)}
@@ -647,6 +747,7 @@ export function DistressedFinder() {
                       </span>
                       {b.mostRecentProperty && <span className="rb-prop" title={b.mostRecentProperty}>{b.mostRecentProperty}</span>}
                     </td>
+                    <td className="addr">{b.mailingAddress}</td>
                     <td className="examples">{b.exampleProperties.join(' · ') || '—'}</td>
                   </tr>
                 ))}

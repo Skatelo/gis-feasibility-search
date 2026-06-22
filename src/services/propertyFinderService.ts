@@ -1054,6 +1054,8 @@ export interface BuyerRecord {
   /** What they buy, from portfolio mix: 'house', 'land', 'mixed', or 'unknown'. */
   buyerType: 'house' | 'land' | 'mixed' | 'unknown';
   totalAssessedValue: number;
+  /** Average assessed value across their holdings (a proxy for purchase price). */
+  avgAssessedValue: number;
   exampleProperties: string[];     // up to 6 situs addresses they own
   /** Date (epoch ms) of the owner's most recent purchase across their holdings. */
   mostRecentPurchaseEpoch?: number;
@@ -1061,6 +1063,54 @@ export interface BuyerRecord {
   mostRecentProperty?: string;
   /** Miles from the deal address to this owner's NEAREST holding (deal set only). */
   nearestMiles?: number;
+
+  // Investor profile
+  /** NC counties this owner holds parcels in (from the scanned set). */
+  counties: string[];
+  /** LLC/company legal form. */
+  isLLC: boolean;
+  /** Name signals a homebuilder. */
+  isBuilder: boolean;
+  /** Name signals a land developer / investment entity. */
+  isDeveloper: boolean;
+  /** Owns 2+ parcels (a repeat purchaser). */
+  isRepeat: boolean;
+  /** Primary class for filtering. */
+  investorClass: 'builder' | 'developer' | 'llc' | 'individual';
+  /** 0–100 activity score (purchases + recency + multi-county reach). */
+  buyerScore: number;
+}
+
+export interface InvestorFlags {
+  isLLC: boolean; isBuilder: boolean; isDeveloper: boolean; isRepeat: boolean;
+  investorClass: 'builder' | 'developer' | 'llc' | 'individual';
+}
+
+const BUILDER_RE = /\b(BUILDERS?|BLDRS?|CONSTRUCTION|CONTRACTORS?|HOMEBUILDERS?|HOME BUILDERS?|HOMES|CUSTOM HOMES?)\b/;
+const DEVELOPER_RE = /\b(DEVELOPMENT|DEVELOPERS?|DEVELOPING|LAND CO|LAND COMPANY|LAND GROUP|PARTNERS|CAPITAL|VENTURES?|HOLDINGS|INVESTMENTS?|INVESTORS?|ACQUISITIONS?|EQUITY|REALTY|PROPERTIES|GROUP)\b/;
+const LLC_RE = /\b(LLC|L L C|PLLC|INC|CORP|CO|LP|LLP|COMPANY|LTD)\b/;
+
+/** Detect LLC / builder / developer / repeat purchaser from owner name + holdings. */
+export function classifyInvestor(name: string, propertyCount: number): InvestorFlags {
+  const n = String(name || '').toUpperCase();
+  const isBuilder = BUILDER_RE.test(n);
+  const isDeveloper = DEVELOPER_RE.test(n);
+  const isLLC = LLC_RE.test(n);
+  const isRepeat = propertyCount >= 2;
+  const investorClass: InvestorFlags['investorClass'] =
+    isBuilder ? 'builder' : isDeveloper ? 'developer' : isLLC ? 'llc' : 'individual';
+  return { isLLC, isBuilder, isDeveloper, isRepeat, investorClass };
+}
+
+/** 0–100 buyer activity score: purchases (≤50) + recency (≤30) + counties (≤20). */
+export function computeBuyerScore(args: { propertyCount: number; countiesCount: number; lastSaleEpoch?: number }): number {
+  let s = Math.min(50, args.propertyCount * 5);
+  if (args.lastSaleEpoch) {
+    const yrs = (Date.now() - args.lastSaleEpoch) / MS_PER_YEAR;
+    s += yrs <= 1 ? 30 : yrs <= 2 ? 22 : yrs <= 3 ? 15 : yrs <= 5 ? 8 : 2;
+  }
+  s += Math.min(20, Math.max(0, args.countiesCount - 1) * 10);
+  return clamp(Math.round(s));
 }
 
 /** Great-circle distance between two lat/lng points, in miles. */
@@ -1081,6 +1131,113 @@ const normOwner = (s?: string) =>
     .replace(/\b(ET AL|ETAL|ETUX|ET UX|ETVIR|ET VIR|JR|SR|III|II|IV|TRUSTEE|TRUSTEES)\b/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
+
+// Owner-aggregation shared by the area buyer list and the multi-county database.
+type BuyerAgg = {
+  ownerName: string; mailadd: string; mcity: string; mstate: string; mzip: string;
+  ownerType: 'individual' | 'company' | 'estate'; outOfState: boolean;
+  count: number; houseCount: number; landCount: number;
+  totalAssessed: number; assessedCount: number; examples: string[];
+  recentSale?: number; recentProperty?: string;
+  counties: Set<string>; minDist?: number;
+};
+
+/** Fold one parcel record into the owner-groups map (skips public/government owners). */
+function aggregateParcel(
+  groups: Map<string, BuyerAgg>,
+  a: Record<string, any>,
+  cnty: string | undefined,
+  geometry: any,
+  dealPt?: { lat: number; lng: number },
+): void {
+  const owner = String(a.ownname ?? '').trim();
+  if (!owner) return;
+  const ownerType = classifyOwner(owner);
+  if (ownerType === 'public') return; // governments aren't buyers
+  const mailadd = String(a.mailadd ?? '').trim();
+  const key = `${normOwner(owner)}|${normStreet(mailadd)}`;
+  if (!key.replace('|', '').trim()) return;
+
+  let g = groups.get(key);
+  if (!g) {
+    const mstate = String(a.mstate ?? '').trim().toUpperCase();
+    g = {
+      ownerName: owner, mailadd, mcity: String(a.mcity ?? '').trim(), mstate,
+      mzip: String(a.mzip ?? '').trim(),
+      ownerType: ownerType === 'estate' ? 'estate' : ownerType, // never 'public' here
+      outOfState: !!mstate && mstate !== 'NC',
+      count: 0, houseCount: 0, landCount: 0, totalAssessed: 0, assessedCount: 0, examples: [],
+      counties: new Set(),
+    };
+    groups.set(key, g);
+  }
+  g.count++;
+  if (cnty) g.counties.add(cnty);
+  const pv = numOf(a.parval);
+  const lv = numOf(a.landval);
+  // Improved (house) vs vacant (land) from assessor land-vs-total value
+  // (<15% structure value = land). No assessment on record → unclassified.
+  if (Number.isFinite(pv) && pv > 0) {
+    g.totalAssessed += pv;
+    g.assessedCount++;
+    const imp = (pv - (Number.isFinite(lv) && lv > 0 ? lv : 0)) / pv;
+    if (imp < 0.15) g.landCount++; else g.houseCount++;
+  } else if (Number.isFinite(lv) && lv > 0) {
+    g.landCount++;
+  }
+  const situs = String(a.siteadd ?? '').trim();
+  if (situs && g.examples.length < 6 && !g.examples.includes(situs)) g.examples.push(situs);
+  const sale = numOf(a.saledate);
+  if (Number.isFinite(sale) && (g.recentSale == null || sale > g.recentSale)) {
+    g.recentSale = sale;
+    g.recentProperty = situs || undefined;
+  }
+  if (dealPt && geometry) {
+    const c = geomCenter(geometry);
+    if (c) {
+      const d = haversineMiles(dealPt.lat, dealPt.lng, c.lat, c.lng);
+      if (g.minDist == null || d < g.minDist) g.minDist = d;
+    }
+  }
+}
+
+/** Turn owner-groups into BuyerRecords, keeping owners with `minProperties`+ parcels. */
+function finalizeBuyers(groups: Map<string, BuyerAgg>, minProperties: number): BuyerRecord[] {
+  const list: BuyerRecord[] = [];
+  for (const g of groups.values()) {
+    if (g.count < minProperties) continue;
+    const mailingAddress = [g.mailadd, [g.mcity, g.mstate].filter(Boolean).join(', '), g.mzip].filter(Boolean).join(', ');
+    const inv = classifyInvestor(g.ownerName, g.count);
+    const counties = [...g.counties].sort();
+    list.push({
+      ownerName: g.ownerName,
+      mailingAddress: mailingAddress || 'N/A',
+      mailCity: g.mcity || undefined,
+      mailState: g.mstate || undefined,
+      ownerType: g.ownerType,
+      outOfState: g.outOfState,
+      propertyCount: g.count,
+      houseCount: g.houseCount,
+      landCount: g.landCount,
+      buyerType:
+        g.houseCount > 0 && g.landCount > 0 ? 'mixed'
+        : g.houseCount > 0 ? 'house'
+        : g.landCount > 0 ? 'land'
+        : 'unknown',
+      totalAssessedValue: Math.round(g.totalAssessed),
+      avgAssessedValue: g.assessedCount > 0 ? Math.round(g.totalAssessed / g.assessedCount) : 0,
+      exampleProperties: g.examples,
+      mostRecentPurchaseEpoch: g.recentSale,
+      mostRecentProperty: g.recentProperty,
+      nearestMiles: g.minDist != null ? Math.round(g.minDist * 100) / 100 : undefined,
+      counties,
+      isLLC: inv.isLLC, isBuilder: inv.isBuilder, isDeveloper: inv.isDeveloper, isRepeat: inv.isRepeat,
+      investorClass: inv.investorClass,
+      buyerScore: computeBuyerScore({ propertyCount: g.count, countiesCount: counties.length, lastSaleEpoch: g.recentSale }),
+    });
+  }
+  return list;
+}
 
 /**
  * Build an investor/cash-buyer list for an area from the county GIS parcel/tax
@@ -1133,20 +1290,12 @@ export async function buildBuyerList(
   const baseUrl =
     `${cfg.parcelUrl}?where=${encodeURIComponent(where)}` +
     `&geometry=${env}&geometryType=esriGeometryEnvelope&inSR=4326&spatialRel=esriSpatialRelIntersects` +
-    `&outFields=${encodeURIComponent('parno,siteadd,scity,ownname,mailadd,mcity,mstate,mzip,parval,landval,saledate')}` +
+    `&outFields=${encodeURIComponent('parno,cntyname,siteadd,scity,ownname,mailadd,mcity,mstate,mzip,parval,landval,saledate')}` +
     geomParams;
   const PAGE = 2000;
   const MAX_PAGES = 100; // up to 200k parcels — county-scale (rows are tiny w/o geometry)
 
-  type Agg = {
-    ownerName: string; mailadd: string; mcity: string; mstate: string; mzip: string;
-    ownerType: 'individual' | 'company' | 'estate'; outOfState: boolean;
-    count: number; houseCount: number; landCount: number;
-    totalAssessed: number; examples: string[];
-    recentSale?: number; recentProperty?: string;
-    minDist?: number;
-  };
-  const groups = new Map<string, Agg>();
+  const groups = new Map<string, BuyerAgg>();
   let scanned = 0;
   let prevFirstParno: string | undefined;
 
@@ -1173,58 +1322,8 @@ export async function buildBuyerList(
 
     for (const f of rows) {
       const a = attrsOf(f);
-      const owner = String(a.ownname ?? '').trim();
-      if (!owner) continue;
-      const ownerType = classifyOwner(owner);
-      if (ownerType === 'public') continue; // governments aren't buyers
-      const mailadd = String(a.mailadd ?? '').trim();
-      const key = `${normOwner(owner)}|${normStreet(mailadd)}`;
-      if (!key.replace('|', '').trim()) continue;
-
-      let g = groups.get(key);
-      if (!g) {
-        const mstate = String(a.mstate ?? '').trim().toUpperCase();
-        g = {
-          ownerName: owner, mailadd, mcity: String(a.mcity ?? '').trim(), mstate,
-          mzip: String(a.mzip ?? '').trim(),
-          ownerType: ownerType === 'estate' ? 'estate' : ownerType, // never 'public' here
-          outOfState: !!mstate && mstate !== 'NC',
-          count: 0, houseCount: 0, landCount: 0, totalAssessed: 0, examples: [],
-        };
-        groups.set(key, g);
-      }
-      g.count++;
-      const pv = numOf(a.parval);
-      const lv = numOf(a.landval);
-      if (Number.isFinite(pv)) g.totalAssessed += pv;
-      // Classify this parcel as improved (house) vs vacant (land) from the
-      // assessor's land-vs-total value — same near-vacant rule the finder uses
-      // (<15% of value in structures = land). Parcels with no assessment on
-      // record stay unclassified (they count toward the total only).
-      if (Number.isFinite(pv) && pv > 0) {
-        const imp = (pv - (Number.isFinite(lv) && lv > 0 ? lv : 0)) / pv;
-        if (imp < 0.15) g.landCount++; else g.houseCount++;
-      } else if (Number.isFinite(lv) && lv > 0) {
-        g.landCount++;
-      }
-      const situs = String(a.siteadd ?? '').trim();
-      if (situs && g.examples.length < 6 && !g.examples.includes(situs)) g.examples.push(situs);
-      // Track the owner's MOST RECENT purchase (date + which property). The parcel
-      // layer carries each parcel's last sale date, so the max across an owner's
-      // holdings is their latest acquisition; re-running picks up new deeds.
-      const sale = numOf(a.saledate);
-      if (Number.isFinite(sale) && (g.recentSale == null || sale > g.recentSale)) {
-        g.recentSale = sale;
-        g.recentProperty = situs || undefined;
-      }
-      // Distance from the deal to this holding → track the owner's nearest.
-      if (deal && f.geometry) {
-        const c = geomCenter(f.geometry);
-        if (c) {
-          const d = haversineMiles(deal.lat, deal.lng, c.lat, c.lng);
-          if (g.minDist == null || d < g.minDist) g.minDist = d;
-        }
-      }
+      const cnty = String(a.cntyname ?? (deal ? '' : county)).trim() || undefined;
+      aggregateParcel(groups, a, cnty, f.geometry, deal);
     }
     scanned += rows.length;
     onProgress?.(`Scanning parcels… (${scanned})`);
@@ -1233,32 +1332,7 @@ export async function buildBuyerList(
 
   if (!scanned) throw new Error('No parcels returned for this area. Try a larger radius or a different city/ZIP.');
 
-  const list: BuyerRecord[] = [];
-  for (const g of groups.values()) {
-    if (g.count < minProperties) continue;
-    const mailingAddress = [g.mailadd, [g.mcity, g.mstate].filter(Boolean).join(', '), g.mzip].filter(Boolean).join(', ');
-    list.push({
-      ownerName: g.ownerName,
-      mailingAddress: mailingAddress || 'N/A',
-      mailCity: g.mcity || undefined,
-      mailState: g.mstate || undefined,
-      ownerType: g.ownerType,
-      outOfState: g.outOfState,
-      propertyCount: g.count,
-      houseCount: g.houseCount,
-      landCount: g.landCount,
-      buyerType:
-        g.houseCount > 0 && g.landCount > 0 ? 'mixed'
-        : g.houseCount > 0 ? 'house'
-        : g.landCount > 0 ? 'land'
-        : 'unknown',
-      totalAssessedValue: Math.round(g.totalAssessed),
-      exampleProperties: g.examples,
-      mostRecentPurchaseEpoch: g.recentSale,
-      mostRecentProperty: g.recentProperty,
-      nearestMiles: g.minDist != null ? Math.round(g.minDist * 100) / 100 : undefined,
-    });
-  }
+  const list = finalizeBuyers(groups, minProperties);
   if (!list.length) {
     throw new Error(`No owners hold ${minProperties}+ parcels in this area. Lower the minimum, or widen the radius.`);
   }
@@ -1269,6 +1343,75 @@ export async function buildBuyerList(
     // Biggest portfolios first (strongest buyers), then highest total value.
     list.sort((a, b) => b.propertyCount - a.propertyCount || b.totalAssessedValue - a.totalAssessedValue);
   }
+  return list;
+}
+
+/**
+ * Build a cross-county investor BUYER DATABASE: scan several whole counties and
+ * merge the same owner across them, so each buyer's "counties purchased in",
+ * total purchases, and activity score reflect their full footprint. This is the
+ * pre-built list the deal-matcher draws on. Pages each county with geometry off
+ * (light), so it can cover whole counties — large ones take a few minutes.
+ */
+export async function buildBuyerDatabase(
+  counties: string[],
+  minProperties: number,
+  onProgress?: (s: string) => void,
+  shouldStop?: () => boolean,
+): Promise<BuyerRecord[]> {
+  const keys = getUserKeys();
+  if (!keys.googleMaps) throw new Error('Google Maps API key required (set it in Account Settings).');
+  if (!counties.length) throw new Error('Select at least one county.');
+
+  const groups = new Map<string, BuyerAgg>();
+  const PAGE = 2000;
+  const MAX_PAGES = 400; // up to 800k parcels per county (whole-county scale)
+  let scannedTotal = 0;
+
+  for (const county of counties) {
+    if (shouldStop?.()) break;
+    const cfg = ncCountyConfig[county];
+    if (!cfg) continue;
+    const baseUrl =
+      `${cfg.parcelUrl}?where=${encodeURIComponent(`cntyname = '${county}'`)}` +
+      `&outFields=${encodeURIComponent('parno,cntyname,siteadd,ownname,mailadd,mcity,mstate,mzip,parval,landval,saledate')}` +
+      `&returnGeometry=false&f=json`;
+    let prevFirstParno: string | undefined;
+    let countyScanned = 0;
+    for (let page = 0; page < MAX_PAGES; page++) {
+      if (shouldStop?.()) break;
+      const pageUrl = `${baseUrl}&resultRecordCount=${PAGE}&resultOffset=${page * PAGE}`;
+      let rows: any[] = [];
+      try {
+        const res = await fetchTimeout(pageUrl, 25000);
+        if (!res.ok) throw new Error(`GIS HTTP ${res.status}`);
+        const data = await res.json();
+        if (data?.error) throw new Error(data.error?.message || 'GIS query error');
+        rows = Array.isArray(data?.features) ? data.features : [];
+      } catch (e: any) {
+        if (page === 0) throw new Error(`${county}: NC OneMap query failed (${e?.message || 'timeout'}).`);
+        break; // partial county is fine
+      }
+      if (!rows.length) break;
+      const firstParno = String(rows[0]?.attributes?.parno ?? '');
+      if (page > 0 && firstParno && firstParno === prevFirstParno) break;
+      prevFirstParno = firstParno;
+      for (const f of rows) {
+        const a = f.attributes || {};
+        aggregateParcel(groups, a, String(a.cntyname ?? county).trim() || county, undefined, undefined);
+      }
+      countyScanned += rows.length;
+      scannedTotal += rows.length;
+      onProgress?.(`Scanning ${county}… (${countyScanned.toLocaleString()} parcels · ${scannedTotal.toLocaleString()} total)`);
+      if (rows.length < PAGE) break; // last page
+    }
+  }
+
+  if (!scannedTotal) throw new Error('No parcels returned for the selected counties.');
+  const list = finalizeBuyers(groups, minProperties);
+  if (!list.length) throw new Error(`No owners hold ${minProperties}+ parcels across the selected counties. Lower the minimum.`);
+  // Highest activity score first (purchases + recency + multi-county reach).
+  list.sort((a, b) => b.buyerScore - a.buyerScore || b.propertyCount - a.propertyCount);
   return list;
 }
 
@@ -1302,8 +1445,9 @@ export function resultsToCsv(results: PropertyResult[]): string {
 
 export function buyersToCsv(buyers: BuyerRecord[]): string {
   const headers = [
-    'owner', 'owner_type', 'buys', 'house_count', 'land_count', 'out_of_state',
-    'property_count', 'total_assessed_value', 'nearest_miles_to_deal',
+    'owner', 'investor_class', 'buyer_score', 'is_llc', 'is_builder', 'is_developer', 'is_repeat',
+    'buys', 'house_count', 'land_count', 'counties', 'out_of_state',
+    'property_count', 'avg_assessed_value', 'total_assessed_value', 'nearest_miles_to_deal',
     'mailing_address', 'mail_city', 'mail_state',
     'most_recent_purchase_date', 'most_recent_property', 'example_properties',
   ];
@@ -1317,8 +1461,9 @@ export function buyersToCsv(buyers: BuyerRecord[]): string {
     return isNaN(d.getTime()) ? '' : d.toISOString().slice(0, 10);
   };
   const rows = buyers.map((b) => [
-    b.ownerName, b.ownerType, b.buyerType, b.houseCount, b.landCount, b.outOfState,
-    b.propertyCount, b.totalAssessedValue, b.nearestMiles ?? '',
+    b.ownerName, b.investorClass, b.buyerScore, b.isLLC, b.isBuilder, b.isDeveloper, b.isRepeat,
+    b.buyerType, b.houseCount, b.landCount, b.counties.join('; '), b.outOfState,
+    b.propertyCount, b.avgAssessedValue, b.totalAssessedValue, b.nearestMiles ?? '',
     b.mailingAddress, b.mailCity ?? '', b.mailState ?? '',
     fmtDate(b.mostRecentPurchaseEpoch), b.mostRecentProperty ?? '', b.exampleProperties.join('; '),
   ].map(esc).join(','));

@@ -97,6 +97,33 @@
 .finder-owner-type.ot-company { color: var(--secondary); background: var(--secondary-glow); border-color: rgba(8,145,178,0.25); }
 .finder-owner-type.ot-estate { color: var(--warning); background: rgba(217,119,6,0.06); border-color: rgba(217,119,6,0.25); }
 .finder-owner-type.ot-individual { color: var(--text-secondary); background: var(--bg-main); }
+/* Investor class chips */
+.finder-owner-type.ot-builder { color: var(--accent); background: rgba(219,39,119,0.07); border-color: rgba(219,39,119,0.25); }
+.finder-owner-type.ot-developer { color: var(--secondary); background: var(--secondary-glow); border-color: rgba(8,145,178,0.25); }
+.finder-owner-type.ot-llc { color: var(--primary); background: var(--primary-glow); border-color: rgba(79,70,229,0.22); }
+
+/* County multi-select chips (buyer database) */
+.finder-county-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.finder-county-chips button {
+  display: inline-flex; align-items: center; gap: 4px; font-size: 0.78rem; font-weight: 600;
+  padding: 5px 11px; border-radius: 999px; cursor: pointer;
+  background: var(--bg-main); color: var(--text-secondary); border: 1px solid var(--bg-card-border); transition: var(--transition);
+}
+.finder-county-chips button:hover { color: var(--text-primary); background: var(--bg-card-hover); }
+.finder-county-chips button.active { background: var(--primary); color: #fff; border-color: var(--primary); }
+
+.finder-buyer-side { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+
+/* Activity score pill */
+.finder-score-pill {
+  display: inline-block; min-width: 30px; text-align: center; font-weight: 800; font-size: 0.8rem;
+  border-radius: 6px; padding: 2px 7px; color: var(--text-secondary); background: var(--bg-main); border: 1px solid var(--bg-card-border);
+}
+.finder-score-pill.sc-warm { color: var(--warning); background: rgba(217,119,6,0.08); border-color: rgba(217,119,6,0.25); }
+.finder-score-pill.sc-hot { color: #fff; background: var(--success); border-color: var(--success); }
+
+.finder-buyer-table td.counties { white-space: nowrap; font-size: 0.78rem; color: var(--text-secondary); }
+.finder-multi-county { font-weight: 700; color: var(--accent); }
 
 @media (max-width: 768px) { .finder-mode-toggle.finder-mode-3 { grid-template-columns: 1fr; } }
 
