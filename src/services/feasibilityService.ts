@@ -1064,6 +1064,82 @@ export async function fetchCountyMarketStats(countyName: string): Promise<County
   return null;
 }
 
+// Redfin county market data (per product type) — pre-digested monthly by a
+// GitHub Action into a small static JSON the app reads. The real §17 anchor.
+export interface RedfinTypeMetrics {
+  periodEnd: string;
+  monthsOfSupply: number | null;
+  medianDom: number | null;
+  medianDomYoy: number | null;     // absolute day change YoY
+  inventory: number | null;
+  inventoryYoy: number | null;     // fraction (e.g. -0.008 = -0.8%)
+  homesSold: number | null;
+  newListings: number | null;
+  medianSalePrice: number | null;
+  medianSalePriceYoy: number | null; // fraction
+  soldAboveList: number | null;      // fraction (share)
+}
+interface RedfinPayload {
+  updated: string; source: string; sourceUrl: string;
+  counties: Record<string, Record<string, RedfinTypeMetrics>>;
+}
+
+let _redfinPayload: RedfinPayload | null | undefined;
+
+/** County market data by product type from the pre-digested Redfin JSON, or null. */
+export async function fetchRedfinCountyMarket(
+  countyName: string,
+): Promise<{ updated: string; sourceUrl: string; byType: Record<string, RedfinTypeMetrics> } | null> {
+  if (_redfinPayload === undefined) {
+    try {
+      const res = await fetchWithTimeout('/market/nc-county-redfin.json', 8000);
+      _redfinPayload = res.ok && (res.headers.get('content-type') || '').includes('json') ? await res.json() : null;
+    } catch {
+      _redfinPayload = null;
+    }
+  }
+  const byType = _redfinPayload?.counties?.[countyName?.trim()];
+  if (!byType) return null;
+  return { updated: _redfinPayload!.updated, sourceUrl: _redfinPayload!.sourceUrl, byType };
+}
+
+/** Build the per-product-type market-saturation markdown table for the packet. */
+export function buildRedfinSaturationTable(
+  countyName: string,
+  data: { updated: string; sourceUrl: string; byType: Record<string, RedfinTypeMetrics> },
+): string {
+  const order: [string, string][] = [
+    ['single_family', 'Single-family'], ['townhouse', 'Townhouse'],
+    ['condo', 'Condo/Co-op'], ['multifamily', 'Multi-family (2-4u)'], ['all', 'All residential'],
+  ];
+  const n0 = (v: number | null) => (v == null ? 'n/a' : Math.round(v).toLocaleString());
+  const mos = (v: number | null) => (v == null ? 'n/a' : v.toFixed(1));
+  const dom = (m: RedfinTypeMetrics) =>
+    m.medianDom == null ? 'n/a' : `${Math.round(m.medianDom)}${m.medianDomYoy != null ? ` (${m.medianDomYoy > 0 ? '+' : ''}${Math.round(m.medianDomYoy)}d YoY)` : ''}`;
+  const inv = (m: RedfinTypeMetrics) =>
+    m.inventory == null ? 'n/a' : `${Math.round(m.inventory).toLocaleString()}${m.inventoryYoy != null ? ` (${m.inventoryYoy >= 0 ? '+' : ''}${(m.inventoryYoy * 100).toFixed(0)}% YoY)` : ''}`;
+  const price = (m: RedfinTypeMetrics) =>
+    m.medianSalePrice == null ? 'n/a' : `$${Math.round(m.medianSalePrice).toLocaleString()}${m.medianSalePriceYoy != null ? ` (${m.medianSalePriceYoy >= 0 ? '+' : ''}${(m.medianSalePriceYoy * 100).toFixed(1)}% YoY)` : ''}`;
+  const aboveList = (v: number | null) => (v == null ? 'n/a' : `${(v * 100).toFixed(0)}%`);
+
+  const rows: string[] = [];
+  let asOf = data.updated;
+  for (const [key, label] of order) {
+    const m = data.byType[key];
+    if (!m) continue;
+    asOf = m.periodEnd || asOf;
+    rows.push(`| ${label} | ${mos(m.monthsOfSupply)} | ${dom(m)} | ${inv(m)} | ${n0(m.homesSold)} | ${n0(m.newListings)} | ${price(m)} | ${aboveList(m.soldAboveList)} |`);
+  }
+  if (!rows.length) return '';
+  return [
+    `Live per-PRODUCT-TYPE county market data — ${countyName} County, monthly, as of ${asOf} (Data source: Redfin). USE this table as the Section 17 anchor: read which product types are OVERSUPPLIED / slow (high months-of-supply, rising DOM) vs. absorbing fast (low supply, high % sold above list), recommend what to build, then refine to the ZIP/submarket via Google Search. Cite "Data source: Redfin" (${data.sourceUrl}).`,
+    '',
+    '| Product type | Months of supply | Median DOM | Active inventory | Homes sold/mo | New listings/mo | Median sale price | % sold above list |',
+    '| --- | --- | --- | --- | --- | --- | --- | --- |',
+    ...rows,
+  ].join('\n');
+}
+
 /**
  * FEMA National Flood Hazard Layer (NFHL) — authoritative flood-zone lookup by
  * coordinate. Returns the effective flood zone, whether the point is in a Special
@@ -2999,6 +3075,10 @@ After the report, answer follow-up questions conversationally from the stored co
     const yoy = m.prevYear != null && m.prevYear !== 0 ? `, ${(((m.value - m.prevYear) / m.prevYear) * 100).toFixed(0)}% YoY` : '';
     return ` (${dir} vs 3mo ago${yoy})`;
   };
+  // Prefer Redfin's per-product-type table (the real §17 anchor); fall back to
+  // the FRED all-residential line when the county isn't in the digested JSON.
+  const redfin = await fetchRedfinCountyMarket(reportData.countyName).catch(() => null);
+  const redfinTable = redfin ? buildRedfinSaturationTable(reportData.countyName, redfin) : '';
   const marketStatsLine = mkt
     ? `County housing market — ALL RESIDENTIAL (Realtor.com via FRED), ${reportData.countyName} County, as of ${mkt.medianDaysOnMarket?.date || mkt.activeListings?.date || 'recent'}: ` +
       [
@@ -3031,8 +3111,8 @@ After the report, answer follow-up questions conversationally from the stored co
 ### 2.6 Financing — Current Mortgage Rate (live anchor for Section 18)
 - ${mortgageLine}
 
-### 2.7 Market Saturation — County Housing Stats (live anchor for Section 17)
-- ${marketStatsLine}
+### 2.7 Market Saturation — County Housing by Product Type (live anchor for Section 17)
+${redfinTable || `- ${marketStatsLine}`}
 
 ### 3. Zoning & Estimated Density Allowances
 - Zoning Classification (from county GIS): ${reportData.zoningCode} (${reportData.zoningDescription})
