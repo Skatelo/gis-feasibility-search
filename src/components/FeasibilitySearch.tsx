@@ -302,6 +302,27 @@ export const extractValueAdd = (md: string): { rezoning?: string; subdivision?: 
   subdivision: sectionConclusion(md, /subdivi|lot[-\s]?split/i),
 });
 
+/**
+ * Clean the report for display: no code blocks / backticks / raw-data styling,
+ * and math written with × and ÷ instead of the asterisk. The model is also told
+ * this in the prompt; this is the guaranteed safety net so the rendered report
+ * never shows code or stray "*".
+ */
+export const sanitizeReportText = (md: string): string => {
+  if (!md) return md;
+  let s = md;
+  // Unwrap fenced code blocks → keep the inner text as plain lines (no CodeBlock).
+  s = s.replace(/```[^\n]*\n([\s\S]*?)```/g, (_m, inner) => inner);
+  s = s.replace(/```/g, '');
+  // Inline code → plain text.
+  s = s.replace(/`([^`]+)`/g, '$1');
+  // Multiplication asterisks → × (only when a value sits next to the asterisk, so
+  // **bold** and bullet lists "* item" / nested bullets are never touched).
+  s = s.replace(/(\$?[\d,.]+%?)\s*\*\s*(?=\$?[\d(])/g, '$1 × ');     // number * number
+  s = s.replace(/([\w%)\]])\s\*\s(?=[\d$(])/g, '$1 × ');             // word * number
+  return s;
+};
+
 export const parseMarkdown = (text: string) => {
   if (!text) return null;
   const lines = text.split('\n');
@@ -668,6 +689,31 @@ export const FeasibilitySearch: FC = () => {
   const [chatLoading, setChatLoading] = useState(false);
   const chatEndRef = useRef<HTMLDivElement>(null);
 
+  // Keep the screen awake while a report is generating, so a device whose screen
+  // turns off (and would otherwise suspend/throttle the page and stall the
+  // streaming generation) keeps running until the report finishes. The Screen
+  // Wake Lock auto-releases when the tab is hidden, so we re-acquire on return.
+  useEffect(() => {
+    if (!chatLoading) return;
+    let lock: any = null;
+    let cancelled = false;
+    const acquire = async () => {
+      if (cancelled || lock || document.visibilityState !== 'visible') return;
+      try {
+        lock = await (navigator as any).wakeLock?.request?.('screen');
+        lock?.addEventListener?.('release', () => { lock = null; });
+      } catch { /* unsupported or denied — nothing to do */ }
+    };
+    const onVisible = () => { if (document.visibilityState === 'visible') acquire(); };
+    acquire();
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      cancelled = true;
+      document.removeEventListener('visibilitychange', onVisible);
+      try { lock?.release?.(); } catch { /* ignore */ }
+    };
+  }, [chatLoading]);
+
   // Gemini UI helper states
   const [likedMessages, setLikedMessages] = useState<Record<number, 'like' | 'dislike' | undefined>>({});
   const [activeDrafts, setActiveDrafts] = useState<Record<number, number>>({});
@@ -773,7 +819,7 @@ The Final Investment Recommendation (Section 25) must state whether the property
 
 The report must ultimately answer: What is the property worth today? What would a builder likely pay? What can realistically be built? What are the primary risks? What approvals and infrastructure improvements may be required? Is the opportunity attractive enough to pursue?
 
-Format with clear markdown headers, bold key findings, and tables. Subject GIS data: lot size ${reportData.gisAcres.toFixed(2)} acres, zoning ${reportData.zoningCode}, owner ${reportData.ownerName || 'N/A'}. No conversational intro/outro filler, no JSON/code blocks, and no wholesaling/assignment/MAO/spread/exit-strategy content anywhere.`;
+Format with clear markdown headers, bold key findings, and tables. Subject GIS data: lot size ${reportData.gisAcres.toFixed(2)} acres, zoning ${reportData.zoningCode}, owner ${reportData.ownerName || 'N/A'}. No conversational intro/outro filler, no JSON/code blocks, and no wholesaling/assignment/MAO/spread/exit-strategy content anywhere. Write ALL formulas/calculations in plain English or clean tables — never in code, backticks, or raw data, and use "times"/× and ÷ for math, NEVER the asterisk (*). Do not use asterisks for emphasis.`;
 
       let streamed = '';
       const response = await chatWithGemini([{ role: 'user', content: initialPrompt }], reportData, (chunk) => {
@@ -1153,7 +1199,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
     const rootEl = reportWindow.document.getElementById('print-root');
     if (rootEl) {
       const root = createRoot(rootEl);
-      root.render(parseMarkdown(chatHistory[0].content));
+      root.render(parseMarkdown(sanitizeReportText(chatHistory[0].content)));
     }
   };
 
@@ -2225,7 +2271,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                           acres: data.gisAcres,
                           zoningCode: data.zoningCode,
                           ownerName: data.ownerName,
-                          reportMarkdown: chatHistory[0].content,
+                          reportMarkdown: sanitizeReportText(chatHistory[0].content),
                         });
                         setReportSaved(true);
                       } catch (e: any) {
@@ -2799,7 +2845,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                 ) : chatHistory.length > 0 && chatHistory[0].role === 'model' ? (
                   <>
                     {(() => {
-                      const va = extractValueAdd(chatHistory[0].content);
+                      const va = extractValueAdd(sanitizeReportText(chatHistory[0].content));
                       if (!va.rezoning && !va.subdivision) return null;
                       return (
                         <div className="value-add-highlight">
@@ -2815,7 +2861,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                       );
                     })()}
                     <div className="message-content model-text report-inline-body">
-                      {parseMarkdown(chatHistory[0].content)}
+                      {parseMarkdown(sanitizeReportText(chatHistory[0].content))}
                     </div>
                     <div style={{ marginTop: '12px', paddingTop: '10px', borderTop: '1px dashed var(--bg-card-border)', fontSize: '0.78rem', color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: '6px' }}>
                       <MessageCircle size={13} />
