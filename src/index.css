@@ -3044,6 +3044,29 @@ code {
   flex-shrink: 0;
 }
 
+/* Value-Add Upside highlight (rezoning / subdivision) atop the report */
+.value-add-highlight {
+  background: linear-gradient(135deg, rgba(5,150,105,0.06), rgba(79,70,229,0.05));
+  border: 1px solid var(--success-border, rgba(5,150,105,0.2));
+  border-radius: var(--radius-md);
+  padding: 12px 14px;
+  margin: 0 0 14px;
+}
+.value-add-highlight .va-head {
+  display: flex; align-items: center; gap: 7px;
+  font-family: var(--font-heading); font-weight: 800; font-size: 0.95rem; color: var(--success);
+  margin-bottom: 8px;
+}
+.value-add-highlight .va-row {
+  display: flex; gap: 9px; align-items: baseline; margin: 6px 0; font-size: 0.86rem; color: var(--text-secondary);
+}
+.value-add-highlight .va-tag {
+  flex-shrink: 0; font-size: 0.66rem; font-weight: 800; text-transform: uppercase; letter-spacing: 0.03em;
+  color: #fff; background: var(--primary); border-radius: 4px; padding: 2px 7px; margin-top: 2px;
+}
+.value-add-highlight .va-text { line-height: 1.5; }
+.value-add-highlight .va-foot { font-size: 0.72rem; color: var(--text-muted); margin-top: 6px; }
+
 /* Inline AI report card */
 .report-inline-body {
   max-height: 70vh;

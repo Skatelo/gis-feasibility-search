@@ -916,6 +916,52 @@ export async function executeLandAnalysis(
 }
 
 /**
+ * Current 30-year fixed mortgage rate (Freddie Mac PMMS via FRED, MORTGAGE30US).
+ * Tries the serverless proxy first (FRED sends no browser CORS header), then a
+ * direct CSV read as a fallback. Cached ~12h (the series is weekly). Returns null
+ * if unavailable, so the report falls back to a Google-Search rate instead.
+ */
+export async function fetchCurrentMortgageRate(): Promise<{ rate: number; date: string } | null> {
+  const ck = 'gisfs:mortgage30:v1';
+  try {
+    const raw = localStorage.getItem(ck);
+    if (raw) {
+      const v = JSON.parse(raw);
+      if (v?.d && Number.isFinite(v.d.rate) && Date.now() - (v.t || 0) < 12 * 60 * 60 * 1000) return v.d;
+    }
+  } catch { /* ignore */ }
+
+  const cache = (d: { rate: number; date: string }) => {
+    try { localStorage.setItem(ck, JSON.stringify({ d, t: Date.now() })); } catch { /* ignore */ }
+    return d;
+  };
+
+  // 1) Serverless proxy (works in production where FRED CORS would block the browser).
+  try {
+    const res = await fetchWithTimeout('/.netlify/functions/mortgage-rate', 8000);
+    if (res.ok && (res.headers.get('content-type') || '').includes('json')) {
+      const data = await res.json();
+      if (Number.isFinite(data?.rate)) return cache({ rate: data.rate, date: String(data.date || '') });
+    }
+  } catch { /* fall through */ }
+
+  // 2) Direct FRED CSV (may CORS-fail in the browser; works in some environments).
+  try {
+    const res = await fetchWithTimeout('https://fred.stlouisfed.org/graph/fredgraph.csv?id=MORTGAGE30US', 8000);
+    if (res.ok) {
+      const lines = (await res.text()).trim().split(/\r?\n/);
+      for (let i = lines.length - 1; i > 0; i--) {
+        const [date, val] = lines[i].split(',');
+        const rate = parseFloat(val);
+        if (Number.isFinite(rate)) return cache({ rate, date });
+      }
+    }
+  } catch { /* ignore */ }
+
+  return null;
+}
+
+/**
  * FEMA National Flood Hazard Layer (NFHL) — authoritative flood-zone lookup by
  * coordinate. Returns the effective flood zone, whether the point is in a Special
  * Flood Hazard Area, and a citable FEMA source link. Degrades gracefully
@@ -2835,6 +2881,12 @@ After the report, answer follow-up questions conversationally from the stored co
       ? `No NWI-mapped wetlands intersect the parcel coordinate (NWI omits some small/forested wetlands; a field delineation is the legal authority). Source: ${wl.sourceUrl}`
       : `NWI-mapped wetlands present at/near the parcel: ${wl.types.join(', ') || 'classification unspecified'}. A jurisdictional delineation is required to confirm extent. Source: ${wl.sourceUrl}`;
 
+  // Live 30-year mortgage rate anchor for the Interest Rate & Financing section.
+  const mortgage = await fetchCurrentMortgageRate().catch(() => null);
+  const mortgageLine = mortgage
+    ? `30-Year Fixed Mortgage Rate: ${mortgage.rate.toFixed(2)}% as of ${mortgage.date} (Freddie Mac PMMS via FRED, series MORTGAGE30US). USE this as the live anchor for Section 18; confirm the recent rising/falling/steady TREND and the Fed posture via Google Search.`
+    : `Live mortgage-rate feed unavailable at search time — research the CURRENT 30-year fixed mortgage rate and its trend via Google Search for Section 18, and cite the source.`;
+
   // Format report context
   const reportContext = `
 ## PROVIDED DATA PACKET — verified evidence to USE in the report (this is DATA, not the report's section layout)
@@ -2852,6 +2904,9 @@ After the report, answer follow-up questions conversationally from the stored co
 ### 2.5 Flood Hazard & Wetlands (FEMA NFHL + USFWS NWI — authoritative, queried by the parcel coordinate. USE these values and cite the sources; only research further if marked unavailable)
 - FEMA Flood Zone: ${floodLine}
 - Wetlands: ${wetlandsLine}
+
+### 2.6 Financing — Current Mortgage Rate (live anchor for Section 18)
+- ${mortgageLine}
 
 ### 3. Zoning & Estimated Density Allowances
 - Zoning Classification (from county GIS): ${reportData.zoningCode} (${reportData.zoningDescription})

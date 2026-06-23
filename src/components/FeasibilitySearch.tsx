@@ -40,6 +40,7 @@ import {
   Clock,
   FolderOpen,
   MessageCircle,
+  TrendingUp,
   X
 } from 'lucide-react';
 
@@ -271,6 +272,35 @@ const parseInlineMarkdown = (text: string): React.ReactNode[] => {
 
   return tokens;
 };
+
+/**
+ * Pull the lead conclusion of a numbered report section whose heading matches
+ * `titleRe`. The report leads each section with its conclusion, so the first
+ * substantive line after the heading is the takeaway. Returns undefined if the
+ * section isn't present (e.g. still streaming) or has no content yet.
+ */
+const sectionConclusion = (md: string, titleRe: RegExp): string | undefined => {
+  const lines = md.split(/\r?\n/);
+  for (let i = 0; i < lines.length; i++) {
+    if (/^#{1,4}\s/.test(lines[i]) && titleRe.test(lines[i])) {
+      for (let j = i + 1; j < lines.length; j++) {
+        const l = lines[j].trim();
+        if (!l) continue;
+        if (/^#{1,4}\s/.test(l)) break; // hit the next heading, no content
+        const clean = l.replace(/^[-*+>]\s*/, '').replace(/\*\*/g, '').replace(/`/g, '').trim();
+        if (clean.length > 8) return clean.length > 260 ? clean.slice(0, 257) + '…' : clean;
+      }
+      return undefined;
+    }
+  }
+  return undefined;
+};
+
+/** Rezoning (§6) and Subdivision (§7) lead conclusions for the value-add highlight. */
+export const extractValueAdd = (md: string): { rezoning?: string; subdivision?: string } => ({
+  rezoning: sectionConclusion(md, /rezon|upzon/i),
+  subdivision: sectionConclusion(md, /subdivi|lot[-\s]?split/i),
+});
 
 export const parseMarkdown = (text: string) => {
   if (!text) return null;
@@ -2768,6 +2798,22 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                   </div>
                 ) : chatHistory.length > 0 && chatHistory[0].role === 'model' ? (
                   <>
+                    {(() => {
+                      const va = extractValueAdd(chatHistory[0].content);
+                      if (!va.rezoning && !va.subdivision) return null;
+                      return (
+                        <div className="value-add-highlight">
+                          <div className="va-head"><TrendingUp size={15} /> Value-Add Upside</div>
+                          {va.rezoning && (
+                            <div className="va-row"><span className="va-tag">Rezoning</span><span className="va-text">{va.rezoning}</span></div>
+                          )}
+                          {va.subdivision && (
+                            <div className="va-row"><span className="va-tag">Subdivision</span><span className="va-text">{va.subdivision}</span></div>
+                          )}
+                          <div className="va-foot">See §6 Rezoning &amp; §7 Subdivision below for the full analysis.</div>
+                        </div>
+                      );
+                    })()}
                     <div className="message-content model-text report-inline-body">
                       {parseMarkdown(chatHistory[0].content)}
                     </div>
