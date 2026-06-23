@@ -685,6 +685,10 @@ INVESTIGATE with live Google Search (focused on this exact address + ZIP, not th
 - Topography (wooded/cleared) to corroborate the provided USGS slope data
 - Assigned schools/ratings and neighborhood/location context
 - Market trends and, for land valuation, comparable VACANT-LAND sales
+- REZONING / UPZONING potential: the parcel's current zoning vs. the future-land-use designation and the zoning of ADJACENT parcels; whether a rezoning or conditional rezoning to a higher-value/higher-density district (e.g. single-family → townhome / multifamily / mixed-use) is plausible and SUPPORTED by the comprehensive plan; the jurisdiction's recent rezoning approval trend
+- SUBDIVISION / lot-split potential: the jurisdiction's MINIMUM lot size, frontage, and density for the district; whether the parcel's acreage, frontage, and utilities allow splitting into multiple buildable lots; minor vs. major subdivision process
+- MARKET SATURATION & ABSORPTION by product type: current ACTIVE inventory, median DAYS ON MARKET (DOM), and MONTHS OF SUPPLY for single-family, townhomes, condos, and multifamily/rentals near this address/ZIP — identify which product types are OVERSUPPLIED or sitting too long vs. absorbing quickly (cite sources, e.g. local MLS/Realtor/Redfin market pages, market reports)
+- MORTGAGE / INTEREST RATE environment: the current 30-year mortgage rate and its recent trend (rising / falling / steady), Federal Reserve posture, and the effect on buyer demand, affordability, absorption, and the project's exit timing (cite a current rate source)
 - HOA: whether the parcel is in a homeowners association; if so, the HOA name, dues, management company, any preferred/featured/approved BUILDER list, and the building requirements / architectural guidelines / restrictions (CCRs) — where publicly available, else mark Unknown
 - CURRENT LOCAL construction costs for this address's metro/county for the Development Cost + Profitability sections — searching AS MANY local sources near the address as possible (not one), with sources, never national averages. Get local figures for: per-sqft new single-family build cost; land CLEARING / TREE removal ($/acre); GRADING/earthwork on slopes; foundation; WELL drilling ($/ft + total) and SEPTIC system + perc test when there's no public water/sewer; public water/sewer TAP & impact fees when available; permits and survey. Be EXTREMELY ACCURATE.
 Reconcile differences across sources and cite at least 3 distinct Markdown links.
@@ -692,7 +696,7 @@ Reconcile differences across sources and cite at least 3 distinct Markdown links
 COMPARABLES — use ONLY these verified, already-filtered SOLD comps (closed within 12 months, new construction, zoning-matched, within 5 driving miles). Do NOT search for or substitute any other comps, and never cite a price other than those below:
 ${compsList}
 
-In Section 15 (New Construction Comparable Sales Analysis) present EVERY comp above in a table with: address, sale price, sale date, year built, living-area sqft, lot size (or "Unknown"), distance from subject, and price/sqft — plus one line on why each qualifies. Then derive the median, range, and median $/sqft.
+In Section 19 (New Construction Comparable Sales Analysis) present EVERY comp above in a table with: address, sale price, sale date, year built, living-area sqft, lot size (or "Unknown"), distance from subject, and price/sqft — plus one line on why each qualifies. Then derive the median, range, and median $/sqft.
 
 REQUIRED SECTION STRUCTURE — use these exact numbered headings:
 # 1. Executive Summary
@@ -700,30 +704,42 @@ REQUIRED SECTION STRUCTURE — use these exact numbered headings:
 # 3. Parcel Verification
 # 4. Zoning Analysis
 # 5. Future Land Use Analysis
-# 6. HOA, Deed Restrictions & Builder Requirements
-# 7. Buildability Assessment
-# 8. Topography and Slope Analysis
-# 9. Floodplain Analysis
-# 10. Wetlands and Environmental Constraints
-# 11. Utilities Analysis
-# 12. Road Access and Frontage
-# 13. School and Location Analysis
-# 14. Market Analysis
-# 15. New Construction Comparable Sales Analysis
-# 16. Development Cost Considerations
-# 17. Highest and Best Use
-# 18. Land Valuation
-# 19. Builder/Developer Profitability Analysis
-# 20. Risk Assessment
-# 21. Final Investment Recommendation
+# 6. Rezoning & Upzoning Opportunity
+# 7. Subdivision & Lot-Split Potential
+# 8. HOA, Deed Restrictions & Builder Requirements
+# 9. Buildability Assessment
+# 10. Topography and Slope Analysis
+# 11. Floodplain Analysis
+# 12. Wetlands and Environmental Constraints
+# 13. Utilities Analysis
+# 14. Road Access and Frontage
+# 15. School and Location Analysis
+# 16. Market Analysis
+# 17. Market Saturation & Absorption by Product Type
+# 18. Interest Rate & Financing Environment
+# 19. New Construction Comparable Sales Analysis
+# 20. Development Cost Considerations
+# 21. Highest and Best Use
+# 22. Land Valuation
+# 23. Builder/Developer Profitability Analysis
+# 24. Risk Assessment
+# 25. Final Investment Recommendation
 
-Section 6 (HOA, Deed Restrictions & Builder Requirements) must state whether the parcel is in an HOA and, if so, its dues, featured/approved builders, and building restrictions/architectural guidelines (or mark Unknown where not public).
+Section 6 (Rezoning & Upzoning Opportunity) must state plainly whether a value-add REZONING is realistic for THIS parcel, in detail: the current district vs. the future-land-use/comprehensive-plan designation and the zoning of adjacent parcels; the specific higher-value district to target (e.g. single-family → townhome/attached, multifamily, or mixed-use) and the density/units it would unlock; whether the comp plan and surrounding pattern SUPPORT approval (and the jurisdiction's recent rezoning approval trend); the realistic process, timeline, cost, and entitlement RISK; and the VALUE DELTA — roughly what the land is worth as-zoned vs. if rezoned (price per unit/door or per buildable lot). If a rezoning is NOT supportable, say so and explain why (don't invent upside).
 
-Section 16 (Development Cost Considerations) must present an ITEMIZED construction-cost TABLE that mirrors the Construction Cost Reference Model in your standards (a real ~$250k / ~1,600 sqft 3BR/2BA new-build budget incl. a $25k builder fee and a contingency), but with each line LOCALIZED to CURRENT prices near this address (cited sources) and SCALED to the planned home's size; show the scaled total hard cost and $/sqft. Search AS MANY local sources as possible for clearing/tree removal, grading, foundation, well + septic (or tap/impact fees), and per-sqft build cost — be EXTREMELY ACCURATE.
+Section 7 (Subdivision & Lot-Split Potential) must state in detail whether the parcel can be SUBDIVIDED for more value: the district's minimum lot size, minimum frontage, and max density; how many conforming buildable lots the acreage/frontage/utilities realistically yield; minor vs. major subdivision process and likely infrastructure cost (road, utility extensions, stormwater); and the VALUE UPLIFT — estimated sum of finished-lot values vs. the whole-parcel value, net of subdivision cost. If it can't be split, say so and why.
 
-Sections 18 (Land Valuation) & 19 (Builder/Developer Profitability) must compute, in a pro-forma TABLE, what a builder would PAY FOR THE LAND: start from ARV (from the comps' median $/sqft × planned GLA), subtract the localized total construction cost, subtract SITE-SPECIFIC adders that reduce land value — TREE/lot CLEARING (if wooded), extra GRADING/engineering (if slope ≥15%), and WELL + SEPTIC (if no public water/sewer) — subtract selling/closing/financing, and subtract DEVELOPER PROFIT at THREE margins shown side by side: a little less than 20% of ARV (≈15%), EXACTLY 20% of ARV, and more than 20% of ARV (≈25%). This yields THREE residual land values (one per margin) in the table — a lower profit margin lets the builder pay MORE for the land, a higher margin less. Cross-check against the rule of thumb that builders pay ≈ 20% of ARV for a finished lot (then deduct those same site costs), and present a defensible land-value RANGE that brackets the three figures. This is development-feasibility "what a builder would pay" — NOT a wholesale max-allowable-offer.
+Section 8 (HOA, Deed Restrictions & Builder Requirements) must state whether the parcel is in an HOA and, if so, its dues, featured/approved builders, and building restrictions/architectural guidelines (or mark Unknown where not public).
 
-The Final Investment Recommendation (Section 21) must state whether the property appears buildable, the most likely development strategy, the primary risks, the strongest value drivers, and an overall Feasibility Rating (Excellent / Good / Moderate / Challenging / Poor).
+Section 17 (Market Saturation & Absorption by Product Type) must be PRECISE and data-driven: present a TABLE by product type — single-family detached, townhomes/attached, condos, and multifamily/rentals — with current ACTIVE inventory, median DAYS ON MARKET (DOM), and MONTHS OF SUPPLY near this address/ZIP (cite sources). Explicitly flag which product types are OVERSUPPLIED or sitting too long on market (slow absorption / buyer's market) vs. which are absorbing quickly (low supply / seller's market), and conclude with the product type a developer should BUILD here and which to avoid, with the numbers behind it.
+
+Section 18 (Interest Rate & Financing Environment) must state, in detail, the CURRENT 30-year mortgage rate and its recent trend — RISING, FALLING, or STEADY (cite a current source) — the Federal Reserve's posture, and exactly how that affects buyer demand, affordability, absorption pace, and the project's exit timing. Give a short SENSITIVITY read: what a rate move up vs. down would do to demand and to the recommended hold/sell timing.
+
+Section 20 (Development Cost Considerations) must present an ITEMIZED construction-cost TABLE that mirrors the Construction Cost Reference Model in your standards (a real ~$250k / ~1,600 sqft 3BR/2BA new-build budget incl. a $25k builder fee and a contingency), but with each line LOCALIZED to CURRENT prices near this address (cited sources) and SCALED to the planned home's size; show the scaled total hard cost and $/sqft. Search AS MANY local sources as possible for clearing/tree removal, grading, foundation, well + septic (or tap/impact fees), and per-sqft build cost — be EXTREMELY ACCURATE.
+
+Sections 22 (Land Valuation) & 23 (Builder/Developer Profitability) must compute, in a pro-forma TABLE, what a builder would PAY FOR THE LAND: start from ARV (from the comps' median $/sqft × planned GLA), subtract the localized total construction cost, subtract SITE-SPECIFIC adders that reduce land value — TREE/lot CLEARING (if wooded), extra GRADING/engineering (if slope ≥15%), and WELL + SEPTIC (if no public water/sewer) — subtract selling/closing/financing, and subtract DEVELOPER PROFIT at THREE margins shown side by side: a little less than 20% of ARV (≈15%), EXACTLY 20% of ARV, and more than 20% of ARV (≈25%). This yields THREE residual land values (one per margin) in the table — a lower profit margin lets the builder pay MORE for the land, a higher margin less. Cross-check against the rule of thumb that builders pay ≈ 20% of ARV for a finished lot (then deduct those same site costs), and present a defensible land-value RANGE that brackets the three figures. Reflect any rezoning/subdivision upside from Sections 6–7 and the saturation/rate context from Sections 17–18 in the highest-and-best-use and valuation. This is development-feasibility "what a builder would pay" — NOT a wholesale max-allowable-offer.
+
+The Final Investment Recommendation (Section 25) must state whether the property appears buildable, the most likely development strategy (including any rezoning/subdivision value-add play), the primary risks, the strongest value drivers, and an overall Feasibility Rating (Excellent / Good / Moderate / Challenging / Poor).
 
 The report must ultimately answer: What is the property worth today? What would a builder likely pay? What can realistically be built? What are the primary risks? What approvals and infrastructure improvements may be required? Is the opportunity attractive enough to pursue?
 
