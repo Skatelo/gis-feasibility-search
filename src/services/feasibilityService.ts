@@ -961,6 +961,109 @@ export async function fetchCurrentMortgageRate(): Promise<{ rate: number; date: 
   return null;
 }
 
+// NC county → 5-digit FIPS (state 37 + county code), for FRED's Realtor.com
+// county housing series. Used to anchor the market-saturation section.
+const ncCountyFips: Record<string, string> = {
+  Alamance: '37001', Alexander: '37003', Alleghany: '37005', Anson: '37007', Ashe: '37009',
+  Avery: '37011', Beaufort: '37013', Bertie: '37015', Bladen: '37017', Brunswick: '37019',
+  Buncombe: '37021', Burke: '37023', Cabarrus: '37025', Caldwell: '37027', Camden: '37029',
+  Carteret: '37031', Caswell: '37033', Catawba: '37035', Chatham: '37037', Cherokee: '37039',
+  Chowan: '37041', Clay: '37043', Cleveland: '37045', Columbus: '37047', Craven: '37049',
+  Cumberland: '37051', Currituck: '37053', Dare: '37055', Davidson: '37057', Davie: '37059',
+  Duplin: '37061', Durham: '37063', Edgecombe: '37065', Forsyth: '37067', Franklin: '37069',
+  Gaston: '37071', Gates: '37073', Graham: '37075', Granville: '37077', Greene: '37079',
+  Guilford: '37081', Halifax: '37083', Harnett: '37085', Haywood: '37087', Henderson: '37089',
+  Hertford: '37091', Hoke: '37093', Hyde: '37095', Iredell: '37097', Jackson: '37099',
+  Johnston: '37101', Jones: '37103', Lee: '37105', Lenoir: '37107', Lincoln: '37109',
+  McDowell: '37111', Macon: '37113', Madison: '37115', Martin: '37117', Mecklenburg: '37119',
+  Mitchell: '37121', Montgomery: '37123', Moore: '37125', Nash: '37127', 'New Hanover': '37129',
+  Northampton: '37131', Onslow: '37133', Orange: '37135', Pamlico: '37137', Pasquotank: '37139',
+  Pender: '37141', Perquimans: '37143', Person: '37145', Pitt: '37147', Polk: '37149',
+  Randolph: '37151', Richmond: '37153', Robeson: '37155', Rockingham: '37157', Rowan: '37159',
+  Rutherford: '37161', Sampson: '37163', Scotland: '37165', Stanly: '37167', Stokes: '37169',
+  Surry: '37171', Swain: '37173', Transylvania: '37175', Tyrrell: '37177', Union: '37179',
+  Vance: '37181', Wake: '37183', Warren: '37185', Washington: '37187', Watauga: '37189',
+  Wayne: '37191', Wilkes: '37193', Wilson: '37195', Yadkin: '37197', Yancey: '37199',
+};
+
+export interface MarketMetric { value: number; date: string; prev3?: number | null; prevYear?: number | null; }
+export interface CountyMarketStats {
+  fips: string;
+  medianDaysOnMarket?: MarketMetric | null;
+  activeListings?: MarketMetric | null;
+  medianListPrice?: MarketMetric | null;
+  newListings?: MarketMetric | null;
+}
+
+/** Parse a FRED CSV body into latest + 3-month-ago + 1-year-ago points. */
+function parseFredCsv(text: string): MarketMetric | null {
+  const lines = text.trim().split(/\r?\n/);
+  const rows: [string, number][] = [];
+  for (let i = 1; i < lines.length; i++) {
+    const [d, v] = lines[i].split(',');
+    const n = parseFloat(v);
+    if (Number.isFinite(n)) rows.push([d, n]);
+  }
+  if (!rows.length) return null;
+  const at = (back: number) => (rows[rows.length - 1 - back] ? rows[rows.length - 1 - back][1] : null);
+  const last = rows[rows.length - 1];
+  return { value: last[1], date: last[0], prev3: at(3), prevYear: at(12) };
+}
+
+/**
+ * County housing-market stats (median days on market, active listings, median
+ * list price, new listings — all residential, Realtor.com via FRED). Tries the
+ * serverless proxy first, then a direct CSV read. Cached ~24h. Returns null when
+ * unavailable so the report falls back to a Google-Search market read.
+ */
+export async function fetchCountyMarketStats(countyName: string): Promise<CountyMarketStats | null> {
+  const fips = ncCountyFips[countyName?.trim()];
+  if (!fips) return null;
+  const ck = `gisfs:mktstats:v1:${fips}`;
+  try {
+    const raw = localStorage.getItem(ck);
+    if (raw) {
+      const v = JSON.parse(raw);
+      if (v?.d && Date.now() - (v.t || 0) < 24 * 60 * 60 * 1000) return v.d;
+    }
+  } catch { /* ignore */ }
+
+  const cache = (d: CountyMarketStats) => {
+    try { localStorage.setItem(ck, JSON.stringify({ d, t: Date.now() })); } catch { /* ignore */ }
+    return d;
+  };
+
+  // 1) Serverless proxy (one request, no CORS).
+  try {
+    const res = await fetchWithTimeout(`/.netlify/functions/market-stats?fips=${fips}`, 10000);
+    if (res.ok && (res.headers.get('content-type') || '').includes('json')) {
+      const data = await res.json();
+      if (data && (data.medianDaysOnMarket || data.activeListings)) return cache({ fips, ...data });
+    }
+  } catch { /* fall through */ }
+
+  // 2) Direct FRED CSVs (best-effort; may CORS-fail in the browser).
+  try {
+    const series: Record<string, string> = {
+      medianDaysOnMarket: 'MEDDAYONMAR', activeListings: 'ACTLISCOU',
+      medianListPrice: 'MEDLISPRI', newListings: 'NEWLISCOU',
+    };
+    const entries = await Promise.all(
+      Object.entries(series).map(async ([k, prefix]) => {
+        try {
+          const res = await fetchWithTimeout(`https://fred.stlouisfed.org/graph/fredgraph.csv?id=${prefix}${fips}`, 8000);
+          return [k, res.ok ? parseFredCsv(await res.text()) : null] as const;
+        } catch { return [k, null] as const; }
+      }),
+    );
+    const out: CountyMarketStats = { fips };
+    for (const [k, v] of entries) (out as any)[k] = v;
+    if (out.medianDaysOnMarket || out.activeListings) return cache(out);
+  } catch { /* ignore */ }
+
+  return null;
+}
+
 /**
  * FEMA National Flood Hazard Layer (NFHL) — authoritative flood-zone lookup by
  * coordinate. Returns the effective flood zone, whether the point is in a Special
@@ -2887,6 +2990,26 @@ After the report, answer follow-up questions conversationally from the stored co
     ? `30-Year Fixed Mortgage Rate: ${mortgage.rate.toFixed(2)}% as of ${mortgage.date} (Freddie Mac PMMS via FRED, series MORTGAGE30US). USE this as the live anchor for Section 18; confirm the recent rising/falling/steady TREND and the Fed posture via Google Search.`
     : `Live mortgage-rate feed unavailable at search time — research the CURRENT 30-year fixed mortgage rate and its trend via Google Search for Section 18, and cite the source.`;
 
+  // Live COUNTY housing-market anchor (all residential, Realtor.com via FRED) for
+  // the Market Saturation & Absorption section.
+  const mkt = await fetchCountyMarketStats(reportData.countyName).catch(() => null);
+  const trendOf = (m?: { value: number; prev3?: number | null; prevYear?: number | null } | null) => {
+    if (!m || m.prev3 == null) return '';
+    const dir = m.value > m.prev3 ? 'up' : m.value < m.prev3 ? 'down' : 'flat';
+    const yoy = m.prevYear != null && m.prevYear !== 0 ? `, ${(((m.value - m.prevYear) / m.prevYear) * 100).toFixed(0)}% YoY` : '';
+    return ` (${dir} vs 3mo ago${yoy})`;
+  };
+  const marketStatsLine = mkt
+    ? `County housing market — ALL RESIDENTIAL (Realtor.com via FRED), ${reportData.countyName} County, as of ${mkt.medianDaysOnMarket?.date || mkt.activeListings?.date || 'recent'}: ` +
+      [
+        mkt.medianDaysOnMarket ? `median DAYS ON MARKET ${mkt.medianDaysOnMarket.value}${trendOf(mkt.medianDaysOnMarket)}` : '',
+        mkt.activeListings ? `ACTIVE listings ${mkt.activeListings.value.toLocaleString()}${trendOf(mkt.activeListings)}` : '',
+        mkt.newListings ? `NEW listings/mo ${mkt.newListings.value.toLocaleString()}` : '',
+        mkt.medianListPrice ? `median LIST price $${mkt.medianListPrice.value.toLocaleString()}${trendOf(mkt.medianListPrice)}` : '',
+      ].filter(Boolean).join('; ') +
+      `. This is the COUNTY all-residential anchor — USE it in Section 17, then BREAK IT DOWN by PRODUCT TYPE (single-family / townhome / condo / multifamily) and tighter geography (ZIP/submarket) via Google Search, and derive months-of-supply. Source: FRED (Realtor.com), https://fred.stlouisfed.org/series/MEDDAYONMAR${mkt.fips}`
+    : `No live county market feed available — research current ACTIVE inventory, median DAYS ON MARKET, and MONTHS OF SUPPLY by product type near this address via Google Search for Section 17, and cite sources.`;
+
   // Format report context
   const reportContext = `
 ## PROVIDED DATA PACKET — verified evidence to USE in the report (this is DATA, not the report's section layout)
@@ -2907,6 +3030,9 @@ After the report, answer follow-up questions conversationally from the stored co
 
 ### 2.6 Financing — Current Mortgage Rate (live anchor for Section 18)
 - ${mortgageLine}
+
+### 2.7 Market Saturation — County Housing Stats (live anchor for Section 17)
+- ${marketStatsLine}
 
 ### 3. Zoning & Estimated Density Allowances
 - Zoning Classification (from county GIS): ${reportData.zoningCode} (${reportData.zoningDescription})
