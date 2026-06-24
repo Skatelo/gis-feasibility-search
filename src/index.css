@@ -3472,3 +3472,21 @@ img, svg, video, canvas, table, pre { max-width: 100%; }
   .news-ticker-label { padding: 0 12px; }
   .news-card { width: 260px; }
 }
+
+/* News strip — missing-key / error hint state */
+.news-ticker-hint { align-items: center; }
+.news-hint-body {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  padding: 10px 14px; font-size: 0.82rem; color: var(--text-secondary);
+}
+.news-hint-body code {
+  background: var(--bg-main); border: 1px solid var(--bg-card-border); border-radius: 4px;
+  padding: 1px 5px; font-size: 0.78rem; color: var(--text-primary);
+}
+.news-hint-btn {
+  display: inline-flex; align-items: center; gap: 5px; flex-shrink: 0;
+  background: var(--bg-card); border: 1px solid var(--bg-card-border); border-radius: var(--radius-sm);
+  padding: 6px 12px; font-size: 0.78rem; font-weight: 600; color: var(--text-primary); cursor: pointer;
+  transition: var(--transition);
+}
+.news-hint-btn:hover { background: var(--bg-card-hover); border-color: var(--bg-card-border-hover); }

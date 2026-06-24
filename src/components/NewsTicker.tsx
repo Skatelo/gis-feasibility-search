@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Newspaper, ExternalLink } from 'lucide-react';
+import { Newspaper, ExternalLink, Settings } from 'lucide-react';
 
 interface Article {
   title: string;
@@ -10,6 +10,8 @@ interface Article {
   pubDate: string | null;
   description: string;
 }
+
+type Status = 'loading' | 'ok' | 'no-key' | 'error';
 
 /** Read the newsdata.io key from the signed-in user's saved keys (optional —
  *  the proxy also accepts a NEWSDATA_API_KEY Netlify env var). */
@@ -35,9 +37,12 @@ const fmtWhen = (iso: string | null) => {
  * Auto-scrolling real estate / construction / housing-market news strip (biased
  * to North Carolina), via the newsdata.io serverless proxy. Cards drift left→right
  * continuously and pause on hover; an article image is shown when available.
+ * Shows a clear hint (instead of vanishing) when no key is configured / it errors.
  */
 export function NewsTicker() {
   const [articles, setArticles] = useState<Article[]>([]);
+  const [status, setStatus] = useState<Status>('loading');
+  const [errMsg, setErrMsg] = useState('');
 
   useEffect(() => {
     let cancelled = false;
@@ -45,17 +50,52 @@ export function NewsTicker() {
       try {
         const key = readNewsKey();
         const res = await fetch('/.netlify/functions/news', key ? { headers: { 'x-newsdata-key': key } } : undefined);
-        if (!res.ok) return;
+        const ct = res.headers.get('content-type') || '';
+        if (!ct.includes('json')) { if (!cancelled) setStatus('error'); return; }
         const data = await res.json();
-        if (!cancelled && Array.isArray(data.articles) && data.articles.length) setArticles(data.articles.slice(0, 18));
-      } catch { /* silent — the strip just stays hidden */ }
+        if (cancelled) return;
+        if (Array.isArray(data.articles) && data.articles.length) {
+          setArticles(data.articles.slice(0, 18));
+          setStatus('ok');
+        } else if (data.error === 'no-key') {
+          setStatus('no-key');
+        } else {
+          setErrMsg(data.message || '');
+          setStatus('error');
+        }
+      } catch {
+        if (!cancelled) setStatus('error');
+      }
     };
     load();
     const id = setInterval(load, 30 * 60 * 1000); // refresh every 30 min
     return () => { cancelled = true; clearInterval(id); };
   }, []);
 
-  if (articles.length === 0) return null;
+  if (status === 'loading') return null;
+
+  if (status === 'no-key') {
+    return (
+      <section className="news-ticker news-ticker-hint">
+        <div className="news-ticker-label"><Newspaper size={15} /><span>Real Estate News</span></div>
+        <div className="news-hint-body">
+          <span>Add a free <strong>newsdata.io</strong> key in Settings (or set <code>NEWSDATA_API_KEY</code> in Netlify) to enable the real estate, construction &amp; housing news feed.</span>
+          <button type="button" className="news-hint-btn" onClick={() => window.dispatchEvent(new Event('open-gis-settings'))}>
+            <Settings size={14} /> Open Settings
+          </button>
+        </div>
+      </section>
+    );
+  }
+
+  if (status === 'error' || articles.length === 0) {
+    return (
+      <section className="news-ticker news-ticker-hint">
+        <div className="news-ticker-label"><Newspaper size={15} /><span>Real Estate News</span></div>
+        <div className="news-hint-body"><span>News feed is temporarily unavailable{errMsg ? ` (${errMsg})` : ''}.</span></div>
+      </section>
+    );
+  }
 
   // Duplicate the list so the marquee loops seamlessly.
   const loop = [...articles, ...articles];
