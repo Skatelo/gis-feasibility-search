@@ -67,7 +67,10 @@ export function NewsTicker() {
     <section className="news-ticker" aria-label="Real estate news">
       <div className="news-ticker-label">
         <Newspaper size={15} />
-        <span>Real Estate &amp; Housing — NC</span>
+        <div className="news-ticker-label-text">
+          <span>Real Estate &amp; Housing — NC</span>
+          <span className="news-ticker-src">via Google News RSS</span>
+        </div>
       </div>
       <div className="news-ticker-viewport">
         <div className="news-ticker-track">
