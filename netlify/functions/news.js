@@ -71,7 +71,7 @@ export const handler = async (event) => {
     }
     return {
       statusCode: 200,
-      headers: { ...CORS, 'content-type': 'application/json', 'cache-control': 'public, max-age=1800' },
+      headers: { ...CORS, 'content-type': 'application/json', 'cache-control': 'public, max-age=600' },
       body: JSON.stringify({ articles }),
     };
   } catch (e) {

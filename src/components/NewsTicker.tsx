@@ -33,11 +33,17 @@ export function NewsTicker() {
   const [articles, setArticles] = useState<Article[]>([]);
   const [status, setStatus] = useState<Status>('loading');
 
+  // Auto-update: pull fresh headlines every 10 minutes AND whenever the user
+  // returns to the tab. The cache-buster is bucketed to the 10-min window so the
+  // CDN/browser still caches within a window (efficient) but new data each window.
+  const REFRESH_MS = 10 * 60 * 1000;
   useEffect(() => {
     let cancelled = false;
+    let lastLoaded = 0;
     const load = async () => {
+      lastLoaded = Date.now();
       try {
-        const res = await fetch('/.netlify/functions/news');
+        const res = await fetch(`/.netlify/functions/news?t=${Math.floor(Date.now() / REFRESH_MS)}`);
         const ct = res.headers.get('content-type') || '';
         if (!ct.includes('json')) { if (!cancelled) setStatus('error'); return; }
         const data = await res.json();
@@ -53,8 +59,13 @@ export function NewsTicker() {
       }
     };
     load();
-    const id = setInterval(load, 30 * 60 * 1000); // refresh every 30 min
-    return () => { cancelled = true; clearInterval(id); };
+    const id = setInterval(load, REFRESH_MS);
+    const onVisible = () => {
+      if (document.visibilityState === 'visible' && Date.now() - lastLoaded > REFRESH_MS) load();
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => { cancelled = true; clearInterval(id); document.removeEventListener('visibilitychange', onVisible); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Stay invisible while loading or if the feed is unavailable.
