@@ -9,6 +9,7 @@ export interface UserKeys {
   realtyApi?: string;
   deepSeek?: string;
   rentCast?: string;
+  newsData?: string;
 }
 
 export function getUserKeys(): UserKeys {

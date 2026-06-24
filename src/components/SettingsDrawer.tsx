@@ -21,6 +21,8 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
   const [showDeepSeekKey, setShowDeepSeekKey] = useState(false);
   const [rentCastKey, setRentCastKey] = useState('');
   const [showRentCastKey, setShowRentCastKey] = useState(false);
+  const [newsDataKey, setNewsDataKey] = useState('');
+  const [showNewsDataKey, setShowNewsDataKey] = useState(false);
   const [showGoogleKey, setShowGoogleKey] = useState(false);
   const [showGeminiKey, setShowGeminiKey] = useState(false);
   const [showTopographyKey, setShowTopographyKey] = useState(false);
@@ -39,6 +41,7 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
       setRealtyApiKey(activeUser.keys?.realtyApi || '');
       setDeepSeekKey(activeUser.keys?.deepSeek || '');
       setRentCastKey(activeUser.keys?.rentCast || '');
+      setNewsDataKey(activeUser.keys?.newsData || '');
       setValidationError(null);
       setSaveSuccess(false);
     }
@@ -67,7 +70,8 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
       openTopography: openTopographyKey.trim(),
       realtyApi: realtyApiKey.trim(),
       deepSeek: deepSeekKey.trim(),
-      rentCast: rentCastKey.trim()
+      rentCast: rentCastKey.trim(),
+      newsData: newsDataKey.trim()
     };
 
     try {
@@ -304,6 +308,32 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
                 </button>
               </div>
               <p className="field-help">Enriches the Investor Buyer List with REAL last-sale prices &amp; dates from RentCast (api.rentcast.io), on demand for the buyers you choose. RentCast bills per request and free plans are limited, so enrichment is opt-in and capped. Get a key at app.rentcast.io.</p>
+            </div>
+
+            {/* newsdata.io API Key (real estate / housing news ticker) */}
+            <div className="settings-field-group">
+              <div className="field-label-row">
+                <label htmlFor="newsDataKey">newsdata.io API Key (real estate news)</label>
+                <span className="badge optional">Optional</span>
+              </div>
+              <div className="field-input-container">
+                <Key className="input-icon" size={16} />
+                <input
+                  id="newsDataKey"
+                  type={showNewsDataKey ? "text" : "password"}
+                  placeholder="pub_..."
+                  value={newsDataKey}
+                  onChange={(e) => setNewsDataKey(e.target.value)}
+                />
+                <button
+                  type="button"
+                  className="field-toggle-btn"
+                  onClick={() => setShowNewsDataKey(!showNewsDataKey)}
+                >
+                  {showNewsDataKey ? <EyeOff size={16} /> : <Eye size={16} />}
+                </button>
+              </div>
+              <p className="field-help">Powers the auto-scrolling news strip with real estate, construction &amp; housing-market headlines (biased to North Carolina) from newsdata.io. Get a free key at newsdata.io. (Or set NEWSDATA_API_KEY in Netlify to enable it for everyone.)</p>
             </div>
 
           </div>

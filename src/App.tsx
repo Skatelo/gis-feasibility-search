@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { FeasibilitySearch } from './components/FeasibilitySearch';
 import { DistressedFinder } from './components/DistressedFinder';
+import { NewsTicker } from './components/NewsTicker';
 import { AuthPortal } from './components/AuthPortal';
 import { SettingsDrawer } from './components/SettingsDrawer';
 import { Database, FileJson, FolderOpen, Globe, Settings, Map as MapIcon, Sparkles } from 'lucide-react';
@@ -188,6 +189,9 @@ function App() {
           </button>
         </div>
       </header>
+
+      {/* Auto-scrolling real estate / housing news strip (NC-tailored) */}
+      <NewsTicker />
 
       {/* Main Content — switches between the feasibility search and the AI finder */}
       <main className="main-content">
