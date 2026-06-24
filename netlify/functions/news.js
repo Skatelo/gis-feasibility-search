@@ -1,12 +1,9 @@
-// newsdata.io proxy — real estate / construction / housing-market news, biased
-// to North Carolina. newsdata.io is server/key-oriented (and CORS-restricted),
-// so this function holds/relays the key and returns a compact, CORS-enabled
-// article list. The key comes from the NEWSDATA_API_KEY Netlify env var, or an
-// `x-newsdata-key` header (the user's Settings key).
+// Real estate / construction / housing-market news for North Carolina.
 //
-// Free-tier-safe: simple keyword queries only (no AND/OR operators, no category
-// filter — those error or over-restrict on the free plan). We try a few queries
-// and merge until we have enough, surfacing the real newsdata error if all fail.
+// Primary source is Google News RSS — KEYLESS and reliable, so the strip works
+// with no setup. If a newsdata.io key is present (NEWSDATA_API_KEY env var or an
+// `x-newsdata-key` header), its articles (which include images) are merged in
+// first. Both are fetched server-side so there's no browser CORS issue.
 //
 // ESM syntax because the project's package.json is "type": "module".
 
@@ -16,74 +13,97 @@ const CORS = {
   'Access-Control-Allow-Methods': 'GET, OPTIONS',
 };
 
-const QUERIES = ['North Carolina real estate', 'real estate', 'housing market', 'construction'];
+const decode = (s = '') => s
+  .replace(/<!\[CDATA\[/g, '').replace(/\]\]>/g, '')
+  .replace(/&amp;/g, '&').replace(/&#39;/g, "'").replace(/&apos;/g, "'")
+  .replace(/&quot;/g, '"').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&nbsp;/g, ' ')
+  .trim();
 
-async function newsdata(key, q) {
-  // /latest with a single keyword query, US English. No category/operators so it
-  // works on the free plan.
-  const url = `https://newsdata.io/api/1/latest?apikey=${encodeURIComponent(key)}&language=en&country=us&q=${encodeURIComponent(q)}`;
+const grab = (block, tag) => {
+  const m = block.match(new RegExp(`<${tag}[^>]*>([\\s\\S]*?)</${tag}>`));
+  return m ? decode(m[1]) : '';
+};
+
+const toIso = (raw) => {
+  if (!raw) return null;
+  // newsdata gives "YYYY-MM-DD HH:MM:SS" (UTC, no zone); RSS gives RFC-822.
+  const s = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}/.test(raw) ? raw.replace(' ', 'T') + 'Z' : raw;
+  const d = new Date(s);
+  return isNaN(d.getTime()) ? null : d.toISOString();
+};
+
+async function googleNews(query) {
+  const url = `https://news.google.com/rss/search?q=${encodeURIComponent(query)}&hl=en-US&gl=US&ceid=US:en`;
   let r;
-  try {
-    r = await fetch(url);
-  } catch (e) {
-    return { rows: [], error: String((e && e.message) || e) };
-  }
+  try { r = await fetch(url, { headers: { 'user-agent': 'Mozilla/5.0' } }); } catch { return []; }
+  if (!r.ok) return [];
+  const xml = await r.text();
+  const items = xml.split('<item>').slice(1).map((s) => s.split('</item>')[0]);
+  return items.map((b) => {
+    const titleRaw = grab(b, 'title');
+    const source = grab(b, 'source');
+    const title = source && titleRaw.endsWith(` - ${source}`) ? titleRaw.slice(0, -(source.length + 3)) : titleRaw;
+    return { title, link: grab(b, 'link'), source, sourceIcon: null, image: null, pubDate: toIso(grab(b, 'pubDate')), description: '' };
+  }).filter((a) => a.title && a.link);
+}
+
+async function newsdata(key, query) {
+  const url = `https://newsdata.io/api/1/latest?apikey=${encodeURIComponent(key)}&language=en&q=${encodeURIComponent(query)}`;
+  let r;
+  try { r = await fetch(url); } catch { return []; }
   let body = null;
   try { body = await r.json(); } catch { /* non-JSON */ }
-  if (!r.ok || body?.status === 'error') {
-    const msg = body?.results?.message || body?.message || `HTTP ${r.status}`;
-    return { rows: [], error: msg };
-  }
-  return { rows: Array.isArray(body?.results) ? body.results : [] };
+  if (!r.ok || body?.status === 'error') return [];
+  return (Array.isArray(body?.results) ? body.results : []).map((a) => ({
+    title: a.title, link: a.link, source: a.source_name || a.source_id || '', sourceIcon: a.source_icon || null,
+    image: a.image_url || null, pubDate: toIso(a.pubDate), description: a.description || '',
+  })).filter((a) => a.title && a.link);
 }
+
+const normTitle = (t) => String(t).toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 60);
 
 export const handler = async (event) => {
   if (event && event.httpMethod === 'OPTIONS') return { statusCode: 204, headers: CORS, body: '' };
 
   const headers = event.headers || {};
-  const key = process.env.NEWSDATA_API_KEY ||
-    headers['x-newsdata-key'] || headers['X-Newsdata-Key'] ||
-    (event.queryStringParameters || {}).key || '';
-  if (!key) {
-    return { statusCode: 400, headers: { ...CORS, 'content-type': 'application/json' }, body: JSON.stringify({ error: 'no-key', message: 'newsdata.io key not configured', articles: [] }) };
-  }
+  const key = process.env.NEWSDATA_API_KEY || headers['x-newsdata-key'] || headers['X-Newsdata-Key'] || (event.queryStringParameters || {}).key || '';
 
-  const results = [];
+  const merged = [];
   const seen = new Set();
-  let lastError = null;
-  for (const q of QUERIES) {
-    if (results.length >= 10) break;
-    const { rows, error } = await newsdata(key, q);
-    if (error) { lastError = error; continue; }
-    for (const a of rows) {
-      if (a && a.title && a.link && !seen.has(a.link)) {
-        seen.add(a.link);
-        results.push(a);
-      }
+  const add = (arr) => {
+    for (const a of arr) {
+      const k = normTitle(a.title);
+      if (k && !seen.has(k)) { seen.add(k); merged.push(a); }
     }
-  }
-
-  if (results.length === 0) {
-    return {
-      statusCode: lastError ? 502 : 200,
-      headers: { ...CORS, 'content-type': 'application/json' },
-      body: JSON.stringify({ error: lastError ? 'api-error' : 'empty', message: lastError || 'No articles returned.', articles: [] }),
-    };
-  }
-
-  const articles = results.slice(0, 24).map((a) => ({
-    title: a.title,
-    link: a.link,
-    image: a.image_url || null,
-    source: a.source_name || a.source_id || '',
-    sourceIcon: a.source_icon || null,
-    pubDate: a.pubDate || null,
-    description: a.description || '',
-  }));
-
-  return {
-    statusCode: 200,
-    headers: { ...CORS, 'content-type': 'application/json', 'cache-control': 'public, max-age=1800' },
-    body: JSON.stringify({ articles }),
   };
+
+  try {
+    // newsdata first (its articles carry images) when a key is available.
+    if (key) {
+      add(await newsdata(key, 'North Carolina real estate'));
+      if (merged.length < 6) add(await newsdata(key, 'real estate'));
+    }
+    // Google News RSS — keyless, NC-tailored, always available.
+    const gn = await Promise.all([
+      googleNews('North Carolina real estate'),
+      googleNews('North Carolina housing market'),
+      googleNews('North Carolina home construction'),
+    ]);
+    for (const arr of gn) add(arr);
+
+    // Freshest first.
+    merged.sort((a, b) => (b.pubDate ? Date.parse(b.pubDate) : 0) - (a.pubDate ? Date.parse(a.pubDate) : 0));
+    const articles = merged.slice(0, 24);
+
+    if (!articles.length) {
+      return { statusCode: 200, headers: { ...CORS, 'content-type': 'application/json' }, body: JSON.stringify({ error: 'empty', message: 'No articles found.', articles: [] }) };
+    }
+    return {
+      statusCode: 200,
+      headers: { ...CORS, 'content-type': 'application/json', 'cache-control': 'public, max-age=1800' },
+      body: JSON.stringify({ articles }),
+    };
+  } catch (e) {
+    return { statusCode: 502, headers: { ...CORS, 'content-type': 'application/json' }, body: JSON.stringify({ error: 'api-error', message: String((e && e.message) || e), articles: [] }) };
+  }
 };

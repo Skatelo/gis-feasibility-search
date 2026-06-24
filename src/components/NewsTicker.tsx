@@ -24,7 +24,7 @@ function readNewsKey(): string {
 
 const fmtWhen = (iso: string | null) => {
   if (!iso) return '';
-  const d = new Date(iso.replace(' ', 'T') + 'Z');
+  const d = new Date(iso);
   if (isNaN(d.getTime())) return '';
   const days = Math.floor((Date.now() - d.getTime()) / 86400000);
   if (days <= 0) return 'today';
