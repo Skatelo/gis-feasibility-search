@@ -3100,8 +3100,14 @@ export interface ChatMessage {
  *  reduce the chance a flaky cellular link drops the long request. */
 function isMobileDevice(): boolean {
   try {
-    if (typeof navigator !== 'undefined' && /Mobi|Android|iPhone|iPad|iPod|Tablet/i.test(navigator.userAgent)) return true;
-    if (typeof window !== 'undefined' && window.innerWidth <= 820) return true;
+    if (typeof navigator !== 'undefined') {
+      const ua = navigator.userAgent || '';
+      if (/Mobi|Android|iPhone|iPad|iPod|Tablet|Silk|Kindle|PlayBook/i.test(ua)) return true;
+      // iPadOS 13+ masquerades as "Macintosh" with a desktop UA — distinguish a
+      // real touch tablet by its touch points so tablets get the light path too.
+      if (/Macintosh/.test(ua) && (navigator.maxTouchPoints || 0) > 1) return true;
+    }
+    if (typeof window !== 'undefined' && window.innerWidth <= 1024) return true;
   } catch { /* SSR / no DOM */ }
   return false;
 }
@@ -3597,7 +3603,11 @@ ${reportData.comps && reportData.comps.length > 0
     }
   };
 
-  if (deepSeekKey && lastUser) {
+  // FUSION runs on desktop only. On phones/tablets it triples the number of
+  // calls (a separate grounded draft + a grounded judge, plus DeepSeek) and the
+  // longer total time over a cellular link is the main cause of "Load failed" —
+  // so mobile uses ONE grounded Gemini stream with the full fallback chain.
+  if (deepSeekKey && lastUser && !isMobileDevice()) {
     const [gDraft, dDraft] = await Promise.all([
       geminiGenerateText(`${GEN_BASE}:generateContent?key=${apiKey}`, baseBody).catch((e) => { console.warn('Gemini draft failed:', e); return ''; }),
       fetchDeepSeekDraft(`${systemPrompt}\n\n# PROVIDED DATA PACKET (verified evidence)\n${reportContext}\n\n# YOUR ROLE\nProvide a substantive but CONCISE expert analytical draft — your key findings, figures, and risks per topic (zoning, REZONING/UPZONING upside, SUBDIVISION/lot-split potential, HOA/restrictions, buildability, flood, utilities, MARKET SATURATION & absorption by product type — single-family/townhome/condo/multifamily inventory, DOM, months-of-supply — the INTEREST-RATE environment and its demand effect, LOCAL itemized construction cost anchored to the Construction Cost Reference Model, and DEVELOPER ECONOMICS: ARV, residual land value = ARV − construction − site adders (trees/slope/well+septic) − 20%-of-ARV developer profit, cross-checked with the ~20%-of-ARV lot rule). A lead analyst synthesizes the final structured report from your input, so you need not format every numbered section.`, lastUser, deepSeekKey, apiKey).catch((e) => { console.warn('DeepSeek draft failed:', e); return null; }),
