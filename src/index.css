@@ -3475,3 +3475,53 @@ img, svg, video, canvas, table, pre { max-width: 100%; }
   .news-card { width: 260px; }
 }
 
+
+/* ==========================================================================
+   Automatic mobile & tablet optimization — performance + positioning.
+   Applied purely by viewport (<=1024px covers phones + tablets), no toggles:
+   smoother scrolling, notch-safe spacing, and comfortable touch targets.
+   ========================================================================== */
+@media (max-width: 1024px) {
+  /* PERFORMANCE: backdrop-filter blur is GPU-heavy and janks scrolling on
+     mobile Safari/Chrome. Cards are solid (#fff), so dropping it is free perf.
+     Also lighten the logo glow. */
+  .card, .registry-card, .registry-header-card,
+  .drawer-container, .dashboard-overlay, .modal-overlay, .chat-fab-panel {
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+  }
+  .logo-badge { box-shadow: 0 0 8px rgba(99, 102, 241, 0.25); }
+  * { -webkit-tap-highlight-color: rgba(99, 102, 241, 0.15); }
+
+  /* POSITIONING: keep content clear of the notch / rounded corners. */
+  .main-content {
+    padding-left: max(0.9rem, env(safe-area-inset-left));
+    padding-right: max(0.9rem, env(safe-area-inset-right));
+  }
+
+  /* Thumb-friendly tap targets (~44px, per Apple/Google guidance). */
+  .app-nav-btn, .header-settings-btn, .btn, .btn-primary, .btn-quick-action,
+  .layer-toggle-btn, .registry-tab, .finder-btn-primary, .finder-btn-secondary,
+  .st-state, .field-toggle-btn { min-height: 44px; }
+
+  /* >=16px inputs stop iOS Safari from auto-zooming the page on focus. */
+  input, select, textarea { font-size: 16px; }
+}
+
+/* Phones: let the page switcher wrap and keep horizontal strips smooth. */
+@media (max-width: 768px) {
+  .app-nav { flex-wrap: wrap; }
+  .recent-searches .history-tags, .news-ticker-viewport, .st-props {
+    -webkit-overflow-scrolling: touch;
+  }
+}
+
+/* Tablet: breathing room for the two-column areas without cramping. */
+@media (min-width: 769px) and (max-width: 1024px) {
+  .main-content { padding: 1.25rem; }
+}
+
+/* Honor users who ask for less motion: stop the news marquee + transitions. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0.001ms !important; transition-duration: 0.001ms !important; }
+}

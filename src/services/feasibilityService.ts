@@ -3095,6 +3095,17 @@ export interface ChatMessage {
 // streaming when no DeepSeek key is configured or DeepSeek is unavailable.
 // ---------------------------------------------------------------------------
 
+/** Coarse mobile/tablet check — used to lighten the report workload on phones
+ *  and tablets (fewer mid-draft web searches, shorter loops) for speed and to
+ *  reduce the chance a flaky cellular link drops the long request. */
+function isMobileDevice(): boolean {
+  try {
+    if (typeof navigator !== 'undefined' && /Mobi|Android|iPhone|iPad|iPod|Tablet/i.test(navigator.userAgent)) return true;
+    if (typeof window !== 'undefined' && window.innerWidth <= 820) return true;
+  } catch { /* SSR / no DOM */ }
+  return false;
+}
+
 /** Non-streaming Gemini call — used for the parallel draft. Returns text only. */
 async function geminiGenerateText(url: string, body: any): Promise<string> {
   const res = await fetchWithTimeout(url, 90000, {
@@ -3105,6 +3116,27 @@ async function geminiGenerateText(url: string, body: any): Promise<string> {
   if (!res.ok) throw new Error(`Gemini API error: ${res.status}`);
   const data = await res.json();
   return data.candidates?.[0]?.content?.parts?.map((p: any) => p.text || '').join('') || '';
+}
+
+/** Non-streaming Gemini call that ALSO returns grounding sources — the robust
+ *  fallback when an SSE stream drops (common on mobile): one request returns the
+ *  whole report at once instead of a long-lived connection that can be killed. */
+async function geminiGenerateWithSources(url: string, body: any): Promise<{ text: string; sources?: ChatSource[] }> {
+  const res = await fetchWithTimeout(url, 120000, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(`Gemini API error: ${res.status}`);
+  const data = await res.json();
+  const text = data.candidates?.[0]?.content?.parts?.map((p: any) => p.text || '').join('') || '';
+  const seen = new Set<string>();
+  const sources: ChatSource[] = [];
+  for (const c of (data.candidates?.[0]?.groundingMetadata?.groundingChunks || [])) {
+    const uri = c?.web?.uri;
+    if (uri && !seen.has(uri)) { seen.add(uri); sources.push({ title: c.web.title || uri, uri }); }
+  }
+  return { text: text || 'No response generated.', sources: sources.length ? sources : undefined };
 }
 
 /** Streams a Gemini SSE response, invoking onToken per chunk; returns full text + sources. */
@@ -3237,8 +3269,12 @@ async function fetchDeepSeekDraft(systemContent: string, userContent: string, ke
     { role: 'user', content: webEnabled ? `${userContent}\n\nYou have a web_search tool — USE IT to verify every figure that is not in the data packet (current mortgage rate, local construction costs, market inventory/DOM/months-of-supply by product type, utilities, recent rezoning cases) before stating it. Cite the source URLs it returns.` : userContent },
   ];
 
-  const MAX_ROUNDS = 4;
-  const MAX_SEARCHES = 4; // keep the grounding burst modest so it doesn't starve the report's own Gemini calls
+  // Lighten the workload on phones/tablets: fewer mid-draft searches and shorter
+  // loops keep the total request time down so a cellular link is less likely to
+  // drop it, while desktop gets the fuller research pass.
+  const mobile = isMobileDevice();
+  const MAX_ROUNDS = mobile ? 3 : 4;
+  const MAX_SEARCHES = mobile ? 2 : 4; // keep the grounding burst modest so it doesn't starve the report's own Gemini calls
   let searches = 0;
 
   for (let round = 0; round < MAX_ROUNDS; round++) {
@@ -3509,23 +3545,35 @@ ${reportData.comps && reportData.comps.length > 0
   let emitted = false;
   const guardedToken = onToken ? (c: string) => { emitted = true; onToken(c); } : onToken;
 
-  // Resilient stream: try the primary body; on a PRE-token failure retry once,
-  // then fall back to a simpler body — so a transient network/rate hiccup (or a
-  // failed fusion-judge call) degrades instead of failing the whole report.
+  const nonStreamURL = `${GEN_BASE}:generateContent?key=${apiKey}`;
+
+  // Resilient generation. Streaming gives the nice progressive report, but a
+  // long-lived SSE connection is the fragile part on mobile/cellular links (iOS
+  // Safari surfaces a dropped fetch as "Load failed"). So:
+  //   1. stream the primary body;
+  //   2. on a PRE-token failure, retry the stream, then the fallback stream;
+  //   3. on ANY remaining failure (incl. a MID-stream drop), fetch the whole
+  //      report in ONE non-streaming request — no long connection to lose. The
+  //      caller uses the returned text as the final report, so a partial stream
+  //      is cleanly replaced rather than erroring out.
   const streamResilient = async (primaryBody: any, fallbackBody?: any): Promise<{ text: string; sources?: ChatSource[] }> => {
     try {
       return await streamGeminiSSE(streamURL, primaryBody, guardedToken);
     } catch (e) {
-      if (emitted) throw e;
-      console.warn('Report stream failed — retrying once:', e);
-      await new Promise((r) => setTimeout(r, 1500));
-      try {
-        return await streamGeminiSSE(streamURL, primaryBody, guardedToken);
-      } catch (e2) {
-        if (emitted || !fallbackBody) throw e2;
-        console.warn('Retry failed — falling back to single-model stream:', e2);
-        return await streamGeminiSSE(streamURL, fallbackBody, guardedToken);
+      console.warn('Report stream failed:', e);
+      if (!emitted) {
+        await new Promise((r) => setTimeout(r, 1500));
+        try { return await streamGeminiSSE(streamURL, primaryBody, guardedToken); }
+        catch (e2) {
+          console.warn('Stream retry failed:', e2);
+          if (fallbackBody && !emitted) {
+            try { return await streamGeminiSSE(streamURL, fallbackBody, guardedToken); } catch (e3) { console.warn('Fallback stream failed:', e3); }
+          }
+        }
       }
+      // Final, most robust path: one non-streaming request for the full report.
+      console.warn('Falling back to non-streaming generation (mobile-safe).');
+      return await geminiGenerateWithSources(nonStreamURL, fallbackBody || primaryBody);
     }
   };
 
