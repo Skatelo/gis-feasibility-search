@@ -3152,22 +3152,10 @@ async function streamGeminiSSE(url: string, body: any, onToken?: (chunk: string)
   return { text: text || 'No response generated.', sources: sources.length ? sources : undefined };
 }
 
-/** DeepSeek V4 Pro draft (OpenAI-compatible), with ONE retry on transient errors so
- *  a flaky request doesn't silently drop DeepSeek from the fusion. Returns null on
- *  missing key / repeated failure / timeout (the fusion then proceeds Gemini-only). */
-async function fetchDeepSeekDraft(systemContent: string, userContent: string, key: string): Promise<string | null> {
-  if (!key) return null;
-  const body = JSON.stringify({
-    model: 'deepseek-v4-pro',
-    messages: [
-      { role: 'system', content: systemContent },
-      { role: 'user', content: userContent },
-    ],
-    thinking: { type: 'disabled' }, // fast draft; the Gemini judge supplies the synthesis/reasoning
-    stream: false,
-    temperature: 0.4,
-    max_tokens: 8000,
-  });
+/** One DeepSeek chat-completions POST with ONE retry on transient errors. Returns
+ *  the parsed response message object (so callers can read content OR tool_calls),
+ *  or null on missing key / repeated failure / timeout. */
+async function postDeepSeekOnce(body: string, key: string): Promise<any | null> {
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
       const res = await fetchWithTimeout('https://api.deepseek.com/chat/completions', 90000, {
@@ -3177,9 +3165,8 @@ async function fetchDeepSeekDraft(systemContent: string, userContent: string, ke
       });
       if (res.ok) {
         const data = await res.json();
-        return data?.choices?.[0]?.message?.content || null;
+        return data?.choices?.[0]?.message ?? null;
       }
-      // Retry transient rate-limit / server errors once; give up on client errors (bad key, etc.).
       if ((res.status === 429 || res.status >= 500) && attempt === 0) {
         console.warn(`DeepSeek HTTP ${res.status} — retrying once...`);
         await new Promise((r) => setTimeout(r, 1500));
@@ -3188,11 +3175,98 @@ async function fetchDeepSeekDraft(systemContent: string, userContent: string, ke
       console.warn(`DeepSeek HTTP ${res.status} — fusion will use Gemini only.`);
       return null;
     } catch (e) {
-      // Network error / timeout — retry once, then fall back gracefully.
       if (attempt === 0) { console.warn('DeepSeek request error — retrying once:', e); await new Promise((r) => setTimeout(r, 1000)); continue; }
       console.warn('DeepSeek request failed — fusion will use Gemini only:', e);
       return null;
     }
+  }
+  return null;
+}
+
+/** A single live web search backed by Gemini's Google-Search grounding. Returns a
+ *  concise factual brief with source URLs — this is what gives DeepSeek real web
+ *  access inside the fusion. Never throws; returns a short status string on error. */
+async function webSearchViaGemini(query: string, geminiKey: string): Promise<string> {
+  try {
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=${geminiKey}`;
+    const body = JSON.stringify({
+      contents: [{ role: 'user', parts: [{ text: `Search the live web and report the most CURRENT, specific facts for: "${query}". Give concrete numbers/dates and a source URL for each finding. Be concise — a few bullet lines, no preamble.` }] }],
+      tools: [{ google_search: {} }],
+    });
+    const res = await fetchWithTimeout(url, 30000, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body });
+    if (!res.ok) return `(web search unavailable: HTTP ${res.status})`;
+    const data = await res.json();
+    const text = data.candidates?.[0]?.content?.parts?.map((p: any) => p.text || '').join('') || '';
+    const urls = (data.candidates?.[0]?.groundingMetadata?.groundingChunks || [])
+      .map((c: any) => c?.web?.uri).filter(Boolean).slice(0, 5);
+    return (text.trim() || '(no results found)') + (urls.length ? `\nSources: ${urls.join(' | ')}` : '');
+  } catch {
+    return '(web search error)';
+  }
+}
+
+/** DeepSeek V4 Pro draft (OpenAI-compatible). When a Gemini key is supplied, DeepSeek
+ *  is given a `web_search` TOOL (backed by Gemini grounding) so it can look up current
+ *  facts mid-draft instead of guessing — bounded by hard round/search caps. Returns
+ *  null on missing key / repeated failure / timeout (the fusion then uses Gemini only). */
+async function fetchDeepSeekDraft(systemContent: string, userContent: string, key: string, geminiKey?: string): Promise<string | null> {
+  if (!key) return null;
+
+  const webEnabled = !!geminiKey;
+  const tools = webEnabled ? [{
+    type: 'function',
+    function: {
+      name: 'web_search',
+      description: 'Search the live web for CURRENT facts the static data packet does not contain — e.g. the current 30-year mortgage rate and its trend, local new-construction $/sqft and itemized costs near the address, market saturation (active inventory, days-on-market, months-of-supply) by product type, utilities/road access/schools, and recent local rezoning/subdivision cases. Returns a concise brief with source URLs.',
+      parameters: { type: 'object', properties: { query: { type: 'string', description: 'A focused search query.' } }, required: ['query'] },
+    },
+  }] : undefined;
+
+  const messages: any[] = [
+    { role: 'system', content: systemContent },
+    { role: 'user', content: webEnabled ? `${userContent}\n\nYou have a web_search tool — USE IT to verify every figure that is not in the data packet (current mortgage rate, local construction costs, market inventory/DOM/months-of-supply by product type, utilities, recent rezoning cases) before stating it. Cite the source URLs it returns.` : userContent },
+  ];
+
+  const MAX_ROUNDS = 4;
+  const MAX_SEARCHES = 6;
+  let searches = 0;
+
+  for (let round = 0; round < MAX_ROUNDS; round++) {
+    const body = JSON.stringify({
+      model: 'deepseek-v4-pro',
+      messages,
+      ...(tools ? { tools, tool_choice: 'auto' } : {}),
+      thinking: { type: 'disabled' }, // fast draft; the Gemini judge supplies the synthesis/reasoning
+      stream: false,
+      temperature: 0.4,
+      max_tokens: 8000,
+    });
+    const msg = await postDeepSeekOnce(body, key);
+    if (!msg) return null;
+
+    const toolCalls = Array.isArray(msg.tool_calls) ? msg.tool_calls.filter((t: any) => t?.function?.name === 'web_search') : [];
+    if (webEnabled && toolCalls.length && searches < MAX_SEARCHES && round < MAX_ROUNDS - 1) {
+      messages.push(msg); // assistant turn carrying the tool_calls
+      // Run this round's searches in parallel, honoring the global cap.
+      const results = await Promise.all(toolCalls.map(async (tc: any) => {
+        if (searches >= MAX_SEARCHES) return { id: tc.id, content: '(search limit reached — answer from what you have)' };
+        searches++;
+        let q = '';
+        try { q = JSON.parse(tc.function.arguments || '{}').query || ''; } catch { /* malformed args */ }
+        const content = q ? await webSearchViaGemini(q, geminiKey!) : '(empty query)';
+        return { id: tc.id, content };
+      }));
+      for (const r of results) messages.push({ role: 'tool', tool_call_id: r.id, content: r.content });
+      continue; // let DeepSeek incorporate the results
+    }
+
+    // Final answer (no further tool calls, or caps reached).
+    if (msg.content) return msg.content;
+    // Edge case: caps hit while a tool call was pending — ask once more, tools off.
+    const finalMsg = await postDeepSeekOnce(JSON.stringify({
+      model: 'deepseek-v4-pro', messages, thinking: { type: 'disabled' }, stream: false, temperature: 0.4, max_tokens: 8000,
+    }), key);
+    return finalMsg?.content || null;
   }
   return null;
 }
@@ -3420,7 +3494,7 @@ ${reportData.comps && reportData.comps.length > 0
   if (deepSeekKey && lastUser) {
     const [gDraft, dDraft] = await Promise.all([
       geminiGenerateText(`${GEN_BASE}:generateContent?key=${apiKey}`, baseBody).catch((e) => { console.warn('Gemini draft failed:', e); return ''; }),
-      fetchDeepSeekDraft(`${systemPrompt}\n\n# PROVIDED DATA PACKET (verified evidence)\n${reportContext}\n\n# YOUR ROLE\nProvide a substantive but CONCISE expert analytical draft — your key findings, figures, and risks per topic (zoning, REZONING/UPZONING upside, SUBDIVISION/lot-split potential, HOA/restrictions, buildability, flood, utilities, MARKET SATURATION & absorption by product type — single-family/townhome/condo/multifamily inventory, DOM, months-of-supply — the INTEREST-RATE environment and its demand effect, LOCAL itemized construction cost anchored to the Construction Cost Reference Model, and DEVELOPER ECONOMICS: ARV, residual land value = ARV − construction − site adders (trees/slope/well+septic) − 20%-of-ARV developer profit, cross-checked with the ~20%-of-ARV lot rule). A lead analyst synthesizes the final structured report from your input, so you need not format every numbered section.`, lastUser, deepSeekKey),
+      fetchDeepSeekDraft(`${systemPrompt}\n\n# PROVIDED DATA PACKET (verified evidence)\n${reportContext}\n\n# YOUR ROLE\nProvide a substantive but CONCISE expert analytical draft — your key findings, figures, and risks per topic (zoning, REZONING/UPZONING upside, SUBDIVISION/lot-split potential, HOA/restrictions, buildability, flood, utilities, MARKET SATURATION & absorption by product type — single-family/townhome/condo/multifamily inventory, DOM, months-of-supply — the INTEREST-RATE environment and its demand effect, LOCAL itemized construction cost anchored to the Construction Cost Reference Model, and DEVELOPER ECONOMICS: ARV, residual land value = ARV − construction − site adders (trees/slope/well+septic) − 20%-of-ARV developer profit, cross-checked with the ~20%-of-ARV lot rule). A lead analyst synthesizes the final structured report from your input, so you need not format every numbered section.`, lastUser, deepSeekKey, apiKey),
     ]);
     const judgeInstruction = `Two independent senior analysts each produced the DRAFT below for the SAME task. Acting as the JUDGE, synthesize the single best response that fully follows the Operating Standards:\n- Merge the strongest, most evidence-grounded content from both drafts.\n- Resolve any conflict in favor of cited/verified evidence; where they disagree and neither is verifiable, label it Likely or Unknown.\n- Keep the required section structure and the Verified / Likely / Unknown labels.\n- Output ONLY the final report. Do NOT mention drafts, judging, or model names.\n\n===== DRAFT A (Google Gemini 3.5 Flash) =====\n${gDraft || '(unavailable)'}\n\n===== DRAFT B (DeepSeek V4 Pro) =====\n${dDraft || '(DeepSeek draft unavailable — rely on Draft A and the data packet)'}`;
     const judgeBody = { ...baseBody, contents: [...contents, { role: 'user', parts: [{ text: judgeInstruction }] }] };
