@@ -1,10 +1,11 @@
 import { useState, useEffect, useRef } from 'react';
 import { FeasibilitySearch } from './components/FeasibilitySearch';
 import { DistressedFinder } from './components/DistressedFinder';
+import { SkipTrace } from './components/SkipTrace';
 import { NewsTicker } from './components/NewsTicker';
 import { AuthPortal } from './components/AuthPortal';
 import { SettingsDrawer } from './components/SettingsDrawer';
-import { Database, FileJson, FolderOpen, Globe, Settings, Map as MapIcon, Sparkles } from 'lucide-react';
+import { Database, FileJson, FolderOpen, Globe, Settings, Map as MapIcon, Sparkles, Fingerprint } from 'lucide-react';
 import { getSupabase, isSupabaseConfigured } from './services/supabaseClient';
 import { buildSessionUser, signOutEverywhere, writeSessionMirror } from './services/authService';
 
@@ -13,21 +14,21 @@ function App() {
   const [activeUser, setActiveUser] = useState<any>(null);
   const [sessionLoaded, setSessionLoaded] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
-  const [view, setView] = useState<'feasibility' | 'finder'>(
-    () => (window.location.hash === '#/finder' ? 'finder' : 'feasibility'),
-  );
+  const hashToView = (h: string): 'feasibility' | 'finder' | 'skiptrace' =>
+    h === '#/finder' ? 'finder' : h === '#/skiptrace' ? 'skiptrace' : 'feasibility';
+  const [view, setView] = useState<'feasibility' | 'finder' | 'skiptrace'>(() => hashToView(window.location.hash));
   const lastUserIdRef = useRef<string | null>(null);
 
   // Keep the active view in sync with the URL hash so each page is linkable
   // (e.g. share /#/finder) and the browser back/forward buttons work.
   useEffect(() => {
-    const onHash = () => setView(window.location.hash === '#/finder' ? 'finder' : 'feasibility');
+    const onHash = () => setView(hashToView(window.location.hash));
     window.addEventListener('hashchange', onHash);
     return () => window.removeEventListener('hashchange', onHash);
   }, []);
 
-  const goTo = (next: 'feasibility' | 'finder') => {
-    window.location.hash = next === 'finder' ? '#/finder' : '#/';
+  const goTo = (next: 'feasibility' | 'finder' | 'skiptrace') => {
+    window.location.hash = next === 'finder' ? '#/finder' : next === 'skiptrace' ? '#/skiptrace' : '#/';
     setView(next);
   };
 
@@ -154,6 +155,14 @@ function App() {
             <Sparkles size={16} />
             <span>AI Property Finder</span>
           </button>
+          <button
+            type="button"
+            className={`app-nav-btn ${view === 'skiptrace' ? 'active' : ''}`}
+            onClick={() => goTo('skiptrace')}
+          >
+            <Fingerprint size={16} />
+            <span>Skip Trace</span>
+          </button>
         </nav>
 
         <div className="header-actions">
@@ -193,9 +202,9 @@ function App() {
       {/* Auto-scrolling real estate / housing news strip (NC-tailored) */}
       <NewsTicker />
 
-      {/* Main Content — switches between the feasibility search and the AI finder */}
+      {/* Main Content — feasibility search, AI finder, or LLC skip trace */}
       <main className="main-content">
-        {view === 'finder' ? <DistressedFinder /> : <FeasibilitySearch />}
+        {view === 'finder' ? <DistressedFinder /> : view === 'skiptrace' ? <SkipTrace /> : <FeasibilitySearch />}
       </main>
 
       {/* Dashboard Footer */}

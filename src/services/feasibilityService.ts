@@ -1140,6 +1140,83 @@ export function buildRedfinSaturationTable(
   ].join('\n');
 }
 
+export interface LlcSkipTrace {
+  entityName: string | null;
+  sosId?: string | null;
+  status?: string | null;
+  entityType?: string | null;
+  formationDate?: string | null;
+  registeredAgentName?: string | null;
+  registeredAgentAddress?: string | null;
+  principalOffice?: string | null;
+  mailingAddress?: string | null;
+  officials?: { name: string; title?: string; address?: string }[];
+  recentFiling?: string | null;
+  notes?: string | null;
+  sources?: string[];
+}
+
+/**
+ * Skip-trace an LLC / business entity (registered agent, principal office, and
+ * the members/managers behind it) using Gemini with Google Search grounding over
+ * the NC Secretary of State registry and public records. The live NC SOS search
+ * is Cloudflare-protected, so direct scraping needs paid proxies — this pulls the
+ * same registration data from indexed records instead, with cited sources, and
+ * never fabricates: unknown fields come back null.
+ */
+export async function skipTraceLLC(query: string, state = 'NC'): Promise<LlcSkipTrace | null> {
+  const geminiApiKey = getUserKeys().gemini || '';
+  if (!geminiApiKey) throw new Error('Gemini API key required (set it in Account Settings).');
+
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=${geminiApiKey}`;
+  const prompt = `Skip-trace this ${state} business entity / LLC: "${query}".
+Use Google Search over the ${state} Secretary of State business registry (in NC: sosnc.gov), OpenCorporates, Bizapedia, and official public records. Prioritize the Secretary of State record.
+Return ONLY a JSON object inside a \`\`\`json code block:
+\`\`\`json
+{
+  "entityName": "exact registered name",
+  "sosId": "state SOSID / entity number",
+  "status": "Active / Current-Active / Dissolved / Admin Dissolved / ...",
+  "entityType": "Limited Liability Company / Corporation / ...",
+  "formationDate": "YYYY-MM-DD",
+  "registeredAgentName": "",
+  "registeredAgentAddress": "",
+  "principalOffice": "",
+  "mailingAddress": "",
+  "officials": [{ "name": "", "title": "Manager / Member / Officer / President", "address": "" }],
+  "recentFiling": "most recent annual report or amendment with its date",
+  "sources": ["https://...", "https://..."]
+}
+\`\`\`
+Rules: the REGISTERED AGENT and the OFFICIALS (managers/members) are the skip-trace contacts — return them when available. Only report values you can support from a credible source and include those source URLs. NEVER invent names, addresses, IDs, or dates — use null for anything you cannot confirm. If the entity cannot be found, return {"entityName": null}.`;
+
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [{ role: 'user', parts: [{ text: prompt }] }],
+        systemInstruction: { parts: [{ text: 'You are a corporate-records skip-tracer. Use Google Search to find the Secretary of State registration and public records for a business entity. Report only source-supported facts; never fabricate. Return the requested JSON only.' }] },
+        tools: [{ google_search: {} }],
+      }),
+    });
+    if (!res.ok) throw new Error(`Gemini API error ${res.status}`);
+    const data = await res.json();
+    const text = data.candidates?.[0]?.content?.parts?.map((p: any) => p.text).filter(Boolean).join('') || '';
+    const m = text.match(/```json\s*([\s\S]*?)\s*```/) || text.match(/\{[\s\S]*\}/);
+    const jsonStr = m ? (m[1] || m[0]) : '';
+    if (!jsonStr) return null;
+    const obj = JSON.parse(jsonStr.replace(/,\s*([}\]])/g, '$1')) as LlcSkipTrace;
+    if (!obj || !obj.entityName) return null;
+    if (!Array.isArray(obj.officials)) obj.officials = [];
+    if (!Array.isArray(obj.sources)) obj.sources = [];
+    return obj;
+  } catch (e) {
+    console.warn('LLC skip-trace failed:', e);
+    throw e instanceof Error ? e : new Error('Skip-trace failed');
+  }
+}
+
 /**
  * FEMA National Flood Hazard Layer (NFHL) — authoritative flood-zone lookup by
  * coordinate. Returns the effective flood zone, whether the point is in a Special
