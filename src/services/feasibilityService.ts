@@ -443,6 +443,26 @@ function generateSimulatedParcel(lng: number, lat: number, addressString: string
   };
 }
 
+interface CachedZoning { code: string; description: string; source: 'county-gis' | 'web' | undefined; sourceUrl?: string }
+const ZONING_CACHE_TTL_MS = 1000 * 60 * 60 * 24 * 30; // 30 days — zoning rarely changes between searches
+
+/** Reads a previously resolved zoning district for a parcel (skips slow re-lookups). */
+function readZoningCache(key: string): CachedZoning | null {
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return null;
+    const v = JSON.parse(raw);
+    if (!v || typeof v.ts !== 'number' || Date.now() - v.ts > ZONING_CACHE_TTL_MS) return null;
+    if (!v.code || v.code === 'N/A') return null;
+    return { code: v.code, description: v.description, source: v.source, sourceUrl: v.sourceUrl };
+  } catch { return null; }
+}
+
+/** Caches a resolved zoning district so re-runs/refinements are instant. */
+function writeZoningCache(key: string, z: CachedZoning): void {
+  try { localStorage.setItem(key, JSON.stringify({ ...z, ts: Date.now() })); } catch { /* quota / SSR — non-fatal */ }
+}
+
 /**
  * 100-County dynamic geocoding and parcel boundary lookup engine.
  *
@@ -863,27 +883,42 @@ export async function executeLandAnalysis(
   // STAGE 3 — zoning. Real district from the county's own GIS at the parcel
   // point; if the county publishes nothing, fall back to a Google-Search-
   // grounded web lookup (labeled "verify"). Never fabricated.
-  const liveZoning = await fetchCountyZoningCode(countyName, lng, lat);
-  if (liveZoning) {
-    zoningCode = liveZoning.code;
-    zoningDescription = liveZoning.description || `${countyName} County GIS zoning district`;
-    zoningSource = 'county-gis';
+  // Cache the RESOLVED district by parcel so re-running or refining a search is
+  // instant — this matters most for city parcels, whose lookup needs the slower
+  // grounded web fallback. Only successful (non-N/A) resolutions are cached.
+  const zoningCacheKey = `gisfs:zoning:v2:${parcelId !== 'N/A' ? parcelId : `${countyName}:${lat.toFixed(5)}:${lng.toFixed(5)}`}`;
+  const cachedZoning = readZoningCache(zoningCacheKey);
+  if (cachedZoning) {
+    zoningCode = cachedZoning.code;
+    zoningDescription = cachedZoning.description;
+    zoningSource = cachedZoning.source;
+    zoningSourceUrl = cachedZoning.sourceUrl;
   } else {
-    onStageChange?.("Looking up zoning (web search)...");
-    const webZoning = await fetchZoningViaWebSearch(info.siteadd || addressString, countyName, lat, lng);
-    if (webZoning) {
-      zoningCode = webZoning.code;
-      zoningDescription = `${webZoning.description} (web lookup — verify)`;
-      zoningSource = 'web';
-      zoningSourceUrl = webZoning.sourceUrl;
+    const liveZoning = await fetchCountyZoningCode(countyName, lng, lat);
+    if (liveZoning) {
+      zoningCode = liveZoning.code;
+      zoningDescription = liveZoning.description || `${countyName} County GIS zoning district`;
+      zoningSource = 'county-gis';
     } else {
-      // Never show "See map" — the user needs the actual district. We couldn't
-      // pin it automatically here; the report's grounded zoning section verifies
-      // it, and the link points to the authoritative county GIS to read the code.
-      zoningCode = "N/A";
-      zoningDescription = hasCountyZoning(countyName)
-        ? `Not auto-resolved at the parcel point — to be verified against ${countyName} County GIS`
-        : "No published county zoning GIS; web lookup found nothing";
+      onStageChange?.("Looking up zoning (web search)...");
+      const webZoning = await fetchZoningViaWebSearch(info.siteadd || addressString, countyName, lat, lng);
+      if (webZoning) {
+        zoningCode = webZoning.code;
+        zoningDescription = `${webZoning.description} (web lookup — verify)`;
+        zoningSource = 'web';
+        zoningSourceUrl = webZoning.sourceUrl;
+      } else {
+        // Never show "See map" — the user needs the actual district. We couldn't
+        // pin it automatically here; the report's grounded zoning section verifies
+        // it, and the link points to the authoritative county GIS to read the code.
+        zoningCode = "N/A";
+        zoningDescription = hasCountyZoning(countyName)
+          ? `Not auto-resolved at the parcel point — to be verified against ${countyName} County GIS`
+          : "No published county zoning GIS; web lookup found nothing";
+      }
+    }
+    if (zoningCode && zoningCode !== 'N/A') {
+      writeZoningCache(zoningCacheKey, { code: zoningCode, description: zoningDescription, source: zoningSource, sourceUrl: zoningSourceUrl });
     }
   }
   gridics = buildGridics(); // re-derive setback/height estimates from the real district
@@ -3450,15 +3485,19 @@ After the report, answer follow-up questions conversationally from the stored co
       ? `No NWI-mapped wetlands intersect the parcel coordinate (NWI omits some small/forested wetlands; a field delineation is the legal authority). Source: ${wl.sourceUrl}`
       : `NWI-mapped wetlands present at/near the parcel: ${wl.types.join(', ') || 'classification unspecified'}. A jurisdictional delineation is required to confirm extent. Source: ${wl.sourceUrl}`;
 
-  // Live 30-year mortgage rate anchor for the Interest Rate & Financing section.
-  const mortgage = await fetchCurrentMortgageRate().catch(() => null);
+  // Live market anchors for §17/§18. These three feeds are independent, so fetch
+  // them IN PARALLEL (each cached) instead of one-after-another — shaves the
+  // report's setup time with no change to the data used.
+  const [mortgage, mkt, redfin] = await Promise.all([
+    fetchCurrentMortgageRate().catch(() => null),
+    fetchCountyMarketStats(reportData.countyName).catch(() => null),
+    fetchRedfinCountyMarket(reportData.countyName).catch(() => null),
+  ]);
+
   const mortgageLine = mortgage
     ? `30-Year Fixed Mortgage Rate: ${mortgage.rate.toFixed(2)}% as of ${mortgage.date} (Freddie Mac PMMS via FRED, series MORTGAGE30US). USE this as the live anchor for Section 18; confirm the recent rising/falling/steady TREND and the Fed posture via Google Search.`
     : `Live mortgage-rate feed unavailable at search time — research the CURRENT 30-year fixed mortgage rate and its trend via Google Search for Section 18, and cite the source.`;
 
-  // Live COUNTY housing-market anchor (all residential, Realtor.com via FRED) for
-  // the Market Saturation & Absorption section.
-  const mkt = await fetchCountyMarketStats(reportData.countyName).catch(() => null);
   const trendOf = (m?: { value: number; prev3?: number | null; prevYear?: number | null } | null) => {
     if (!m || m.prev3 == null) return '';
     const dir = m.value > m.prev3 ? 'up' : m.value < m.prev3 ? 'down' : 'flat';
@@ -3467,7 +3506,6 @@ After the report, answer follow-up questions conversationally from the stored co
   };
   // Prefer Redfin's per-product-type table (the real §17 anchor); fall back to
   // the FRED all-residential line when the county isn't in the digested JSON.
-  const redfin = await fetchRedfinCountyMarket(reportData.countyName).catch(() => null);
   const redfinTable = redfin ? buildRedfinSaturationTable(reportData.countyName, redfin) : '';
   const marketStatsLine = mkt
     ? `County housing market — ALL RESIDENTIAL (Realtor.com via FRED), ${reportData.countyName} County, as of ${mkt.medianDaysOnMarket?.date || mkt.activeListings?.date || 'recent'}: ` +
