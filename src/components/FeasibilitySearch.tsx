@@ -1620,8 +1620,8 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
 
       // Draw zoning label over the parcel whenever we have a real zoning code —
       // from county GIS, or the web-search fallback (marked "web"). We don't float
-      // a code when none was resolved (N/A or "See map").
-      const hasRealZoning = !!data.zoningSource && data.zoningCode !== 'N/A' && data.zoningCode !== 'See map';
+      // a code when none was resolved (N/A).
+      const hasRealZoning = !!data.zoningSource && data.zoningCode !== 'N/A';
       if (hasRealZoning) {
         const zoningLabelText = data.zoningSource === 'web'
           ? `Zoning: ${data.zoningCode} (web)`

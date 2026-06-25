@@ -277,30 +277,40 @@ export function extractZoning(results: IdentifyResult[]): ResolvedZoning | null 
  * op and returns the real zoning code/description, or null if nothing usable.
  */
 async function identifyZoning(service: ZoningService, lng: number, lat: number): Promise<ResolvedZoning | null> {
-  // Small map extent around the point so identify has a display context.
-  const d = 0.0015;
-  const params = new URLSearchParams({
-    geometry: `${lng},${lat}`,
-    geometryType: "esriGeometryPoint",
-    sr: "4326",
-    tolerance: "3",
-    mapExtent: `${lng - d},${lat - d},${lng + d},${lat + d}`,
-    imageDisplay: "400,400,96",
-    layers: service.layers ? `all:${service.layers.replace(/^show:/, "")}` : "all",
-    returnGeometry: "false",
-    f: "json",
-  });
-
-  try {
-    const res = await fetch(`${service.url}/identify?${params.toString()}`);
-    if (!res.ok) return null;
-    const data = await res.json();
-    if (!Array.isArray(data.results) || data.results.length === 0) return null;
-    return extractZoning(data.results);
-  } catch (e) {
-    console.warn(`Zoning identify failed for ${service.url}:`, e);
-    return null;
+  // Escalating search radius: a tight tolerance first (exact point), then a
+  // wider one to catch points that sit just off the polygon from geocoding
+  // imprecision or a parcel/right-of-way edge — so we resolve the REAL district
+  // instead of giving up and showing "See map". extractZoning still picks the
+  // most specific (smallest-area) polygon among any hits, so widening the radius
+  // recovers near-misses without grabbing a far-away district.
+  const passes: { tol: string; d: number }[] = [
+    { tol: "3", d: 0.0015 },   // ~2.5 m
+    { tol: "10", d: 0.003 },   // ~16 m — recovers slightly-off geocodes
+  ];
+  for (const { tol, d } of passes) {
+    const params = new URLSearchParams({
+      geometry: `${lng},${lat}`,
+      geometryType: "esriGeometryPoint",
+      sr: "4326",
+      tolerance: tol,
+      mapExtent: `${lng - d},${lat - d},${lng + d},${lat + d}`,
+      imageDisplay: "400,400,96",
+      layers: service.layers ? `all:${service.layers.replace(/^show:/, "")}` : "all",
+      returnGeometry: "false",
+      f: "json",
+    });
+    try {
+      const res = await fetch(`${service.url}/identify?${params.toString()}`);
+      if (!res.ok) continue;
+      const data = await res.json();
+      if (!Array.isArray(data.results) || data.results.length === 0) continue;
+      const z = extractZoning(data.results);
+      if (z) return z;
+    } catch (e) {
+      console.warn(`Zoning identify failed for ${service.url}:`, e);
+    }
   }
+  return null;
 }
 
 /**

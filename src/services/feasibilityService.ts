@@ -870,18 +870,20 @@ export async function executeLandAnalysis(
     zoningSource = 'county-gis';
   } else {
     onStageChange?.("Looking up zoning (web search)...");
-    const webZoning = await fetchZoningViaWebSearch(info.siteadd || addressString);
+    const webZoning = await fetchZoningViaWebSearch(info.siteadd || addressString, countyName, lat, lng);
     if (webZoning) {
       zoningCode = webZoning.code;
       zoningDescription = `${webZoning.description} (web lookup — verify)`;
       zoningSource = 'web';
       zoningSourceUrl = webZoning.sourceUrl;
-    } else if (hasCountyZoning(countyName)) {
-      zoningCode = "See map";
-      zoningDescription = `Zoning shown on the map overlay (${countyName} County GIS)`;
     } else {
+      // Never show "See map" — the user needs the actual district. We couldn't
+      // pin it automatically here; the report's grounded zoning section verifies
+      // it, and the link points to the authoritative county GIS to read the code.
       zoningCode = "N/A";
-      zoningDescription = "No published county zoning GIS; web lookup found nothing";
+      zoningDescription = hasCountyZoning(countyName)
+        ? `Not auto-resolved at the parcel point — to be verified against ${countyName} County GIS`
+        : "No published county zoning GIS; web lookup found nothing";
     }
   }
   gridics = buildGridics(); // re-derive setback/height estimates from the real district
@@ -1704,6 +1706,9 @@ async function geocodeAddress(address: string, apiKey: string): Promise<{ lat: n
  */
 export async function fetchZoningViaWebSearch(
   address: string,
+  countyName?: string,
+  lat?: number,
+  lng?: number,
 ): Promise<{ code: string; description: string; sourceUrl?: string } | null> {
   const geminiApiKey = getUserKeys().gemini || "";
   if (!geminiApiKey) {
@@ -1712,44 +1717,55 @@ export async function fetchZoningViaWebSearch(
   }
 
   const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=${geminiApiKey}`;
-  const prompt = `Find the official ZONING DISTRICT for this exact property address: "${address}".
-Search official sources only: the county or municipal zoning map, the local GIS/parcel viewer, or the planning department.
+  const countyLine = countyName ? ` It is in ${countyName} County, North Carolina.` : '';
+  const coordLine = (lat != null && lng != null) ? ` The parcel is at coordinates ${lat.toFixed(6)}, ${lng.toFixed(6)}.` : '';
+  const prompt = `Find the official ZONING DISTRICT for this exact property: "${address}".${countyLine}${coordLine}
+Search official sources: the county/municipal zoning map or ordinance, the local GIS/parcel viewer (look up the parcel and read its zoning attribute), or the planning department. Check whether the parcel is inside a municipality (its city zoning applies) or in the county's jurisdiction (county zoning applies).
 Return ONLY a JSON object inside a markdown code block:
 \`\`\`json
 { "zoningCode": "R-1", "zoningDescription": "Single-Family Residential", "source": "https://..." }
 \`\`\`
-Rules: "zoningCode" must be the actual district code that jurisdiction uses (e.g. R-1, RA, C-2, PUD, MX). If you cannot confirm the zoning from a credible official/government source, return {"zoningCode": null}. Never guess or fabricate a code.`;
+Rules: "zoningCode" must be the actual district code that jurisdiction uses for THIS parcel (e.g. R-1, RA, C-2, PUD, MX, RR). Determine the specific code — do NOT answer "see the map" or "varies". If after a genuine search you truly cannot confirm it from a credible official/government source, return {"zoningCode": null}. Never guess or fabricate a code.`;
 
-  try {
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contents: [{ role: 'user', parts: [{ text: prompt }] }],
-        systemInstruction: {
-          parts: [{ text: "You are a zoning research assistant. Use Google Search to find the official zoning district for a specific address from government/official sources. Only report a code you can support from a credible source; otherwise return null. Never fabricate." }]
-        },
-        tools: [{ google_search: {} }]
-      })
-    });
-    if (!res.ok) return null;
-    const data = await res.json();
-    const text = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
-    const m = text.match(/```json\s*([\s\S]*?)\s*```/) || text.match(/\{[\s\S]*\}/);
-    const jsonStr = m ? (m[1] || m[0]) : '';
-    if (!jsonStr) return null;
-    const obj = JSON.parse(jsonStr);
-    const code = obj?.zoningCode;
-    if (!code || typeof code !== 'string' || code.trim() === '' || code.trim().toLowerCase() === 'null') return null;
-    return {
-      code: code.trim(),
-      description: (typeof obj.zoningDescription === 'string' && obj.zoningDescription.trim()) || 'Zoning (web lookup)',
-      sourceUrl: typeof obj.source === 'string' ? obj.source : undefined,
-    };
-  } catch (e) {
-    console.warn("Web zoning lookup failed:", e);
-    return null;
-  }
+  const attempt = async (): Promise<{ code: string; description: string; sourceUrl?: string } | null> => {
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ role: 'user', parts: [{ text: prompt }] }],
+          systemInstruction: {
+            parts: [{ text: "You are a zoning research assistant. Use Google Search to find the official zoning district code for a specific parcel from government/official sources (county/city GIS, zoning map, ordinance). Report the specific district code; never answer 'see map'. Only report a code you can support from a credible source; otherwise return null. Never fabricate." }]
+          },
+          tools: [{ google_search: {} }]
+        })
+      });
+      if (!res.ok) return null;
+      const data = await res.json();
+      const text = data.candidates?.[0]?.content?.parts?.map((p: any) => p.text).filter(Boolean).join('') || '';
+      const m = text.match(/```json\s*([\s\S]*?)\s*```/) || text.match(/\{[\s\S]*\}/);
+      const jsonStr = m ? (m[1] || m[0]) : '';
+      if (!jsonStr) return null;
+      const obj = JSON.parse(jsonStr.replace(/,\s*([}\]])/g, '$1'));
+      const code = obj?.zoningCode;
+      if (!code || typeof code !== 'string') return null;
+      const c = code.trim();
+      // Reject non-answers so they never reach the report as a "code".
+      if (!c || /^(null|n\/?a|unknown|see\s*map|varies|tbd)$/i.test(c)) return null;
+      return {
+        code: c,
+        description: (typeof obj.zoningDescription === 'string' && obj.zoningDescription.trim()) || 'Zoning (web lookup)',
+        sourceUrl: typeof obj.source === 'string' ? obj.source : undefined,
+      };
+    } catch (e) {
+      console.warn("Web zoning lookup failed:", e);
+      return null;
+    }
+  };
+
+  // One persistent retry — the district exists on official sources, so a single
+  // empty pass shouldn't immediately fall through to "unknown".
+  return (await attempt()) || (await attempt());
 }
 
 /**
@@ -3363,7 +3379,7 @@ You operate as a senior land acquisition analyst, entitlement consultant, and re
 - For topics NOT in the packet — utilities, road access & frontage, schools, market trends, and comparable vacant-land sales — INVESTIGATE with live Google Search and cite the source; if still unconfirmed, label Likely or Unknown.
 - FLOOD & WETLANDS: the packet carries the AUTHORITATIVE FEMA NFHL flood zone and USFWS NWI wetlands result, queried by the parcel's exact coordinate. USE those values verbatim and CITE the provided source links — do NOT guess or contradict them. Only when the packet marks flood or wetlands "unavailable"/"no-coverage" should you say so and direct verification to the FEMA/NWI source link, labeling the status Unknown rather than assuming the site is flood-free or wetland-free.
 - HOA: determine whether the parcel is within a homeowners association; if so report the HOA name, dues, management company, any preferred/featured/approved BUILDER list, and the building requirements, architectural guidelines, and restrictions/covenants (CCRs) — only where publicly available, otherwise label Unknown.
-- ZONING: VERIFY the county-provided zoning code is correct for this exact parcel against the official county/municipal zoning map or ordinance; if the official source disagrees or you cannot confirm it, say so and label Likely/Unknown rather than asserting it.
+- ZONING: state the ACTUAL zoning district code for this exact parcel (e.g. R-1, RA, C-2, PUD, MX). VERIFY the county-provided code against the official county/municipal zoning map, GIS parcel viewer, or ordinance via Google Search. If the provided code is "N/A" or unverified, look it up yourself from the official source and report the real code. NEVER write "See map", "see the zoning map", "varies", or similar — always give the specific district code; only if a genuine official-source search still cannot confirm it, label it Unknown and cite the county GIS link to check.
 - CONSTRUCTION COST: be EXTREMELY ACCURATE and use CURRENT LOCAL costs for THIS address's metro/county found via Google Search across MULTIPLE sources near the address (not one source, never generic national averages), and ANCHOR to the itemized Construction Cost Reference Model below. Research and cite local figures for: per-sqft new single-family build cost; land/lot CLEARING and TREE removal ($/acre — heavier canopy costs more); GRADING/earthwork (more on sloped sites); foundation (crawlspace/slab/basement); WELL drilling ($/ft and typical total) and SEPTIC system install + perc test when no public water/sewer; public water/sewer TAP & impact fees when available; building permits and survey.
 - Buildability from USGS 3DEP (1m) slope: under 15% = Buildable; 15-25% = Requires Special Engineering / increased cost; over 25% = Non-Buildable / high risk.
 
