@@ -1156,6 +1156,7 @@ export interface LlcSkipTrace {
   recentFiling?: string | null;
   notes?: string | null;
   sources?: string[];
+  confidence?: 'high' | 'medium' | 'low' | string | null;
 
   // From NC GIS / county tax records (the reliable backbone — no Cloudflare)
   foundInGIS?: boolean;
@@ -1245,55 +1246,96 @@ export async function skipTraceLLCViaGIS(name: string): Promise<{
   };
 }
 
-/** Gemini + Google-Search grounded lookup of the SOS registration (agent, officials). */
-async function skipTraceLLCViaGemini(query: string, state: string): Promise<LlcSkipTrace | null> {
+/**
+ * Gemini + Google-Search grounded lookup of the SOS registration (registered
+ * agent + managers/members). The live NC SOS site is Cloudflare-blocked and not
+ * crawlable, but Google has INDEXED the public-records directories that republish
+ * it — so grounded search reads those snippets without hitting any captcha. When
+ * a GIS anchor is supplied (confirmed name + counties from the tax layer), the
+ * model is told the entity definitely exists, which stops false "not found"
+ * results and disambiguates similarly named entities. Persistent: it retries
+ * more aggressively if the first pass finds no agent/officials.
+ */
+async function skipTraceLLCViaGemini(
+  query: string,
+  state: string,
+  anchor?: { canonicalName?: string | null; counties?: string[] }
+): Promise<LlcSkipTrace | null> {
   const geminiApiKey = getUserKeys().gemini || '';
   if (!geminiApiKey) return null;
   const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=${geminiApiKey}`;
-  const prompt = `Skip-trace this ${state} business entity / LLC: "${query}".
-Use Google Search over the ${state} Secretary of State business registry (in NC: sosnc.gov), OpenCorporates, Bizapedia, and official public records. Prioritize the Secretary of State record.
+
+  const name = anchor?.canonicalName || query;
+  const registry = state === 'NC' ? 'the NC Secretary of State (sosnc.gov)' : `the ${state} Secretary of State business registry`;
+  const anchorLine = anchor?.canonicalName
+    ? `CONFIRMED REAL ENTITY: county tax records list "${anchor.canonicalName}" as the owner of real property${anchor.counties?.length ? ` in ${anchor.counties.join(', ')} County, ${state}` : ''}. Do NOT report that it cannot be found — it exists. Use this to pick the right entity among similar names.`
+    : '';
+
+  const buildPrompt = (aggressive: boolean) => `Find the ${state} Secretary of State registration for this LLC / business entity: "${name}".
+${anchorLine}
+PRIMARY GOAL: the REGISTERED AGENT and the COMPANY OFFICIALS (managers / members / officers) — the real people behind the LLC. That is the whole point of this lookup.
+Use Google Search. The live SoS site is usually un-crawlable, so rely on the INDEXED public-records directories that republish it: ${registry} result snippets, bizapedia.com, corporationwiki.com, buzzfile.com, and news/legal filings. Do NOT use or cite OpenCorporates.${aggressive ? `
+Search HARD with several queries and read the directory pages, e.g.:
+  • "${name}" registered agent ${state}
+  • "${name}" manager member ${state === 'NC' ? 'North Carolina' : state}
+  • "${name}" bizapedia
+  • "${name}" corporationwiki` : ''}
 Return ONLY a JSON object inside a \`\`\`json code block:
 \`\`\`json
 {
   "entityName": "exact registered name",
-  "sosId": "state SOSID / entity number",
-  "status": "Active / Current-Active / Dissolved / Admin Dissolved / ...",
-  "entityType": "Limited Liability Company / Corporation / ...",
-  "formationDate": "YYYY-MM-DD",
-  "registeredAgentName": "",
-  "registeredAgentAddress": "",
-  "principalOffice": "",
-  "mailingAddress": "",
+  "sosId": "state SOSID / entity number | null",
+  "status": "Active / Current-Active / Dissolved / Admin Dissolved | null",
+  "entityType": "Limited Liability Company / Corporation | null",
+  "formationDate": "YYYY-MM-DD | null",
+  "registeredAgentName": "| null",
+  "registeredAgentAddress": "| null",
+  "principalOffice": "| null",
+  "mailingAddress": "| null",
   "officials": [{ "name": "", "title": "Manager / Member / Officer / President", "address": "" }],
-  "recentFiling": "most recent annual report or amendment with its date",
+  "recentFiling": "most recent annual report or amendment + date | null",
+  "confidence": "high | medium | low",
   "sources": ["https://...", "https://..."]
 }
 \`\`\`
-Rules: the REGISTERED AGENT and the OFFICIALS (managers/members) are the skip-trace contacts — return them when available. Only report values you can support from a credible source and include those source URLs. NEVER invent names, addresses, IDs, or dates — use null for anything you cannot confirm. If the entity cannot be found, return {"entityName": null}.`;
-  try {
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contents: [{ role: 'user', parts: [{ text: prompt }] }],
-        systemInstruction: { parts: [{ text: 'You are a corporate-records skip-tracer. Use Google Search to find the Secretary of State registration and public records for a business entity. Report only source-supported facts; never fabricate. Return the requested JSON only.' }] },
-        tools: [{ google_search: {} }],
-      }),
-    });
-    if (!res.ok) return null;
-    const data = await res.json();
-    const text = data.candidates?.[0]?.content?.parts?.map((p: any) => p.text).filter(Boolean).join('') || '';
-    const m = text.match(/```json\s*([\s\S]*?)\s*```/) || text.match(/\{[\s\S]*\}/);
-    const jsonStr = m ? (m[1] || m[0]) : '';
-    if (!jsonStr) return null;
-    const obj = JSON.parse(jsonStr.replace(/,\s*([}\]])/g, '$1')) as LlcSkipTrace;
-    if (!obj || !obj.entityName) return null;
-    if (!Array.isArray(obj.officials)) obj.officials = [];
-    if (!Array.isArray(obj.sources)) obj.sources = [];
-    return obj;
-  } catch {
-    return null;
+Rules: NEVER invent names, addresses, IDs, or dates — use null for anything no source supports, and list the source URLs you actually used. Set "confidence" by how directly a credible source states the agent/officials. Do your best to fill registeredAgentName and at least one official; leave them null only if genuinely unavailable.`;
+
+  const callOnce = async (aggressive: boolean): Promise<LlcSkipTrace | null> => {
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ role: 'user', parts: [{ text: buildPrompt(aggressive) }] }],
+          systemInstruction: { parts: [{ text: 'You are a meticulous corporate-records skip-tracer. You find the registered agent and the managers/members behind an LLC from the Secretary of State registry and indexed public-records directories. Report only source-supported facts; never fabricate. Return the requested JSON only.' }] },
+          tools: [{ google_search: {} }],
+        }),
+      });
+      if (!res.ok) return null;
+      const data = await res.json();
+      const text = data.candidates?.[0]?.content?.parts?.map((p: any) => p.text).filter(Boolean).join('') || '';
+      const m = text.match(/```json\s*([\s\S]*?)\s*```/) || text.match(/\{[\s\S]*\}/);
+      const jsonStr = m ? (m[1] || m[0]) : '';
+      if (!jsonStr) return null;
+      const obj = JSON.parse(jsonStr.replace(/,\s*([}\]])/g, '$1')) as LlcSkipTrace;
+      if (!obj) return null;
+      if (!Array.isArray(obj.officials)) obj.officials = [];
+      if (!Array.isArray(obj.sources)) obj.sources = [];
+      return obj;
+    } catch {
+      return null;
+    }
+  };
+
+  const hasContacts = (o: LlcSkipTrace | null) => !!(o && (o.registeredAgentName || (o.officials && o.officials.length)));
+
+  let out = await callOnce(false);
+  if (!hasContacts(out)) {
+    const retry = await callOnce(true);
+    if (hasContacts(retry) || (retry && !out)) out = retry;
   }
+  if (out && !out.entityName) out.entityName = anchor?.canonicalName || query.trim();
+  return out;
 }
 
 /**
@@ -1305,10 +1347,14 @@ Rules: the REGISTERED AGENT and the OFFICIALS (managers/members) are the skip-tr
 export async function skipTraceLLC(query: string, state = 'NC'): Promise<LlcSkipTrace | null> {
   if (!getUserKeys().gemini) throw new Error('Gemini API key required (set it in Account Settings).');
 
-  const [gis, ai] = await Promise.all([
-    state === 'NC' ? skipTraceLLCViaGIS(query).catch(() => null) : Promise.resolve(null),
-    skipTraceLLCViaGemini(query, state).catch(() => null),
-  ]);
+  // GIS first (fast, reliable) so it can anchor the AI lookup — the confirmed
+  // owner name + counties stop false "not found" results and disambiguate.
+  const gis = state === 'NC' ? await skipTraceLLCViaGIS(query).catch(() => null) : null;
+  const ai = await skipTraceLLCViaGemini(
+    query,
+    state,
+    gis ? { canonicalName: gis.canonicalName, counties: gis.counties } : undefined,
+  ).catch(() => null);
 
   if (!gis && !ai) return null;
 
@@ -1325,6 +1371,7 @@ export async function skipTraceLLC(query: string, state = 'NC'): Promise<LlcSkip
     officials: ai?.officials ?? [],
     recentFiling: ai?.recentFiling ?? null,
     sources: ai?.sources ?? [],
+    confidence: ai?.confidence ?? null,
     // GIS backbone
     foundInGIS: !!gis,
     taxMailingAddress: gis?.mailingAddress ?? null,

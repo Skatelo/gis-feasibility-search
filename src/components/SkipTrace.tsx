@@ -90,9 +90,9 @@ export function SkipTrace() {
         <p>
           Find the people behind a business entity. The backbone is <strong>NC county tax records (GIS)</strong> —
           it returns the LLC's <strong>mailing address</strong> (where tax bills go — the best skip‑trace contact)
-          and <strong>every NC property it owns</strong>. <strong>Gemini</strong> then adds the Secretary of State
-          <strong> registered agent</strong> and <strong>managers/members</strong> when available. Great for the LLC
-          owners in your Buyer List.
+          and <strong>every NC property it owns</strong>. That confirmed identity then anchors an AI search of
+          <strong> indexed public records</strong> (Secretary of State snippets, Bizapedia, CorporationWiki) for the
+          <strong> registered agent</strong> and <strong>managers/members</strong>. Great for the LLC owners in your Buyer List.
         </p>
       </div>
 
@@ -179,10 +179,13 @@ export function SkipTrace() {
             </>
           )}
 
-          {/* SOS registration (AI from public records) */}
-          {(result.registeredAgentName || result.registeredAgentAddress || result.principalOffice || result.mailingAddress || (result.officials && result.officials.length > 0)) && (
+          {/* SOS registration — registered agent & members (AI from indexed public records) */}
+          {(result.registeredAgentName || result.registeredAgentAddress || result.principalOffice || result.mailingAddress || (result.officials && result.officials.length > 0)) ? (
             <>
-              <div className="st-section-title"><ShieldCheck size={14} /> Secretary of State record (registered agent &amp; officials)</div>
+              <div className="st-section-title">
+                <ShieldCheck size={14} /> Secretary of State record (registered agent &amp; members)
+                {result.confidence && <span className={`st-conf st-conf-${String(result.confidence).toLowerCase()}`}>{result.confidence} confidence</span>}
+              </div>
               <div className="st-grid">
                 <Field icon={<User size={13} />} label="Registered agent" value={result.registeredAgentName} />
                 <Field icon={<MapPin size={13} />} label="Agent address" value={result.registeredAgentAddress} />
@@ -200,6 +203,11 @@ export function SkipTrace() {
                 </div>
               )}
             </>
+          ) : (
+            <div className="st-agent-missing">
+              <AlertCircle size={14} />
+              <span>Couldn't confirm the <strong>registered agent / members</strong> in indexed public records for this entity. Open the <strong>NC SOS</strong> link below — it clears the Cloudflare check automatically in your browser and shows the agent &amp; company officials directly.</span>
+            </div>
           )}
 
           {result.recentFiling && (

@@ -590,3 +590,18 @@
 .st-prop-addr { font-weight: 600; color: var(--text-primary); word-break: break-word; }
 .st-prop-meta { color: var(--text-muted); white-space: nowrap; flex-shrink: 0; font-size: 0.78rem; }
 .st-prop-more { font-size: 0.76rem; color: var(--text-muted); padding: 4px 2px; }
+
+/* Skip Trace — AI confidence badge + missing-agent note */
+.st-conf {
+  margin-left: auto; font-size: 0.66rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em;
+  padding: 2px 8px; border-radius: 999px;
+}
+.st-conf-high { background: var(--success-bg); color: var(--success); border: 1px solid var(--success-border); }
+.st-conf-medium { background: #fef3c7; color: #b45309; border: 1px solid #fcd34d; }
+.st-conf-low { background: var(--bg-main); color: var(--text-muted); border: 1px solid var(--bg-card-border); }
+.st-agent-missing {
+  display: flex; gap: 9px; align-items: flex-start;
+  background: var(--bg-main); border: 1px dashed var(--bg-card-border); border-radius: var(--radius-md);
+  padding: 11px 13px; font-size: 0.84rem; color: var(--text-secondary); line-height: 1.45;
+}
+.st-agent-missing > svg { color: var(--text-muted); flex-shrink: 0; margin-top: 2px; }
