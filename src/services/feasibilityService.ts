@@ -3254,7 +3254,12 @@ async function webSearchViaGemini(query: string, geminiKey: string): Promise<str
 async function fetchDeepSeekDraft(systemContent: string, userContent: string, key: string, geminiKey?: string): Promise<string | null> {
   if (!key) return null;
 
-  const webEnabled = !!geminiKey;
+  // On phones/tablets, skip DeepSeek's own web searches entirely: they add extra
+  // grounded fetches that compete with the report's Gemini calls over a cellular
+  // link (a prime cause of "Load failed"). DeepSeek still drafts from the data
+  // packet; desktop keeps the full live-search pass.
+  const mobile = isMobileDevice();
+  const webEnabled = !!geminiKey && !mobile;
   const tools = webEnabled ? [{
     type: 'function',
     function: {
@@ -3269,12 +3274,10 @@ async function fetchDeepSeekDraft(systemContent: string, userContent: string, ke
     { role: 'user', content: webEnabled ? `${userContent}\n\nYou have a web_search tool — USE IT to verify every figure that is not in the data packet (current mortgage rate, local construction costs, market inventory/DOM/months-of-supply by product type, utilities, recent rezoning cases) before stating it. Cite the source URLs it returns.` : userContent },
   ];
 
-  // Lighten the workload on phones/tablets: fewer mid-draft searches and shorter
-  // loops keep the total request time down so a cellular link is less likely to
-  // drop it, while desktop gets the fuller research pass.
-  const mobile = isMobileDevice();
-  const MAX_ROUNDS = mobile ? 3 : 4;
-  const MAX_SEARCHES = mobile ? 2 : 4; // keep the grounding burst modest so it doesn't starve the report's own Gemini calls
+  // Desktop only (webEnabled is false on mobile): keep the grounding burst modest
+  // so it doesn't starve the report's own Gemini calls.
+  const MAX_ROUNDS = 4;
+  const MAX_SEARCHES = 4;
   let searches = 0;
 
   for (let round = 0; round < MAX_ROUNDS; round++) {
@@ -3557,6 +3560,7 @@ ${reportData.comps && reportData.comps.length > 0
   //      caller uses the returned text as the final report, so a partial stream
   //      is cleanly replaced rather than erroring out.
   const streamResilient = async (primaryBody: any, fallbackBody?: any): Promise<{ text: string; sources?: ChatSource[] }> => {
+    // 1) Preferred: progressive streaming (with a pre-token retry + fallback body).
     try {
       return await streamGeminiSSE(streamURL, primaryBody, guardedToken);
     } catch (e) {
@@ -3571,9 +3575,25 @@ ${reportData.comps && reportData.comps.length > 0
           }
         }
       }
-      // Final, most robust path: one non-streaming request for the full report.
-      console.warn('Falling back to non-streaming generation (mobile-safe).');
-      return await geminiGenerateWithSources(nonStreamURL, fallbackBody || primaryBody);
+    }
+    const body = fallbackBody || primaryBody;
+    // 2) Non-streaming with grounding — one short-lived request (mobile-safe).
+    try {
+      return await geminiGenerateWithSources(nonStreamURL, body);
+    } catch (e4) {
+      console.warn('Non-streaming (grounded) failed — retrying WITHOUT web grounding:', e4);
+    }
+    // 3) Last resort: non-streaming with NO google_search tool. Grounding has the
+    //    tightest quota and is the most fragile call on mobile (extra concurrent
+    //    connections); a plain synthesis from the provided data packet + drafts
+    //    can't hit those limits, so the report still generates whenever the key
+    //    itself is valid. Loses live citations but never fails the whole report.
+    const { tools: _drop, ...noGrounding } = body;
+    try {
+      return await geminiGenerateWithSources(nonStreamURL, noGrounding);
+    } catch (e5) {
+      const detail = e5 instanceof Error ? e5.message : String(e5);
+      throw new Error(`The report could not be generated after several retries (last error: ${detail}). Please check your internet connection and that your Gemini API key is valid with remaining quota, then try again.`);
     }
   };
 
