@@ -3187,22 +3187,32 @@ async function postDeepSeekOnce(body: string, key: string): Promise<any | null> 
  *  concise factual brief with source URLs — this is what gives DeepSeek real web
  *  access inside the fusion. Never throws; returns a short status string on error. */
 async function webSearchViaGemini(query: string, geminiKey: string): Promise<string> {
-  try {
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=${geminiKey}`;
-    const body = JSON.stringify({
-      contents: [{ role: 'user', parts: [{ text: `Search the live web and report the most CURRENT, specific facts for: "${query}". Give concrete numbers/dates and a source URL for each finding. Be concise — a few bullet lines, no preamble.` }] }],
-      tools: [{ google_search: {} }],
-    });
-    const res = await fetchWithTimeout(url, 30000, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body });
-    if (!res.ok) return `(web search unavailable: HTTP ${res.status})`;
-    const data = await res.json();
-    const text = data.candidates?.[0]?.content?.parts?.map((p: any) => p.text || '').join('') || '';
-    const urls = (data.candidates?.[0]?.groundingMetadata?.groundingChunks || [])
-      .map((c: any) => c?.web?.uri).filter(Boolean).slice(0, 5);
-    return (text.trim() || '(no results found)') + (urls.length ? `\nSources: ${urls.join(' | ')}` : '');
-  } catch {
-    return '(web search error)';
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=${geminiKey}`;
+  const body = JSON.stringify({
+    contents: [{ role: 'user', parts: [{ text: `Search the live web and report the most CURRENT, specific facts for: "${query}". Give concrete numbers/dates and a source URL for each finding. Be concise — a few bullet lines, no preamble.` }] }],
+    tools: [{ google_search: {} }],
+  });
+  // Retry transient rate-limit / server errors (the search burst can briefly trip
+  // Gemini's per-minute grounding quota); never throw — the model reasons without
+  // it on failure.
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const res = await fetchWithTimeout(url, 30000, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body });
+      if (res.ok) {
+        const data = await res.json();
+        const text = data.candidates?.[0]?.content?.parts?.map((p: any) => p.text || '').join('') || '';
+        const urls = (data.candidates?.[0]?.groundingMetadata?.groundingChunks || [])
+          .map((c: any) => c?.web?.uri).filter(Boolean).slice(0, 5);
+        return (text.trim() || '(no results found)') + (urls.length ? `\nSources: ${urls.join(' | ')}` : '');
+      }
+      if ((res.status === 429 || res.status >= 500) && attempt < 2) { await new Promise((r) => setTimeout(r, 1200 * (attempt + 1))); continue; }
+      return `(web search unavailable: HTTP ${res.status})`;
+    } catch {
+      if (attempt < 2) { await new Promise((r) => setTimeout(r, 1000)); continue; }
+      return '(web search error)';
+    }
   }
+  return '(web search error)';
 }
 
 /** DeepSeek V4 Pro draft (OpenAI-compatible). When a Gemini key is supplied, DeepSeek
@@ -3228,7 +3238,7 @@ async function fetchDeepSeekDraft(systemContent: string, userContent: string, ke
   ];
 
   const MAX_ROUNDS = 4;
-  const MAX_SEARCHES = 6;
+  const MAX_SEARCHES = 4; // keep the grounding burst modest so it doesn't starve the report's own Gemini calls
   let searches = 0;
 
   for (let round = 0; round < MAX_ROUNDS; round++) {
@@ -3491,16 +3501,47 @@ ${reportData.comps && reportData.comps.length > 0
   const deepSeekKey = getDeepSeekKey();
   const lastUser = [...messages].reverse().find((m) => m.role === 'user')?.content || '';
 
+  const streamURL = `${GEN_BASE}:streamGenerateContent?alt=sse&key=${apiKey}`;
+
+  // Track whether any token reached the UI: a stream that fails AFTER emitting
+  // can't be cleanly retried (it would duplicate partial text into the report),
+  // but the common failure (a non-OK response before any token) can.
+  let emitted = false;
+  const guardedToken = onToken ? (c: string) => { emitted = true; onToken(c); } : onToken;
+
+  // Resilient stream: try the primary body; on a PRE-token failure retry once,
+  // then fall back to a simpler body — so a transient network/rate hiccup (or a
+  // failed fusion-judge call) degrades instead of failing the whole report.
+  const streamResilient = async (primaryBody: any, fallbackBody?: any): Promise<{ text: string; sources?: ChatSource[] }> => {
+    try {
+      return await streamGeminiSSE(streamURL, primaryBody, guardedToken);
+    } catch (e) {
+      if (emitted) throw e;
+      console.warn('Report stream failed — retrying once:', e);
+      await new Promise((r) => setTimeout(r, 1500));
+      try {
+        return await streamGeminiSSE(streamURL, primaryBody, guardedToken);
+      } catch (e2) {
+        if (emitted || !fallbackBody) throw e2;
+        console.warn('Retry failed — falling back to single-model stream:', e2);
+        return await streamGeminiSSE(streamURL, fallbackBody, guardedToken);
+      }
+    }
+  };
+
   if (deepSeekKey && lastUser) {
     const [gDraft, dDraft] = await Promise.all([
       geminiGenerateText(`${GEN_BASE}:generateContent?key=${apiKey}`, baseBody).catch((e) => { console.warn('Gemini draft failed:', e); return ''; }),
-      fetchDeepSeekDraft(`${systemPrompt}\n\n# PROVIDED DATA PACKET (verified evidence)\n${reportContext}\n\n# YOUR ROLE\nProvide a substantive but CONCISE expert analytical draft — your key findings, figures, and risks per topic (zoning, REZONING/UPZONING upside, SUBDIVISION/lot-split potential, HOA/restrictions, buildability, flood, utilities, MARKET SATURATION & absorption by product type — single-family/townhome/condo/multifamily inventory, DOM, months-of-supply — the INTEREST-RATE environment and its demand effect, LOCAL itemized construction cost anchored to the Construction Cost Reference Model, and DEVELOPER ECONOMICS: ARV, residual land value = ARV − construction − site adders (trees/slope/well+septic) − 20%-of-ARV developer profit, cross-checked with the ~20%-of-ARV lot rule). A lead analyst synthesizes the final structured report from your input, so you need not format every numbered section.`, lastUser, deepSeekKey, apiKey),
+      fetchDeepSeekDraft(`${systemPrompt}\n\n# PROVIDED DATA PACKET (verified evidence)\n${reportContext}\n\n# YOUR ROLE\nProvide a substantive but CONCISE expert analytical draft — your key findings, figures, and risks per topic (zoning, REZONING/UPZONING upside, SUBDIVISION/lot-split potential, HOA/restrictions, buildability, flood, utilities, MARKET SATURATION & absorption by product type — single-family/townhome/condo/multifamily inventory, DOM, months-of-supply — the INTEREST-RATE environment and its demand effect, LOCAL itemized construction cost anchored to the Construction Cost Reference Model, and DEVELOPER ECONOMICS: ARV, residual land value = ARV − construction − site adders (trees/slope/well+septic) − 20%-of-ARV developer profit, cross-checked with the ~20%-of-ARV lot rule). A lead analyst synthesizes the final structured report from your input, so you need not format every numbered section.`, lastUser, deepSeekKey, apiKey).catch((e) => { console.warn('DeepSeek draft failed:', e); return null; }),
     ]);
+    // If BOTH drafts failed, there's nothing to fuse — stream the base report.
+    if (!gDraft && !dDraft) return await streamResilient(baseBody);
     const judgeInstruction = `Two independent senior analysts each produced the DRAFT below for the SAME task. Acting as the JUDGE, synthesize the single best response that fully follows the Operating Standards:\n- Merge the strongest, most evidence-grounded content from both drafts.\n- Resolve any conflict in favor of cited/verified evidence; where they disagree and neither is verifiable, label it Likely or Unknown.\n- Keep the required section structure and the Verified / Likely / Unknown labels.\n- Output ONLY the final report. Do NOT mention drafts, judging, or model names.\n\n===== DRAFT A (Google Gemini 3.5 Flash) =====\n${gDraft || '(unavailable)'}\n\n===== DRAFT B (DeepSeek V4 Pro) =====\n${dDraft || '(DeepSeek draft unavailable — rely on Draft A and the data packet)'}`;
     const judgeBody = { ...baseBody, contents: [...contents, { role: 'user', parts: [{ text: judgeInstruction }] }] };
-    return await streamGeminiSSE(`${GEN_BASE}:streamGenerateContent?alt=sse&key=${apiKey}`, judgeBody, onToken);
+    // Judge first; if it fails before emitting, fall back to the plain base stream.
+    return await streamResilient(judgeBody, baseBody);
   }
 
-  return await streamGeminiSSE(`${GEN_BASE}:streamGenerateContent?alt=sse&key=${apiKey}`, baseBody, onToken);
+  return await streamResilient(baseBody);
 }
 // EOF
