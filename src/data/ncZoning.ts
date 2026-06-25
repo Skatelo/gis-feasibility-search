@@ -284,10 +284,12 @@ async function identifyZoning(service: ZoningService, lng: number, lat: number):
   // most specific (smallest-area) polygon among any hits, so widening the radius
   // recovers near-misses without grabbing a far-away district.
   const passes: { tol: string; d: number }[] = [
-    { tol: "3", d: 0.0015 },   // ~2.5 m
+    { tol: "3", d: 0.0015 },   // ~2.5 m — exact point
     { tol: "10", d: 0.003 },   // ~16 m — recovers slightly-off geocodes
   ];
-  for (const { tol, d } of passes) {
+  // Fire BOTH passes concurrently (one round-trip, not two) and prefer the tight
+  // pass's result — so recovering a near-edge point costs no extra wait.
+  const results = await Promise.all(passes.map(({ tol, d }) => {
     const params = new URLSearchParams({
       geometry: `${lng},${lat}`,
       geometryType: "esriGeometryPoint",
@@ -299,18 +301,12 @@ async function identifyZoning(service: ZoningService, lng: number, lat: number):
       returnGeometry: "false",
       f: "json",
     });
-    try {
-      const res = await fetch(`${service.url}/identify?${params.toString()}`);
-      if (!res.ok) continue;
-      const data = await res.json();
-      if (!Array.isArray(data.results) || data.results.length === 0) continue;
-      const z = extractZoning(data.results);
-      if (z) return z;
-    } catch (e) {
-      console.warn(`Zoning identify failed for ${service.url}:`, e);
-    }
-  }
-  return null;
+    return fetch(`${service.url}/identify?${params.toString()}`)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => (Array.isArray(data?.results) && data.results.length ? extractZoning(data.results) : null))
+      .catch((e) => { console.warn(`Zoning identify failed for ${service.url}:`, e); return null; });
+  }));
+  return results.find((z) => z) || null; // index 0 (tight) wins when both hit
 }
 
 /**

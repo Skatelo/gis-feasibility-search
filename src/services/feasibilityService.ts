@@ -1798,9 +1798,10 @@ Rules: "zoningCode" must be the actual district code that jurisdiction uses for 
     }
   };
 
-  // One persistent retry — the district exists on official sources, so a single
-  // empty pass shouldn't immediately fall through to "unknown".
-  return (await attempt()) || (await attempt());
+  // Single attempt (no retry) to keep the lookup fast — the strong prompt
+  // resolves it in one pass for the common case, the result is cached for next
+  // time, and the report's grounded zoning section is the backstop if it misses.
+  return await attempt();
 }
 
 /**
