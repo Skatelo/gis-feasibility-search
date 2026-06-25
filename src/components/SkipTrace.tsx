@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react';
 import {
   Fingerprint, Search, Loader2, AlertCircle, Building2, User, MapPin, Landmark,
-  ExternalLink, Copy, Check, FileText, Users, ShieldCheck,
+  ExternalLink, Copy, Check, FileText, ShieldCheck, Mail, Home, Layers,
 } from 'lucide-react';
 import { skipTraceLLC } from '../services/feasibilityService';
 import type { LlcSkipTrace } from '../services/feasibilityService';
@@ -88,11 +88,11 @@ export function SkipTrace() {
         <div className="finder-hero-badge"><Fingerprint size={14} /> LLC Skip Trace</div>
         <h2>Skip Trace an LLC</h2>
         <p>
-          Find the people behind a business entity — the <strong>registered agent</strong>, <strong>principal office</strong>,
-          and the <strong>members/managers</strong> — from the Secretary of State registry and public records.
-          Great for the LLC owners surfaced in your Buyer List. Results are AI‑gathered from{' '}
-          <strong>Google‑grounded public records</strong> with cited sources (the live NC SOS search is
-          Cloudflare‑protected, so this reads indexed records instead).
+          Find the people behind a business entity. The backbone is <strong>NC county tax records (GIS)</strong> —
+          it returns the LLC's <strong>mailing address</strong> (where tax bills go — the best skip‑trace contact)
+          and <strong>every NC property it owns</strong>. <strong>Gemini</strong> then adds the Secretary of State
+          <strong> registered agent</strong> and <strong>managers/members</strong> when available. Great for the LLC
+          owners in your Buyer List.
         </p>
       </div>
 
@@ -147,26 +147,58 @@ export function SkipTrace() {
             {result.status && <span className={`st-status st-${statusTone(result.status)}`}>{result.status}</span>}
           </div>
 
-          {/* The skip-trace contacts */}
-          <div className="st-section-title"><ShieldCheck size={14} /> Skip-trace contacts</div>
-          <div className="st-grid">
-            <Field icon={<User size={13} />} label="Registered agent" value={result.registeredAgentName} />
-            <Field icon={<MapPin size={13} />} label="Agent address" value={result.registeredAgentAddress} />
-            <Field icon={<Landmark size={13} />} label="Principal office" value={result.principalOffice} />
-            <Field icon={<MapPin size={13} />} label="Mailing address" value={result.mailingAddress} />
-          </div>
-
-          {result.officials && result.officials.length > 0 && (
+          {/* County tax records (NC GIS) — the reliable backbone */}
+          {result.foundInGIS && (
             <>
-              <div className="st-section-title"><Users size={14} /> Officials — managers / members (the owners)</div>
-              <div className="st-officials">
-                {result.officials.map((o, i) => (
-                  <div key={i} className="st-official">
-                    <span className="st-official-name">{o.name}{o.title && <span className="st-official-title">{o.title}</span>}</span>
-                    {o.address && <span className="st-official-addr">{o.address}<CopyBtn text={o.address} /></span>}
+              <div className="st-section-title"><Layers size={14} /> County tax records (NC GIS) — confirmed owner</div>
+              {result.taxMailingAddress && (
+                <div className="st-mail-hero">
+                  <Mail size={16} />
+                  <div>
+                    <div className="st-mail-label">Owner mailing address — where county tax bills go (best skip-trace contact)</div>
+                    <div className="st-mail-value">{result.taxMailingAddress}<CopyBtn text={result.taxMailingAddress} /></div>
                   </div>
-                ))}
+                </div>
+              )}
+              <div className="st-stats">
+                <span><Home size={13} /> <strong>{result.propertyCount?.toLocaleString()}{result.propertyCountCapped ? '+' : ''}</strong> NC properties</span>
+                {result.countiesOwned && result.countiesOwned.length > 0 && <span><MapPin size={13} /> {result.countiesOwned.length} {result.countiesOwned.length === 1 ? 'county' : 'counties'}: {result.countiesOwned.join(', ')}</span>}
+                {!!result.totalAssessedValue && <span><Building2 size={13} /> ${result.totalAssessedValue.toLocaleString()} assessed</span>}
               </div>
+              {result.properties && result.properties.length > 0 && (
+                <div className="st-props">
+                  {result.properties.slice(0, 14).map((p, i) => (
+                    <div key={i} className="st-prop">
+                      <span className="st-prop-addr">{p.address}</span>
+                      <span className="st-prop-meta">{p.county}{p.value > 0 ? ` · $${p.value.toLocaleString()}` : ''}</span>
+                    </div>
+                  ))}
+                  {result.properties.length > 14 && <div className="st-prop-more">+ {(result.propertyCount || result.properties.length) - 14} more {result.propertyCountCapped ? '(showing top 14 by value)' : ''}</div>}
+                </div>
+              )}
+            </>
+          )}
+
+          {/* SOS registration (AI from public records) */}
+          {(result.registeredAgentName || result.registeredAgentAddress || result.principalOffice || result.mailingAddress || (result.officials && result.officials.length > 0)) && (
+            <>
+              <div className="st-section-title"><ShieldCheck size={14} /> Secretary of State record (registered agent &amp; officials)</div>
+              <div className="st-grid">
+                <Field icon={<User size={13} />} label="Registered agent" value={result.registeredAgentName} />
+                <Field icon={<MapPin size={13} />} label="Agent address" value={result.registeredAgentAddress} />
+                <Field icon={<Landmark size={13} />} label="Principal office" value={result.principalOffice} />
+                <Field icon={<MapPin size={13} />} label="SOS mailing address" value={result.mailingAddress} />
+              </div>
+              {result.officials && result.officials.length > 0 && (
+                <div className="st-officials">
+                  {result.officials.map((o, i) => (
+                    <div key={i} className="st-official">
+                      <span className="st-official-name">{o.name}{o.title && <span className="st-official-title">{o.title}</span>}</span>
+                      {o.address && <span className="st-official-addr">{o.address}<CopyBtn text={o.address} /></span>}
+                    </div>
+                  ))}
+                </div>
+              )}
             </>
           )}
 

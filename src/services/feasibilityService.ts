@@ -1140,6 +1140,8 @@ export function buildRedfinSaturationTable(
   ].join('\n');
 }
 
+export interface LlcProperty { address: string; county: string; value: number; saleEpoch?: number; }
+
 export interface LlcSkipTrace {
   entityName: string | null;
   sosId?: string | null;
@@ -1154,20 +1156,99 @@ export interface LlcSkipTrace {
   recentFiling?: string | null;
   notes?: string | null;
   sources?: string[];
+
+  // From NC GIS / county tax records (the reliable backbone — no Cloudflare)
+  foundInGIS?: boolean;
+  taxMailingAddress?: string | null;
+  properties?: LlcProperty[];
+  propertyCount?: number;
+  propertyCountCapped?: boolean;
+  countiesOwned?: string[];
+  totalAssessedValue?: number;
 }
 
 /**
- * Skip-trace an LLC / business entity (registered agent, principal office, and
- * the members/managers behind it) using Gemini with Google Search grounding over
- * the NC Secretary of State registry and public records. The live NC SOS search
- * is Cloudflare-protected, so direct scraping needs paid proxies — this pulls the
- * same registration data from indexed records instead, with cited sources, and
- * never fabricates: unknown fields come back null.
+ * Look an entity up in the NC statewide parcel/tax layer by owner name. Returns
+ * the LLC's MAILING address (where the county sends tax bills — the real
+ * skip-trace contact) and every NC property it owns. Always available (no
+ * Cloudflare), so this is the backbone of the skip trace.
  */
-export async function skipTraceLLC(query: string, state = 'NC'): Promise<LlcSkipTrace | null> {
-  const geminiApiKey = getUserKeys().gemini || '';
-  if (!geminiApiKey) throw new Error('Gemini API key required (set it in Account Settings).');
+export async function skipTraceLLCViaGIS(name: string): Promise<{
+  canonicalName: string; mailingAddress: string | null; properties: LlcProperty[];
+  propertyCount: number; capped: boolean; counties: string[]; totalAssessed: number; mostRecentSaleEpoch?: number;
+} | null> {
+  // Owner names in the layer are stored UPPERCASE, so we uppercase the input and
+  // skip the per-row UPPER() function and any server-side sort — this keeps the
+  // statewide owner scan as cheap as possible (it's the kind of heavy query the
+  // GIS WAF throttles, so cheaper = less likely to be blocked; we sort by value
+  // on the client below).
+  const clean = name.trim().toUpperCase().replace(/'/g, "''");
+  if (clean.length < 3) return null;
+  const where = `ownname LIKE '%${clean}%'`;
+  const url = `${NC_PARCEL_ENGINE}?where=${encodeURIComponent(where)}` +
+    `&outFields=${encodeURIComponent('parno,ownname,siteadd,scity,mailadd,mcity,mstate,mzip,parval,cntyname,saledate')}` +
+    `&returnGeometry=false&resultRecordCount=200&f=json`;
 
+  // Retry a couple of times (the statewide owner scan is occasionally throttled).
+  let data: any = null;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const res = await fetchWithTimeout(url, 20000);
+      if (res.ok) {
+        const parsed = await res.json().catch(() => null);
+        if (parsed && !parsed.error) { data = parsed; break; }
+      }
+    } catch { /* retry */ }
+    if (attempt < 2) await new Promise((r) => setTimeout(r, 1200 * (attempt + 1)));
+  }
+  if (!data) return null;
+
+  const rows = (data.features || []).map((f: any) => f.attributes).filter((a: any) => a?.ownname);
+  if (!rows.length) return null;
+
+  // Canonical owner name = the most common exact ownname among the matches.
+  const nameCount = new Map<string, number>();
+  for (const a of rows) { const n = String(a.ownname).trim(); if (n) nameCount.set(n, (nameCount.get(n) || 0) + 1); }
+  const canonicalName = [...nameCount.entries()].sort((a, b) => b[1] - a[1])[0][0];
+
+  const fmtMail = (a: any) => [String(a.mailadd ?? '').trim(), [String(a.mcity ?? '').trim(), String(a.mstate ?? '').trim()].filter(Boolean).join(' '), String(a.mzip ?? '').trim()]
+    .filter(Boolean).join(', ').replace(/\s+/g, ' ').trim();
+
+  const mailCount = new Map<string, number>();
+  const properties: LlcProperty[] = [];
+  const counties = new Set<string>();
+  let totalAssessed = 0;
+  let mostRecentSaleEpoch: number | undefined;
+  for (const a of rows) {
+    const mail = fmtMail(a);
+    if (mail) mailCount.set(mail, (mailCount.get(mail) || 0) + 1);
+    const situs = String(a.siteadd ?? '').trim();
+    const scity = String(a.scity ?? '').trim();
+    const county = String(a.cntyname ?? '').trim();
+    if (county) counties.add(county);
+    const value = Number(a.parval) || 0;
+    totalAssessed += value;
+    const sale = Number(a.saledate);
+    if (Number.isFinite(sale) && (mostRecentSaleEpoch == null || sale > mostRecentSaleEpoch)) mostRecentSaleEpoch = sale;
+    properties.push({
+      address: situs ? `${situs}${scity ? `, ${scity}` : ''}` : `${county} County parcel ${a.parno}`,
+      county, value, saleEpoch: Number.isFinite(sale) ? sale : undefined,
+    });
+  }
+  const mailingAddress = mailCount.size ? [...mailCount.entries()].sort((a, b) => b[1] - a[1])[0][0] : null;
+  properties.sort((a, b) => b.value - a.value);
+
+  return {
+    canonicalName, mailingAddress, properties: properties.slice(0, 50),
+    propertyCount: rows.length, capped: !!data.exceededTransferLimit,
+    counties: [...counties].sort(), totalAssessed: Math.round(totalAssessed), mostRecentSaleEpoch,
+  };
+}
+
+/** Gemini + Google-Search grounded lookup of the SOS registration (agent, officials). */
+async function skipTraceLLCViaGemini(query: string, state: string): Promise<LlcSkipTrace | null> {
+  const geminiApiKey = getUserKeys().gemini || '';
+  if (!geminiApiKey) return null;
   const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=${geminiApiKey}`;
   const prompt = `Skip-trace this ${state} business entity / LLC: "${query}".
 Use Google Search over the ${state} Secretary of State business registry (in NC: sosnc.gov), OpenCorporates, Bizapedia, and official public records. Prioritize the Secretary of State record.
@@ -1189,7 +1270,6 @@ Return ONLY a JSON object inside a \`\`\`json code block:
 }
 \`\`\`
 Rules: the REGISTERED AGENT and the OFFICIALS (managers/members) are the skip-trace contacts — return them when available. Only report values you can support from a credible source and include those source URLs. NEVER invent names, addresses, IDs, or dates — use null for anything you cannot confirm. If the entity cannot be found, return {"entityName": null}.`;
-
   try {
     const res = await fetch(url, {
       method: 'POST',
@@ -1200,7 +1280,7 @@ Rules: the REGISTERED AGENT and the OFFICIALS (managers/members) are the skip-tr
         tools: [{ google_search: {} }],
       }),
     });
-    if (!res.ok) throw new Error(`Gemini API error ${res.status}`);
+    if (!res.ok) return null;
     const data = await res.json();
     const text = data.candidates?.[0]?.content?.parts?.map((p: any) => p.text).filter(Boolean).join('') || '';
     const m = text.match(/```json\s*([\s\S]*?)\s*```/) || text.match(/\{[\s\S]*\}/);
@@ -1211,10 +1291,50 @@ Rules: the REGISTERED AGENT and the OFFICIALS (managers/members) are the skip-tr
     if (!Array.isArray(obj.officials)) obj.officials = [];
     if (!Array.isArray(obj.sources)) obj.sources = [];
     return obj;
-  } catch (e) {
-    console.warn('LLC skip-trace failed:', e);
-    throw e instanceof Error ? e : new Error('Skip-trace failed');
+  } catch {
+    return null;
   }
+}
+
+/**
+ * Skip-trace an LLC. Backbone is NC GIS/tax records (the LLC's mailing address +
+ * every property it owns — always available, no Cloudflare). Gemini + Google
+ * Search supplements the SOS registration (registered agent + managers/members)
+ * when it can. Returns a result whenever EITHER source finds the entity.
+ */
+export async function skipTraceLLC(query: string, state = 'NC'): Promise<LlcSkipTrace | null> {
+  if (!getUserKeys().gemini) throw new Error('Gemini API key required (set it in Account Settings).');
+
+  const [gis, ai] = await Promise.all([
+    state === 'NC' ? skipTraceLLCViaGIS(query).catch(() => null) : Promise.resolve(null),
+    skipTraceLLCViaGemini(query, state).catch(() => null),
+  ]);
+
+  if (!gis && !ai) return null;
+
+  const result: LlcSkipTrace = {
+    entityName: gis?.canonicalName || ai?.entityName || query.trim(),
+    sosId: ai?.sosId ?? null,
+    status: ai?.status ?? null,
+    entityType: ai?.entityType ?? null,
+    formationDate: ai?.formationDate ?? null,
+    registeredAgentName: ai?.registeredAgentName ?? null,
+    registeredAgentAddress: ai?.registeredAgentAddress ?? null,
+    principalOffice: ai?.principalOffice ?? null,
+    mailingAddress: ai?.mailingAddress ?? null,
+    officials: ai?.officials ?? [],
+    recentFiling: ai?.recentFiling ?? null,
+    sources: ai?.sources ?? [],
+    // GIS backbone
+    foundInGIS: !!gis,
+    taxMailingAddress: gis?.mailingAddress ?? null,
+    properties: gis?.properties ?? [],
+    propertyCount: gis?.propertyCount ?? 0,
+    propertyCountCapped: gis?.capped ?? false,
+    countiesOwned: gis?.counties ?? [],
+    totalAssessedValue: gis?.totalAssessed ?? 0,
+  };
+  return result;
 }
 
 /**

@@ -569,3 +569,24 @@
 .st-launchpad-links a { text-decoration: none; }
 
 @media (max-width: 600px) { .st-grid { grid-template-columns: 1fr; } }
+
+/* Skip Trace — NC GIS owner record (mailing address + properties) */
+.st-mail-hero {
+  display: flex; gap: 11px; align-items: flex-start;
+  background: var(--success-bg); border: 1px solid var(--success-border); border-radius: var(--radius-md); padding: 12px 14px;
+}
+.st-mail-hero > svg { color: var(--success); flex-shrink: 0; margin-top: 3px; }
+.st-mail-label { font-size: 0.72rem; font-weight: 600; color: var(--text-muted); margin-bottom: 2px; }
+.st-mail-value { font-size: 1rem; font-weight: 800; color: var(--text-primary); display: flex; align-items: center; gap: 8px; word-break: break-word; }
+.st-stats { display: flex; flex-wrap: wrap; gap: 8px 18px; font-size: 0.82rem; color: var(--text-secondary); }
+.st-stats span { display: inline-flex; align-items: center; gap: 6px; }
+.st-stats svg { color: var(--text-muted); }
+.st-stats strong { color: var(--primary); }
+.st-props { display: flex; flex-direction: column; gap: 4px; max-height: 320px; overflow-y: auto; }
+.st-prop {
+  display: flex; justify-content: space-between; gap: 12px; align-items: baseline;
+  padding: 6px 10px; background: var(--bg-main); border: 1px solid var(--bg-card-border); border-radius: var(--radius-sm); font-size: 0.82rem;
+}
+.st-prop-addr { font-weight: 600; color: var(--text-primary); word-break: break-word; }
+.st-prop-meta { color: var(--text-muted); white-space: nowrap; flex-shrink: 0; font-size: 0.78rem; }
+.st-prop-more { font-size: 0.76rem; color: var(--text-muted); padding: 4px 2px; }
