@@ -1229,6 +1229,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
   const [showStreams, setShowStreams] = useState(true);
   const [showContours, setShowContours] = useState(true);
   const [showZoning, setShowZoning] = useState(true);
+  const [showWetlands, setShowWetlands] = useState(false);
   const [showOsmFeatures, setShowOsmFeatures] = useState(false);
   const [osmLoading, setOsmLoading] = useState(false);
 
@@ -1236,6 +1237,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
   const floodplainsLayerRef = useRef<any>(null);
   const streamsLayerRef = useRef<any>(null);
   const contoursLayerRef = useRef<any>(null);
+  const wetlandsLayerRef = useRef<any>(null);
   const zoningLayersRef = useRef<any[]>([]);
   const zoningLabelOverlayRef = useRef<any>(null);
   const osmDataLayerRef = useRef<any>(null);
@@ -1880,7 +1882,23 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
       zoningLabelOverlayRef.current.setMap(showZoning ? map : null);
     }
 
-  }, [showFloodplains, showStreams, showContours, showZoning, data, mapsLoaded]);
+    // Stacking Layer (Index 11): USFWS National Wetlands Inventory — official FWS
+    // Wetlands web mapping service, placed after the reserved zoning window.
+    const WETLANDS_INDEX = ZONING_BASE + ZONING_SLOTS; // 11
+    if (showWetlands) {
+      if (!wetlandsLayerRef.current) {
+        wetlandsLayerRef.current = getArcGISLayer(
+          "https://www.fws.gov/wetlandsmapservice/rest/services/Wetlands/MapServer",
+          0.55, // 55% opacity so the parcel/base imagery stays readable
+          19
+        );
+      }
+      map.overlayMapTypes.setAt(WETLANDS_INDEX, wetlandsLayerRef.current);
+    } else {
+      map.overlayMapTypes.setAt(WETLANDS_INDEX, null as any);
+    }
+
+  }, [showFloodplains, showStreams, showContours, showZoning, showWetlands, data, mapsLoaded]);
 
   // Real OSM feature overlay: buildings, road centerlines, and water bodies drawn
   // as a Google Maps vector Data layer (authoritative OpenStreetMap data).
@@ -2996,6 +3014,15 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                   >
                     <span className="toggle-indicator elevation" />
                     <span>Contour Lines (Elevation)</span>
+                  </button>
+                  <button
+                    type="button"
+                    className={`layer-toggle-btn ${showWetlands ? 'active' : ''}`}
+                    onClick={() => setShowWetlands(!showWetlands)}
+                    title="Overlay USFWS National Wetlands Inventory (NWI) — official FWS Wetlands web mapping service"
+                  >
+                    <span className="toggle-indicator wetland" />
+                    <span>Wetlands (USFWS NWI)</span>
                   </button>
                   {(() => {
                     const countyGis = hasCountyZoning(data.countyName);

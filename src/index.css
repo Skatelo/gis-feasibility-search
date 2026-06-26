@@ -1043,6 +1043,11 @@ code {
   box-shadow: 0 0 6px #f59e0b;
 }
 
+.layer-toggle-btn.active .toggle-indicator.wetland {
+  background-color: #14b8a6;
+  box-shadow: 0 0 6px #14b8a6;
+}
+
 .map-wrapper {
   position: relative;
   width: 100%;

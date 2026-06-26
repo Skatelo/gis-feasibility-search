@@ -1453,27 +1453,46 @@ export async function fetchFemaFloodZone(lat: number, lng: number): Promise<Floo
   }
 }
 
+/** NWI Wetlands MapServer/0 — the official FWS service is primary; the WIM-hosted
+ *  mirror is the fallback. Same layer schema; both used for the map, report, and
+ *  the land finder's wetland scoring. (See fws.gov NWI Web Mapping Services.) */
+export const NWI_WETLANDS_SERVICE = 'https://www.fws.gov/wetlandsmapservice/rest/services/Wetlands/MapServer';
+const NWI_WETLANDS_QUERY_HOSTS = [
+  `${NWI_WETLANDS_SERVICE}/0/query`,
+  'https://fwspublicservices.wim.usgs.gov/wetlandsmapservice/rest/services/Wetlands/MapServer/0/query',
+];
+
+/** Reads an attribute by base name across NWI schemas — the official service
+ *  prefixes joined fields (e.g. "Wetlands.WETLAND_TYPE"), the mirror does not. */
+function readNwiField(attrs: Record<string, any>, name: string): any {
+  if (!attrs) return undefined;
+  if (attrs[name] != null) return attrs[name];
+  const k = Object.keys(attrs).find((key) => key === name || key.endsWith(`.${name}`));
+  return k ? attrs[k] : undefined;
+}
+
 /**
  * USFWS National Wetlands Inventory (NWI) — wetlands presence/classification by
- * coordinate. Tries both NWI service hosts; returns present=null with status
- * 'unavailable' if NWI is down, so the report verifies via the NWI Wetlands
- * Mapper rather than assuming the site is wetland-free.
+ * coordinate from the official FWS Wetlands web mapping service (WIM mirror as
+ * fallback). Returns present=null with status 'unavailable' if NWI is down, so
+ * the report verifies via the NWI Wetlands Mapper rather than assuming the site
+ * is wetland-free.
  */
 export async function fetchNwiWetlands(lat: number, lng: number): Promise<WetlandsInfo> {
   const sourceUrl = 'https://www.fws.gov/program/national-wetlands-inventory/wetlands-mapper';
-  const hosts = [
-    'https://fwspublicservices.wim.usgs.gov/wetlandsmapservice/rest/services/Wetlands/MapServer/0/query',
-    'https://fwsprimary.wim.usgs.gov/server/rest/services/Wetlands/MapServer/0/query',
-  ];
-  for (const base of hosts) {
+  for (const base of NWI_WETLANDS_QUERY_HOSTS) {
     try {
-      const url = `${base}?geometry=${lng},${lat}&geometryType=esriGeometryPoint&inSR=4326&spatialRel=esriSpatialRelIntersects&outFields=WETLAND_TYPE,ATTRIBUTE&returnGeometry=false&f=json`;
+      const url = `${base}?geometry=${lng},${lat}&geometryType=esriGeometryPoint&inSR=4326&spatialRel=esriSpatialRelIntersects&outFields=*&returnGeometry=false&f=json`;
       const res = await fetchWithTimeout(url, 12000);
       if (!res.ok) continue;
       const data = await res.json();
       if (data?.error) continue;
       const feats: any[] = data?.features || [];
-      const types = Array.from(new Set(feats.map((f) => f?.attributes?.WETLAND_TYPE).filter(Boolean))) as string[];
+      // Human-readable type (e.g. "Freshwater Forested/Shrub Wetland"), with the
+      // raw NWI code (e.g. "PFO4/1B") as a fallback label.
+      const types = Array.from(new Set(
+        feats.map((f) => readNwiField(f?.attributes, 'WETLAND_TYPE') || readNwiField(f?.attributes, 'ATTRIBUTE')).filter(Boolean)
+      )) as string[];
       return {
         present: feats.length > 0,
         types,
