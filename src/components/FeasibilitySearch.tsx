@@ -2766,16 +2766,44 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                     *Criteria: New construction (built 2025–2026) matching this parcel's zoning use, sold within 12 months, no sqft limits, within 3 driving miles (auto-expands to 5). Sources: Realtor.com sold records (radius scan, ✓ confirmed) + public MLS via Google Search.*
                   </div>
                   <div className="comps-list" style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-                    {data.comps.map((comp, idx) => (
-                      <div key={idx} className="comp-item" style={{ 
-                        padding: '10px', 
-                        borderRadius: '6px', 
-                        border: '1px solid var(--bg-card-border)', 
+                    {(() => {
+                      const gmKey = getUserKeys().googleMaps || '';
+                      const prettyType = (t?: string) => {
+                        const s = String(t || '').replace(/[_-]+/g, ' ').trim();
+                        if (!s) return '';
+                        const map: Record<string, string> = {
+                          'single family': 'Single Family', 'singlefamily': 'Single Family', 'sfr': 'Single Family', 'single family residence': 'Single Family', 'single family residential': 'Single Family',
+                          'townhouse': 'Townhouse', 'townhome': 'Townhome', 'townhomes': 'Townhome', 'condo': 'Condo', 'condos': 'Condo', 'condominium': 'Condo',
+                          'multi family': 'Multi-Family', 'multifamily': 'Multi-Family', 'duplex': 'Duplex', 'triplex': 'Triplex', 'quadruplex': 'Quadruplex',
+                          'apartment': 'Apartment', 'land': 'Land', 'mobile': 'Mobile/Manufactured', 'manufactured': 'Mobile/Manufactured',
+                        };
+                        return map[s.toLowerCase()] || s.replace(/\b\w/g, (c) => c.toUpperCase());
+                      };
+                      return data.comps.map((comp, idx) => (
+                      <div key={idx} className="comp-item" style={{
+                        padding: '10px',
+                        borderRadius: '6px',
+                        border: '1px solid var(--bg-card-border)',
                         background: 'var(--bg-card-hover, #f8fafc)',
                         display: 'flex',
                         flexDirection: 'column',
                         gap: '6px'
                       }}>
+                        {comp.coords && gmKey && (
+                          <img
+                            src={`https://maps.googleapis.com/maps/api/streetview?size=400x150&location=${comp.coords.lat},${comp.coords.lng}&fov=80&pitch=0&key=${gmKey}`}
+                            onError={(e) => {
+                              const img = e.currentTarget;
+                              if (!img.dataset.fellBack && comp.coords) {
+                                img.dataset.fellBack = '1';
+                                img.src = `https://maps.googleapis.com/maps/api/staticmap?center=${comp.coords.lat},${comp.coords.lng}&zoom=19&size=400x150&scale=2&maptype=satellite&markers=color:red%7C${comp.coords.lat},${comp.coords.lng}&key=${gmKey}`;
+                              }
+                            }}
+                            alt={`Comp ${idx + 1}: ${comp.address}`}
+                            loading="lazy"
+                            style={{ width: '100%', height: '130px', objectFit: 'cover', borderRadius: '4px', border: '1px solid var(--bg-card-border)' }}
+                          />
+                        )}
                         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                           <span style={{ 
                             fontSize: '11px', 
@@ -2813,8 +2841,9 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                           </span>
                           <span>Sold: <strong>{comp.saleDate}</strong></span>
                         </div>
-                        {(comp.sqft || comp.pricePerSqft || comp.yearBuilt) && (
-                          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.72rem', color: 'var(--text-secondary)', paddingLeft: '24px', borderTop: '1px dashed rgba(0,0,0,0.05)', paddingTop: '4px' }}>
+                        {(comp.sqft || comp.pricePerSqft || comp.yearBuilt || comp.propertyType) && (
+                          <div style={{ display: 'flex', justifyContent: 'space-between', flexWrap: 'wrap', gap: '4px 10px', fontSize: '0.72rem', color: 'var(--text-secondary)', paddingLeft: '24px', borderTop: '1px dashed rgba(0,0,0,0.05)', paddingTop: '4px' }}>
+                            {comp.propertyType && <span>Type: <strong>{prettyType(comp.propertyType)}</strong></span>}
                             {comp.sqft && <span>Size: <strong>{comp.sqft.toLocaleString()} SF</strong></span>}
                             {comp.pricePerSqft && <span><strong>${comp.pricePerSqft.toLocaleString()}/SF</strong></span>}
                             {comp.yearBuilt && <span>Built: <strong>{comp.yearBuilt}</strong></span>}
@@ -2837,7 +2866,8 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                           </div>
                         )}
                       </div>
-                    ))}
+                      ));
+                    })()}
                   </div>
                 </div>
               )}
