@@ -1538,18 +1538,27 @@ export async function fetchOpenTopographySlope(lat: number, lng: number, _parcel
   }
 
   try {
-    const elevations = await Promise.all(pts.map(async (p) => {
-      try {
-        const res = await fetchWithTimeout(`https://epqs.nationalmap.gov/v1/json?x=${p.lng}&y=${p.lat}&units=Meters&wkid=4326`, 8000);
-        if (!res.ok) return null;
-        const v = parseFloat((await res.json()).value);
-        return Number.isFinite(v) && v > -1000 ? v : null;
-      } catch { return null; }
-    }));
+    // ONE request for the whole 5×5 grid via the USGS 3DEP ImageServer getSamples
+    // op (1-meter resolution). The per-point EPQS service is ~10 s/call and was
+    // timing out — making this fall back to a SIMULATED profile. getSamples returns
+    // every point in a single call; samples carry locationId = input point index.
+    const geom = JSON.stringify({ points: pts.map((p) => [p.lng, p.lat]), spatialReference: { wkid: 4326 } });
+    const url = `https://elevation.nationalmap.gov/arcgis/rest/services/3DEPElevation/ImageServer/getSamples` +
+      `?geometry=${encodeURIComponent(geom)}&geometryType=esriGeometryMultipoint&returnFirstValueOnly=true&f=json`;
+    const res = await fetchWithTimeout(url, 22000);
+    if (!res.ok) throw new Error(`3DEP getSamples HTTP ${res.status}`);
+    const data = await res.json();
+    if (data?.error || !Array.isArray(data.samples)) throw new Error("3DEP getSamples returned no data");
 
     const grid: (number | null)[][] = Array.from({ length: N }, () => Array<number | null>(N).fill(null));
-    pts.forEach((p, i) => { grid[p.r][p.c] = elevations[i]; });
-    const valid = elevations.filter((e): e is number => e != null);
+    for (const s of data.samples) {
+      const i = Number(s?.locationId);
+      if (!Number.isInteger(i) || i < 0 || i >= pts.length) continue;
+      const v = parseFloat(s?.value);
+      const p = pts[i];
+      grid[p.r][p.c] = Number.isFinite(v) && v > -1000 ? v : null;
+    }
+    const valid = grid.flat().filter((e): e is number => e != null);
     if (valid.length < N * N * 0.6) throw new Error("Insufficient USGS 3DEP coverage at this location");
 
     // Grid spacing in meters.
