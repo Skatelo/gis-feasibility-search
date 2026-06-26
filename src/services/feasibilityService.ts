@@ -2389,6 +2389,27 @@ function redfinTypeLabel(code: any): string | undefined {
  * server-side via `yearBuiltRange=min:YYYY`), so `newConstructionFlag` is set
  * true by the caller for every record returned from a year-filtered query.
  */
+/** Finds the first real LISTING-photo URL anywhere in a RealtyAPI record
+ *  (Realtor rdcpix / Zillow zillowstatic / Redfin cdn), preferring the primary
+ *  photo. Forces https so the image isn't mixed-content-blocked. */
+function findPhotoUrl(obj: any, depth = 0): string | undefined {
+  if (obj == null || depth > 6) return undefined;
+  if (typeof obj === "string") {
+    if (/^https?:\/\//i.test(obj) && /(rdcpix|zillowstatic|cdn-redfin|ssl\.cdn|\.jpe?g|\.png|\.webp)/i.test(obj) && !/sprite|logo|icon|favicon/i.test(obj)) {
+      return obj.replace(/^http:/i, "https:");
+    }
+    return undefined;
+  }
+  if (Array.isArray(obj)) { for (const v of obj) { const u = findPhotoUrl(v, depth + 1); if (u) return u; } return undefined; }
+  if (typeof obj === "object") {
+    for (const k of ["primary_photo", "imgSrc", "img_src", "photo", "thumbnail", "image", "photos"]) {
+      if (obj[k] != null) { const u = findPhotoUrl(obj[k], depth + 1); if (u) return u; }
+    }
+    for (const k of Object.keys(obj)) { const u = findPhotoUrl(obj[k], depth + 1); if (u) return u; }
+  }
+  return undefined;
+}
+
 function normalizeRealtyListing(raw: any, platform: 'realtor' | 'redfin' | 'zillow'): any | null {
   if (!raw || typeof raw !== "object") return null;
 
@@ -2476,6 +2497,7 @@ function normalizeRealtyListing(raw: any, platform: 'realtor' | 'redfin' | 'zill
     propertyType: prettyPropertyType(propertyType),
     coords,
     zip,
+    imageUrl: findPhotoUrl(raw),
     status: "sold",
     listingStatus: _isStr(rawStatus) ? rawStatus : (rawStatus != null ? String(rawStatus) : undefined),
     newConstructionFlag: false, // set true by the caller (year-filtered query)
@@ -3166,6 +3188,7 @@ export async function fetchGoogleDistanceMatrixComps(
       sqft: c.sqft,
       url: c.url,
       zip: c.zip,
+      imageUrl: c.imageUrl,
       propertyId: c.propertyId,
       sourceName: c.sourceName,
       newConstructionFlag: c.newConstructionFlag,

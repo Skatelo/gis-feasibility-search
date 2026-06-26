@@ -2789,21 +2789,29 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                         flexDirection: 'column',
                         gap: '6px'
                       }}>
-                        {comp.coords && gmKey && (
-                          <img
-                            src={`https://maps.googleapis.com/maps/api/streetview?size=400x150&location=${comp.coords.lat},${comp.coords.lng}&fov=80&pitch=0&key=${gmKey}`}
-                            onError={(e) => {
-                              const img = e.currentTarget;
-                              if (!img.dataset.fellBack && comp.coords) {
-                                img.dataset.fellBack = '1';
-                                img.src = `https://maps.googleapis.com/maps/api/staticmap?center=${comp.coords.lat},${comp.coords.lng}&zoom=19&size=400x150&scale=2&maptype=satellite&markers=color:red%7C${comp.coords.lat},${comp.coords.lng}&key=${gmKey}`;
-                              }
-                            }}
-                            alt={`Comp ${idx + 1}: ${comp.address}`}
-                            loading="lazy"
-                            style={{ width: '100%', height: '130px', objectFit: 'cover', borderRadius: '4px', border: '1px solid var(--bg-card-border)' }}
-                          />
-                        )}
+                        {(() => {
+                          // Prefer the real listing photo (Realtor/Redfin/Zillow feed); fall
+                          // back to Google Street View, then a satellite image — so every comp
+                          // shows a picture even when a source omits the photo.
+                          const sv = (comp.coords && gmKey) ? `https://maps.googleapis.com/maps/api/streetview?size=400x150&location=${comp.coords.lat},${comp.coords.lng}&fov=80&pitch=0&key=${gmKey}` : '';
+                          const sat = (comp.coords && gmKey) ? `https://maps.googleapis.com/maps/api/staticmap?center=${comp.coords.lat},${comp.coords.lng}&zoom=19&size=400x150&scale=2&maptype=satellite&markers=color:red%7C${comp.coords.lat},${comp.coords.lng}&key=${gmKey}` : '';
+                          const chain = [comp.imageUrl, sv, sat].filter(Boolean) as string[];
+                          if (!chain.length) return null;
+                          return (
+                            <img
+                              src={chain[0]}
+                              data-next="1"
+                              onError={(e) => {
+                                const img = e.currentTarget;
+                                const next = Number(img.dataset.next || '1');
+                                if (next < chain.length) { img.dataset.next = String(next + 1); img.src = chain[next]; }
+                              }}
+                              alt={`Comp ${idx + 1}: ${comp.address}`}
+                              loading="lazy"
+                              style={{ width: '100%', height: '130px', objectFit: 'cover', borderRadius: '4px', border: '1px solid var(--bg-card-border)' }}
+                            />
+                          );
+                        })()}
                         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                           <span style={{ 
                             fontSize: '11px', 

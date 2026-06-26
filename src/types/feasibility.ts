@@ -57,6 +57,8 @@ export interface CompProperty {
   /** Realtor.com detail page URL. */
   url?: string;
   zip?: string;
+  /** Listing photo URL from the source feed (Realtor/Redfin/Zillow CDN), when available. */
+  imageUrl?: string;
 }
 
 export interface FloodZoneInfo {
