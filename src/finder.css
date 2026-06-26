@@ -605,3 +605,7 @@
   padding: 11px 13px; font-size: 0.84rem; color: var(--text-secondary); line-height: 1.45;
 }
 .st-agent-missing > svg { color: var(--text-muted); flex-shrink: 0; margin-top: 2px; }
+
+/* Finder: owner mailing line (muted, under owner name) */
+.finder-owner-mail { color: var(--text-muted); font-size: 0.76rem; }
+.finder-owner-mail svg { color: var(--text-muted); }

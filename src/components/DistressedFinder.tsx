@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Home, Trees, Search, Loader2, AlertCircle, Download, FileJson, Radar,
-  MapPin, Eye, Sparkles, Target, X, Plus, Trash2, Waves, Droplets, HardHat, Landmark, Flag, User, Users, Building2, Database, Check,
+  MapPin, Eye, Sparkles, Target, X, Plus, Trash2, Waves, Droplets, HardHat, Landmark, Flag, User, Users, Building2, Database, Check, Mountain, Mail,
 } from 'lucide-react';
 import {
   analyzeProperty, analyzeCandidate, discoverCandidates, buildBuyerList, buildBuyerDatabase,
@@ -49,9 +49,9 @@ function ScoreRing({ score }: { score: number }) {
   );
 }
 
-/** Small environmental badge (FEMA flood / NWI wetlands) with a source link. */
-function EnvBadge({ env, icon }: { env: EnvScore; icon: 'flood' | 'wet' }) {
-  const Icon = icon === 'flood' ? Waves : Droplets;
+/** Small environmental badge (FEMA flood / NWI wetlands / USGS 3DEP slope) with a source link. */
+function EnvBadge({ env, icon }: { env: EnvScore; icon: 'flood' | 'wet' | 'slope' }) {
+  const Icon = icon === 'flood' ? Waves : icon === 'slope' ? Mountain : Droplets;
   const unknown = env.score == null;
   const color = unknown ? 'var(--text-muted)' : env.score! >= 75 ? 'var(--success)' : env.score! >= 40 ? 'var(--warning)' : 'var(--error)';
   return (
@@ -96,9 +96,12 @@ function ResultCard({ r }: { r: PropertyResult }) {
           </div>
         )}
 
-        {/* GIS distress / motivated-seller lead signals (house mode) */}
-        {r.mode === 'house' && r.parcel?.ownerName && (
-          <div className="finder-owner" title="Owner of record (public assessor data)"><User size={12} /> {r.parcel.ownerName}</div>
+        {/* Owner of record + mailing address (NC GIS / county tax records) */}
+        {r.parcel?.ownerName && (
+          <div className="finder-owner" title="Owner of record (NC GIS / county tax records)"><User size={12} /> {r.parcel.ownerName}</div>
+        )}
+        {r.parcel?.mailingAddress && (
+          <div className="finder-owner finder-owner-mail" title="Owner mailing address — where the county sends tax bills"><Mail size={12} /> {r.parcel.mailingAddress}</div>
         )}
         {r.mode === 'house' && r.parcel?.gisSignals && r.parcel.gisSignals.length > 0 && (
           <div className="finder-lead-row">
@@ -106,8 +109,9 @@ function ResultCard({ r }: { r: PropertyResult }) {
           </div>
         )}
 
-        {(r.flood || r.wetlands || r.builderInterest) && (
+        {(r.flood || r.wetlands || r.slope || r.builderInterest) && (
           <div className="finder-env-row">
+            {r.slope && <EnvBadge env={r.slope} icon="slope" />}
             {r.flood && <EnvBadge env={r.flood} icon="flood" />}
             {r.wetlands && <EnvBadge env={r.wetlands} icon="wet" />}
             {r.builderInterest && (

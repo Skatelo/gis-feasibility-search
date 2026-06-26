@@ -1626,6 +1626,86 @@ function generateMockSlope(lat: number, lng: number): SlopeProfile {
   };
 }
 
+export interface Slope3DEP {
+  avgSlope: number;       // percent
+  maxSlope: number;       // percent
+  avgElevation: number;   // meters
+  verdict: 'BUILDABLE' | 'REQUIRES ENGINEERING' | 'NON-BUILDABLE';
+  status: 'mapped' | 'unavailable';
+  sourceUrl: string;
+}
+
+/**
+ * Lightweight AUTHORITATIVE slope/topography at a point from USGS 3DEP (the
+ * National Map EPQS elevation service), for the land finder. Samples a small
+ * N×N grid (default 3×3 = 9 elevation probes) around the point and derives
+ * avg/max slope by finite differences. Unlike fetchOpenTopographySlope it does
+ * NOT fall back to a simulated value — it returns status 'unavailable' when 3DEP
+ * can't be reached, so the finder marks slope unverified instead of guessing.
+ */
+export async function fetchSlope3DEP(lat: number, lng: number, halfDeg = 0.0004, N = 3): Promise<Slope3DEP> {
+  const sourceUrl = 'https://www.usgs.gov/3d-elevation-program';
+  const unavailable: Slope3DEP = { avgSlope: 0, maxSlope: 0, avgElevation: 0, verdict: 'BUILDABLE', status: 'unavailable', sourceUrl };
+  const minLat = lat - halfDeg, maxLat = lat + halfDeg, minLng = lng - halfDeg, maxLng = lng + halfDeg;
+  const pts: { lat: number; lng: number; r: number; c: number }[] = [];
+  for (let r = 0; r < N; r++) for (let c = 0; c < N; c++) {
+    pts.push({ lat: minLat + (maxLat - minLat) * (r / (N - 1)), lng: minLng + (maxLng - minLng) * (c / (N - 1)), r, c });
+  }
+  try {
+    // ONE request for the whole grid via the USGS 3DEP ImageServer getSamples op
+    // (the per-point EPQS service is ~10 s/call; this samples every point at once
+    // at 1-meter resolution). Samples carry locationId = input point index.
+    const geom = JSON.stringify({ points: pts.map((p) => [p.lng, p.lat]), spatialReference: { wkid: 4326 } });
+    const url = `https://elevation.nationalmap.gov/arcgis/rest/services/3DEPElevation/ImageServer/getSamples` +
+      `?geometry=${encodeURIComponent(geom)}&geometryType=esriGeometryMultipoint&returnFirstValueOnly=true&f=json`;
+    const res = await fetchWithTimeout(url, 20000);
+    if (!res.ok) return unavailable;
+    const data = await res.json();
+    if (data?.error || !Array.isArray(data.samples)) return unavailable;
+    const grid: (number | null)[][] = Array.from({ length: N }, () => Array<number | null>(N).fill(null));
+    for (const s of data.samples) {
+      const i = Number(s?.locationId);
+      if (!Number.isInteger(i) || i < 0 || i >= pts.length) continue;
+      const v = parseFloat(s?.value);
+      const p = pts[i];
+      grid[p.r][p.c] = Number.isFinite(v) && v > -1000 ? v : null;
+    }
+    const valid = grid.flat().filter((e): e is number => e != null);
+    if (valid.length < N * N * 0.6) return unavailable;
+
+    const midLat = (minLat + maxLat) / 2;
+    const cellH = ((maxLat - minLat) / (N - 1)) * 111320;
+    const cellW = ((maxLng - minLng) / (N - 1)) * 111320 * Math.cos((midLat * Math.PI) / 180);
+    const slopes: number[] = [];
+    for (let r = 0; r < N; r++) for (let c = 0; c < N; c++) {
+      const z = grid[r][c]; if (z == null) continue;
+      const zl = c > 0 ? grid[r][c - 1] : null, zr = c < N - 1 ? grid[r][c + 1] : null;
+      const zu = r > 0 ? grid[r - 1][c] : null, zd = r < N - 1 ? grid[r + 1][c] : null;
+      let dzdx = 0;
+      if (zl != null && zr != null && cellW > 0) dzdx = (zr - zl) / (2 * cellW);
+      else if (zr != null && cellW > 0) dzdx = (zr - z) / cellW;
+      else if (zl != null && cellW > 0) dzdx = (z - zl) / cellW;
+      let dzdy = 0;
+      if (zu != null && zd != null && cellH > 0) dzdy = (zu - zd) / (2 * cellH);
+      else if (zd != null && cellH > 0) dzdy = (z - zd) / cellH;
+      else if (zu != null && cellH > 0) dzdy = (zu - z) / cellH;
+      const sp = Math.sqrt(dzdx * dzdx + dzdy * dzdy) * 100;
+      if (Number.isFinite(sp)) slopes.push(sp);
+    }
+    if (!slopes.length) return unavailable;
+
+    const maxSlope = Math.round(Math.max(...slopes) * 10) / 10;
+    const avgSlope = Math.round((slopes.reduce((a, b) => a + b, 0) / slopes.length) * 10) / 10;
+    const avgElevation = Math.round((valid.reduce((a, b) => a + b, 0) / valid.length) * 10) / 10;
+    let verdict: Slope3DEP['verdict'] = 'BUILDABLE';
+    if (maxSlope > 25) verdict = 'NON-BUILDABLE';
+    else if (maxSlope >= 15) verdict = 'REQUIRES ENGINEERING';
+    return { avgSlope, maxSlope, avgElevation, verdict, status: 'mapped', sourceUrl };
+  } catch {
+    return unavailable;
+  }
+}
+
 function getPermittedCategory(zoningCode: string, zoningDesc: string): 'residential' | 'commercial' | 'multifamily' {
   const code = (zoningCode || '').toUpperCase();
   const desc = (zoningDesc || '').toLowerCase();

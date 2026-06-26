@@ -13,7 +13,8 @@
 // (the same keys configured in Account Settings for the feasibility search).
 // ---------------------------------------------------------------------------
 
-import { getUserKeys, ncCountyConfig, fetchFemaFloodZone, fetchNwiWetlands } from './feasibilityService';
+import { getUserKeys, ncCountyConfig, fetchFemaFloodZone, fetchNwiWetlands, fetchSlope3DEP } from './feasibilityService';
+import type { Slope3DEP } from './feasibilityService';
 import type { FloodZoneInfo, WetlandsInfo } from '../types/feasibility';
 import { idbGet, idbSet, idbDel } from './idb';
 
@@ -66,8 +67,9 @@ export interface ParcelInfo {
   /** (assessedValue - landValue) / assessedValue — share of value in structures. */
   improvementRatio?: number;
 
-  // GIS-derived distress / motivated-seller lead signals (house mode)
+  // Owner of record + where the county mails the tax bill (from NC GIS parcel data)
   ownerName?: string;
+  mailingAddress?: string;
   absenteeOwner?: boolean;
   outOfState?: boolean;
   ownerType?: 'individual' | 'estate' | 'company' | 'public';
@@ -108,6 +110,8 @@ export interface PropertyResult {
   parcel?: ParcelInfo;
   flood?: EnvScore;          // authoritative FEMA NFHL flood-zone score
   wetlands?: EnvScore;       // authoritative USFWS NWI wetlands score
+  slope?: EnvScore;          // authoritative USGS 3DEP slope/topography score
+  slopeProfile?: Slope3DEP;  // raw 3DEP avg/max slope + elevation + verdict
   builderInterest?: 'high' | 'medium' | 'low';
 }
 
@@ -589,19 +593,36 @@ export function scoreWetlands(w?: WetlandsInfo): EnvScore {
 }
 
 /**
+ * Authoritative slope/topography sub-score (0..100, higher = flatter/buildable)
+ * from USGS 3DEP. score=null when 3DEP is unverifiable so the caller falls back
+ * to the visual estimate. Thresholds mirror the report: <15% buildable,
+ * 15–25% needs engineering, >25% non-buildable.
+ */
+export function scoreSlope(s?: Slope3DEP): EnvScore {
+  const sourceUrl = s?.sourceUrl || 'https://apps.nationalmap.gov/epqs/';
+  if (!s || s.status === 'unavailable') return { score: null, label: 'Slope: unverified', detail: 'USGS 3DEP unavailable', sourceUrl };
+  const mx = s.maxSlope;
+  const detail = `3DEP max ${mx}% · avg ${s.avgSlope}% · ${Math.round(s.avgElevation)} m elev`;
+  if (mx > 25) return { score: 15, label: 'Steep — non-buildable', detail, sourceUrl };
+  if (mx >= 15) return { score: 52, label: 'Sloped — needs engineering', detail, sourceUrl };
+  if (mx >= 8) return { score: 80, label: 'Gentle slope', detail, sourceUrl };
+  return { score: 95, label: 'Flat / buildable', detail, sourceUrl };
+}
+
+/**
  * Combined land score (0..100) — merges vacant-land buildability with builder
  * interest. Weights mirror the spec: road frontage 20%, utilities 20%, slope
- * 20%, flood 20%, development proximity 20% — but the flood/wetland inputs use
- * the AUTHORITATIVE FEMA/NWI scores when available, falling back to Gemini's
- * visual estimate only when those services can't confirm.
+ * 20%, flood 20%, development proximity 20% — but the slope/flood/wetland inputs
+ * use the AUTHORITATIVE USGS 3DEP / FEMA / NWI scores when available, falling
+ * back to Gemini's visual estimate only when those services can't confirm.
  */
-export function computeLandScore(o: VisionObservations, flood: EnvScore, wetlands: EnvScore): number {
+export function computeLandScore(o: VisionObservations, flood: EnvScore, wetlands: EnvScore, slope?: EnvScore): number {
   const frontage = o.road_frontage ? 100 : 25;
   const utilities = o.utility_visibility ? 100 : 40;
-  const slope = clamp(100 - num(o.slope_score));
+  const slopeComponent = slope && slope.score != null ? slope.score : clamp(100 - num(o.slope_score));
   const floodComponent = flood.score != null ? flood.score : clamp(100 - num(o.flood_indicator_score));
   const dev = clamp(num(o.development_activity_score));
-  let score = frontage * 0.2 + utilities * 0.2 + slope * 0.2 + floodComponent * 0.2 + dev * 0.2;
+  let score = frontage * 0.2 + utilities * 0.2 + slopeComponent * 0.2 + floodComponent * 0.2 + dev * 0.2;
 
   const wet = wetlands.score != null ? wetlands.score : (o.water_or_wetland_indicators ? 20 : 90);
   if (wet < 40) score -= 14;
@@ -619,7 +640,7 @@ export function builderInterestLevel(o: VisionObservations, landScore: number): 
   return 'low';
 }
 
-function buildReasons(mode: SearchMode, o: VisionObservations, flood?: EnvScore, wetlands?: EnvScore, gisSignals?: string[]): string[] {
+function buildReasons(mode: SearchMode, o: VisionObservations, flood?: EnvScore, wetlands?: EnvScore, gisSignals?: string[], slope?: EnvScore): string[] {
   const r: string[] = [];
   if (mode === 'house') {
     // Visual distress reasons first (what the AI sees), then GIS lead signals.
@@ -639,6 +660,7 @@ function buildReasons(mode: SearchMode, o: VisionObservations, flood?: EnvScore,
     // Prefer authoritative environmental flags over the visual guess.
     if (flood && flood.score != null && flood.score < 40) r.push('FEMA high-risk flood zone');
     if (wetlands && wetlands.score != null && wetlands.score < 40) r.push('NWI mapped wetlands');
+    if (slope && slope.score != null && slope.score < 55) r.push('USGS 3DEP steep slope');
     if (num(o.tree_coverage_percent) >= 60) r.push('heavy tree coverage');
     if (Array.isArray(o.reasons)) for (const x of o.reasons) if (r.length < 6 && !r.includes(x)) r.push(x);
   }
@@ -689,15 +711,21 @@ export async function analyzeAtPoint(
     if (sv) inlineImages.push(sv);
   }
 
-  // For land, fetch authoritative FEMA flood + NWI wetlands in parallel with the
-  // (sequential) vision call so it adds no extra wall-clock time.
-  const envPromise: Promise<[FloodZoneInfo | undefined, WetlandsInfo | undefined]> =
+  // For land, fetch authoritative FEMA flood + NWI wetlands + USGS 3DEP slope in
+  // parallel with the (sequential) vision call so they add no extra wall time.
+  // Also resolve the parcel owner + mailing address at the point when it wasn't
+  // already supplied by discovery (i.e. the manual single-address path).
+  const needOwnerLookup = mode === 'land' && !parcel?.ownerName;
+  const envPromise: Promise<[FloodZoneInfo | undefined, WetlandsInfo | undefined, Slope3DEP | undefined]> =
     mode === 'land'
       ? Promise.all([
           fetchFemaFloodZone(lat, lng).catch(() => undefined),
           fetchNwiWetlands(lat, lng).catch(() => undefined),
+          fetchSlope3DEP(lat, lng).catch(() => undefined),
         ])
-      : Promise.resolve([undefined, undefined]);
+      : Promise.resolve([undefined, undefined, undefined]);
+  const ownerPromise: Promise<{ ownerName?: string; mailingAddress?: string }> =
+    needOwnerLookup ? fetchParcelOwnerAtPoint(lat, lng).catch(() => ({})) : Promise.resolve({});
 
   onStage?.('Gemini Vision analyzing imagery…');
   const observations = await geminiVisionAnalyze(inlineImages, mode, keys.gemini);
@@ -719,21 +747,31 @@ export async function analyzeAtPoint(
       analyzedAt: Date.now(), parcel,
     };
   } else {
-    onStage?.('Checking FEMA flood + USFWS wetlands…');
-    const [floodInfo, wetInfo] = await envPromise;
+    onStage?.('Checking FEMA flood + USFWS wetlands + USGS 3DEP slope…');
+    const [floodInfo, wetInfo, slopeInfo] = await envPromise;
     const flood = scoreFloodZone(floodInfo);
     const wetlands = scoreWetlands(wetInfo);
-    const score = computeLandScore(observations, flood, wetlands);
+    const slope = scoreSlope(slopeInfo);
+    const score = computeLandScore(observations, flood, wetlands, slope);
+    // Owner of record + mailing address: from discovery when present, else the
+    // point lookup (manual path).
+    const ownerInfo = needOwnerLookup ? await ownerPromise : {};
+    const enrichedParcel: ParcelInfo = {
+      ...(parcel || {}),
+      ownerName: parcel?.ownerName || ownerInfo.ownerName,
+      mailingAddress: parcel?.mailingAddress || ownerInfo.mailingAddress,
+    };
     result = {
       id: '', address, mode, lat, lng,
       imagery: { satelliteUrl, streetViewUrl, hasStreetView: svExists },
       observations,
       confidence: clamp(num(observations.confidence, 0.7) * 100, 0, 100) / 100,
       score, scoreLabel: 'Land Score',
-      reasons: buildReasons(mode, observations, flood, wetlands),
+      reasons: buildReasons(mode, observations, flood, wetlands, undefined, slope),
       recommendation: recommend(mode, score, flood),
       analyzedAt: Date.now(),
-      parcel, flood, wetlands,
+      parcel: enrichedParcel, flood, wetlands, slope,
+      slopeProfile: slopeInfo && slopeInfo.status === 'mapped' ? slopeInfo : undefined,
       builderInterest: builderInterestLevel(observations, score),
     };
   }
@@ -778,8 +816,10 @@ export interface Candidate {
   saleEpoch?: number;
   /** True when `address` came from the parcel's situs address (not a fallback). */
   addressFromSitus?: boolean;
-  // GIS distress lead signals (house mode)
+  // Owner of record + mailing address (from NC GIS parcel data)
   ownerName?: string;
+  mailingAddress?: string;
+  // GIS distress lead signals (house mode)
   absenteeOwner?: boolean;
   outOfState?: boolean;
   ownerType?: 'individual' | 'estate' | 'company' | 'public';
@@ -802,6 +842,32 @@ function fetchTimeout(url: string, ms: number): Promise<Response> {
   const c = new AbortController();
   const t = setTimeout(() => c.abort(), ms);
   return fetch(url, { signal: c.signal }).finally(() => clearTimeout(t));
+}
+
+/** Format a parcel's mailing address from NC GIS fields (street, city state, zip). */
+function composeMailing(a: any): string {
+  return [
+    String(a?.mailadd ?? '').trim(),
+    [String(a?.mcity ?? '').trim(), String(a?.mstate ?? '').trim()].filter(Boolean).join(' '),
+    String(a?.mzip ?? '').trim(),
+  ].filter(Boolean).join(', ').replace(/\s+/g, ' ').trim();
+}
+
+const NC_PARCEL_POINT = 'https://services.gis.nc.gov/secure/rest/services/NC1Map_Parcels/MapServer/1/query';
+
+/** Owner of record + mailing address of the parcel at a point (NC GIS). Used for
+ *  the manual single-address land path; discovery already carries this. */
+async function fetchParcelOwnerAtPoint(lat: number, lng: number): Promise<{ ownerName?: string; mailingAddress?: string }> {
+  try {
+    const url = `${NC_PARCEL_POINT}?geometry=${lng},${lat}&geometryType=esriGeometryPoint&inSR=4326&spatialRel=esriSpatialRelIntersects` +
+      `&outFields=${encodeURIComponent('ownname,mailadd,mcity,mstate,mzip')}&returnGeometry=false&resultRecordCount=1&f=json`;
+    const res = await fetchTimeout(url, 10000);
+    if (!res.ok) return {};
+    const d = await res.json();
+    const a = d?.features?.[0]?.attributes;
+    if (!a) return {};
+    return { ownerName: String(a.ownname ?? '').trim() || undefined, mailingAddress: composeMailing(a) || undefined };
+  } catch { return {}; }
 }
 
 /** Representative point (bounding-box center) of a GeoJSON parcel geometry. */
@@ -863,7 +929,7 @@ export async function discoverCandidates(
     `${cfg.parcelUrl}?where=${encodeURIComponent(cfg.extraWhere)}` +
     `&geometry=${xmin},${ymin},${xmax},${ymax}&geometryType=esriGeometryEnvelope&inSR=4326` +
     `&spatialRel=esriSpatialRelIntersects` +
-    `&outFields=${encodeURIComponent('parno,siteadd,scity,mailadd,mcity,mstate,ownname,gisacres,parval,landval,saledate')}` +
+    `&outFields=${encodeURIComponent('parno,siteadd,scity,mailadd,mcity,mstate,mzip,ownname,gisacres,parval,landval,saledate')}` +
     `&returnGeometry=true&maxAllowableOffset=0.0003&outSR=4326&f=geojson`;
   const PAGE = 2000;
   const MAX_PAGES = 30; // up to 60k parcels — effectively uncapped for any realistic scan
@@ -949,13 +1015,15 @@ export async function discoverCandidates(
       landValue: Number.isFinite(landValue) ? landValue : 0,
       improvementRatio, saleEpoch: Number.isFinite(saleEpoch) ? saleEpoch : undefined,
     };
+    // Owner of record + mailing address for EVERY parcel (land and house).
+    cand.ownerName = String(p.ownname ?? '').trim() || undefined;
+    cand.mailingAddress = composeMailing(p) || undefined;
     if (mode === 'house') {
       // GIS distress / motivated-seller targeting from assessor + ownership data.
       const gd = computeGisDistress({
         siteadd, scity, mailadd: String(p.mailadd ?? ''), mcity: String(p.mcity ?? ''), mstate: String(p.mstate ?? ''),
         ownname: String(p.ownname ?? ''), saleEpoch: cand.saleEpoch,
       });
-      cand.ownerName = String(p.ownname ?? '').trim() || undefined;
       cand.absenteeOwner = gd.absenteeOwner;
       cand.outOfState = gd.outOfState;
       cand.ownerType = gd.ownerType;
@@ -1013,7 +1081,8 @@ export async function analyzeCandidate(c: Candidate, mode: SearchMode, onStage?:
       parcel: {
         parcelId: c.parcelId, acres: c.acres, assessedValue: c.assessedValue,
         landValue: c.landValue, improvementRatio: c.improvementRatio,
-        ownerName: c.ownerName, absenteeOwner: c.absenteeOwner, outOfState: c.outOfState,
+        ownerName: c.ownerName, mailingAddress: c.mailingAddress,
+        absenteeOwner: c.absenteeOwner, outOfState: c.outOfState,
         ownerType: c.ownerType, yearsSinceSale: c.yearsSinceSale,
         gisDistress: c.gisDistress, gisSignals: c.gisSignals,
       },
@@ -1560,8 +1629,9 @@ export function resultsToCsv(results: PropertyResult[]): string {
   const headers = [
     'address', 'mode', 'score', 'score_label', 'confidence',
     'lat', 'lng', 'parcel_id', 'acres', 'assessed_value', 'land_value',
-    'owner', 'owner_type', 'absentee_owner', 'out_of_state', 'years_owned', 'gis_distress_score',
-    'flood_zone', 'flood_score', 'wetlands', 'wetland_score', 'builder_interest',
+    'owner', 'mailing_address', 'owner_type', 'absentee_owner', 'out_of_state', 'years_owned', 'gis_distress_score',
+    'flood_zone', 'flood_score', 'wetlands', 'wetland_score',
+    'slope_label', 'slope_score', 'avg_slope_pct', 'max_slope_pct', 'avg_elev_m', 'builder_interest',
     'reasons', 'recommendation', 'ai_summary',
   ];
   const esc = (v: unknown) => {
@@ -1572,9 +1642,10 @@ export function resultsToCsv(results: PropertyResult[]): string {
     r.address, r.mode, r.score, r.scoreLabel, r.confidence.toFixed(2),
     r.lat, r.lng,
     r.parcel?.parcelId ?? '', r.parcel?.acres ?? '', r.parcel?.assessedValue ?? '', r.parcel?.landValue ?? '',
-    r.parcel?.ownerName ?? '', r.parcel?.ownerType ?? '', r.parcel?.absenteeOwner ?? '', r.parcel?.outOfState ?? '',
+    r.parcel?.ownerName ?? '', r.parcel?.mailingAddress ?? '', r.parcel?.ownerType ?? '', r.parcel?.absenteeOwner ?? '', r.parcel?.outOfState ?? '',
     r.parcel?.yearsSinceSale != null ? Math.round(r.parcel.yearsSinceSale) : '', r.parcel?.gisDistress ?? '',
-    r.flood?.label ?? '', r.flood?.score ?? '', r.wetlands?.label ?? '', r.wetlands?.score ?? '', r.builderInterest ?? '',
+    r.flood?.label ?? '', r.flood?.score ?? '', r.wetlands?.label ?? '', r.wetlands?.score ?? '',
+    r.slope?.label ?? '', r.slope?.score ?? '', r.slopeProfile?.avgSlope ?? '', r.slopeProfile?.maxSlope ?? '', r.slopeProfile?.avgElevation ?? '', r.builderInterest ?? '',
     r.reasons.join('; '), r.recommendation, r.observations.summary || '',
   ].map(esc).join(','));
   return [headers.join(','), ...rows].join('\n');
