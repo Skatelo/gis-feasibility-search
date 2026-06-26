@@ -2043,7 +2043,7 @@ function updateZipHealth(zip: string, productive: boolean): void {
 // parcel location (localStorage, 7-day TTL) so repeat searches on the same
 // address are instant AND return identical comps.
 // ---------------------------------------------------------------------------
-const COMPS_CACHE_PREFIX = "gisfs:comps:v16:"; // v16 = drop active/pending via Zillow marketingStatus
+const COMPS_CACHE_PREFIX = "gisfs:comps:v17:"; // v17 = capture listing photo (imageUrl) from the feed
 const COMPS_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 
 function compsCacheKey(lat: number, lng: number, category: string): string {

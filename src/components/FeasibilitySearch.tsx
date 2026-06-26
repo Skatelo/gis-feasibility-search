@@ -41,6 +41,7 @@ import {
   FolderOpen,
   MessageCircle,
   TrendingUp,
+  ImageOff,
   X
 } from 'lucide-react';
 
@@ -2767,7 +2768,6 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                   </div>
                   <div className="comps-list" style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
                     {(() => {
-                      const gmKey = getUserKeys().googleMaps || '';
                       const prettyType = (t?: string) => {
                         const s = String(t || '').replace(/[_-]+/g, ' ').trim();
                         if (!s) return '';
@@ -2789,29 +2789,31 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                         flexDirection: 'column',
                         gap: '6px'
                       }}>
-                        {(() => {
-                          // Prefer the real listing photo (Realtor/Redfin/Zillow feed); fall
-                          // back to Google Street View, then a satellite image — so every comp
-                          // shows a picture even when a source omits the photo.
-                          const sv = (comp.coords && gmKey) ? `https://maps.googleapis.com/maps/api/streetview?size=400x150&location=${comp.coords.lat},${comp.coords.lng}&fov=80&pitch=0&key=${gmKey}` : '';
-                          const sat = (comp.coords && gmKey) ? `https://maps.googleapis.com/maps/api/staticmap?center=${comp.coords.lat},${comp.coords.lng}&zoom=19&size=400x150&scale=2&maptype=satellite&markers=color:red%7C${comp.coords.lat},${comp.coords.lng}&key=${gmKey}` : '';
-                          const chain = [comp.imageUrl, sv, sat].filter(Boolean) as string[];
-                          if (!chain.length) return null;
-                          return (
-                            <img
-                              src={chain[0]}
-                              data-next="1"
-                              onError={(e) => {
-                                const img = e.currentTarget;
-                                const next = Number(img.dataset.next || '1');
-                                if (next < chain.length) { img.dataset.next = String(next + 1); img.src = chain[next]; }
-                              }}
-                              alt={`Comp ${idx + 1}: ${comp.address}`}
-                              loading="lazy"
-                              style={{ width: '100%', height: '130px', objectFit: 'cover', borderRadius: '4px', border: '1px solid var(--bg-card-border)' }}
-                            />
-                          );
-                        })()}
+                        {/* The ACTUAL listing photo from the Realtor/Redfin/Zillow feed.
+                            No Google Street View/satellite fallback — show a neutral
+                            placeholder instead when a comp's source has no photo. */}
+                        {comp.imageUrl ? (
+                          <img
+                            src={comp.imageUrl}
+                            onError={(e) => {
+                              const img = e.currentTarget;
+                              img.style.display = 'none';
+                              if (img.nextElementSibling instanceof HTMLElement) img.nextElementSibling.style.display = 'flex';
+                            }}
+                            alt={`Comp ${idx + 1}: ${comp.address}`}
+                            loading="lazy"
+                            style={{ width: '100%', height: '130px', objectFit: 'cover', borderRadius: '4px', border: '1px solid var(--bg-card-border)' }}
+                          />
+                        ) : null}
+                        <div style={{
+                          display: comp.imageUrl ? 'none' : 'flex',
+                          alignItems: 'center', justifyContent: 'center', gap: '6px',
+                          width: '100%', height: '130px', borderRadius: '4px',
+                          border: '1px dashed var(--bg-card-border)', background: 'var(--bg-main, #f1f5f9)',
+                          color: 'var(--text-muted)', fontSize: '0.72rem',
+                        }}>
+                          <ImageOff size={14} /> No listing photo for this comp
+                        </div>
                         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                           <span style={{ 
                             fontSize: '11px', 
