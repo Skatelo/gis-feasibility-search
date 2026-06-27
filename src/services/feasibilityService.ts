@@ -2043,7 +2043,7 @@ function updateZipHealth(zip: string, productive: boolean): void {
 // parcel location (localStorage, 7-day TTL) so repeat searches on the same
 // address are instant AND return identical comps.
 // ---------------------------------------------------------------------------
-const COMPS_CACHE_PREFIX = "gisfs:comps:v17:"; // v17 = capture listing photo (imageUrl) from the feed
+const COMPS_CACHE_PREFIX = "gisfs:comps:v18:"; // v18 = capture + backfill real listing photos for every comp
 const COMPS_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 
 function compsCacheKey(lat: number, lng: number, category: string): string {
@@ -2389,14 +2389,22 @@ function redfinTypeLabel(code: any): string | undefined {
  * server-side via `yearBuiltRange=min:YYYY`), so `newConstructionFlag` is set
  * true by the caller for every record returned from a year-filtered query.
  */
+/** Upgrades a listing-photo URL to the largest variant so it's crisp at full
+ *  display size. Realtor's rdcpix uses a size token before .jpg (s/t/m/…); "od"
+ *  is the original/full size. Idempotent and only touches rdcpix. */
+function upscaleListingPhoto(url: string): string {
+  if (/rdcpix\.com/i.test(url)) return url.replace(/(-[a-z]?\d+)[a-z]{1,3}\.jpg/i, "$1od.jpg");
+  return url;
+}
+
 /** Finds the first real LISTING-photo URL anywhere in a RealtyAPI record
  *  (Realtor rdcpix / Zillow zillowstatic / Redfin cdn), preferring the primary
- *  photo. Forces https so the image isn't mixed-content-blocked. */
+ *  photo. Forces https and the full-size variant. */
 function findPhotoUrl(obj: any, depth = 0): string | undefined {
   if (obj == null || depth > 6) return undefined;
   if (typeof obj === "string") {
     if (/^https?:\/\//i.test(obj) && /(rdcpix|zillowstatic|cdn-redfin|ssl\.cdn|\.jpe?g|\.png|\.webp)/i.test(obj) && !/sprite|logo|icon|favicon/i.test(obj)) {
-      return obj.replace(/^http:/i, "https:");
+      return upscaleListingPhoto(obj.replace(/^http:/i, "https:"));
     }
     return undefined;
   }
@@ -2997,6 +3005,40 @@ async function verifyZillowCompPrices(
   }
 }
 
+/**
+ * Best-effort: fetch the REAL listing photo for comps that don't have one yet
+ * (typically the Google-search-sourced comps). For each photoless comp with
+ * coordinates, runs a tiny-radius RealtyAPI SOLD search at its point and matches
+ * by street to pull THAT property's primary photo. Bounded + parallel; mutates
+ * comp.imageUrl in place. Never throws.
+ */
+async function backfillCompPhotos(comps: CompProperty[], key: string): Promise<void> {
+  if (!key) return;
+  const targets = comps.filter((c) => !c.imageUrl && c.coords && typeof c.coords.lat === 'number');
+  if (!targets.length) return;
+
+  const lookOn = async (platform: 'realtor' | 'zillow' | 'redfin', c: CompProperty): Promise<string | undefined> => {
+    try {
+      const q = new URLSearchParams({ latitude: String(c.coords!.lat), longitude: String(c.coords!.lng), radius: '0.2', page: '1' });
+      if (platform === 'zillow') { q.set('listingStatus', 'Sold'); q.set('soldInLast', '12_months'); }
+      else { q.set('searchType', 'Sold'); q.set('sortOrder', 'Most_Recently_Sold'); q.set('resultCount', '25'); }
+      const res = await fetchWithTimeout(`${REALTY_API_HOSTS[platform]}/search/bycoordinates?${q.toString()}`, 12000, { headers: { 'x-realtyapi-key': key } });
+      if (!res.ok) return undefined;
+      const want = normalizeStreetKey(c.address);
+      for (const raw of extractRealtyListings(await res.json())) {
+        const n = normalizeRealtyListing(raw, platform);
+        if (n?.address && n.imageUrl && normalizeStreetKey(n.address) === want) return n.imageUrl as string;
+      }
+    } catch { /* ignore */ }
+    return undefined;
+  };
+
+  await Promise.all(targets.slice(0, 14).map(async (c) => {
+    const photo = (await lookOn('realtor', c)) || (await lookOn('zillow', c)) || (await lookOn('redfin', c));
+    if (photo) c.imageUrl = photo;
+  }));
+}
+
 export async function fetchGoogleDistanceMatrixComps(
   lat: number,
   lng: number,
@@ -3254,6 +3296,11 @@ export async function fetchGoogleDistanceMatrixComps(
     comps: result,
     summary,
   });
+
+  // Backfill REAL listing photos for any comp that still lacks one (e.g. the
+  // Google-search comps) so every comp shows an actual property photo. Best-effort.
+  onStageChange?.('Fetching listing photos…');
+  await backfillCompPhotos(result, getRealtyApiKey());
 
   console.log(`Returning ${result.length} verified new-construction comps.`);
   if (result.length > 0) writeCompsCache(cacheKey, result, summary);

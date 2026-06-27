@@ -2802,7 +2802,9 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                             }}
                             alt={`Comp ${idx + 1}: ${comp.address}`}
                             loading="lazy"
-                            style={{ width: '100%', height: '130px', objectFit: 'cover', borderRadius: '4px', border: '1px solid var(--bg-card-border)' }}
+                            /* Full photo, never cropped: natural width/height (object-fit
+                               contain) inside a fixed-ratio frame so nothing is cut off. */
+                            style={{ width: '100%', height: 'auto', maxHeight: '420px', objectFit: 'contain', display: 'block', borderRadius: '4px', border: '1px solid var(--bg-card-border)', background: '#0f172a' }}
                           />
                         ) : null}
                         <div style={{
