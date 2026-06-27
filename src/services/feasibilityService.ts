@@ -880,12 +880,11 @@ export async function executeLandAnalysis(
     return sp;
   });
 
-  // STAGE 3 — zoning. Real district from the county's own GIS at the parcel
-  // point; if the county publishes nothing, fall back to a Google-Search-
-  // grounded web lookup (labeled "verify"). Never fabricated.
+  // STAGE 3 — zoning. FUSION FIRST: the Gemini + DeepSeek web lookup determines
+  // the district; the county's own GIS zoning layer at the parcel point is the
+  // FALLBACK used when the fusion can't confirm a code. Never fabricated.
   // Cache the RESOLVED district by parcel so re-running or refining a search is
-  // instant — this matters most for city parcels, whose lookup needs the slower
-  // grounded web fallback. Only successful (non-N/A) resolutions are cached.
+  // instant. Only successful (non-N/A) resolutions are cached.
   const zoningCacheKey = `gisfs:zoning:v2:${parcelId !== 'N/A' ? parcelId : `${countyName}:${lat.toFixed(5)}:${lng.toFixed(5)}`}`;
   const cachedZoning = readZoningCache(zoningCacheKey);
   if (cachedZoning) {
@@ -894,19 +893,20 @@ export async function executeLandAnalysis(
     zoningSource = cachedZoning.source;
     zoningSourceUrl = cachedZoning.sourceUrl;
   } else {
-    const liveZoning = await fetchCountyZoningCode(countyName, lng, lat);
-    if (liveZoning) {
-      zoningCode = liveZoning.code;
-      zoningDescription = liveZoning.description || `${countyName} County GIS zoning district`;
-      zoningSource = 'county-gis';
+    onStageChange?.("Looking up zoning (AI fusion)...");
+    const webZoning = await fetchZoningViaWebSearch(info.siteadd || addressString, countyName, lat, lng);
+    if (webZoning) {
+      zoningCode = webZoning.code;
+      zoningDescription = `${webZoning.description} (AI fusion — verify)`;
+      zoningSource = 'web';
+      zoningSourceUrl = webZoning.sourceUrl;
     } else {
-      onStageChange?.("Looking up zoning (web search)...");
-      const webZoning = await fetchZoningViaWebSearch(info.siteadd || addressString, countyName, lat, lng);
-      if (webZoning) {
-        zoningCode = webZoning.code;
-        zoningDescription = `${webZoning.description} (web lookup — verify)`;
-        zoningSource = 'web';
-        zoningSourceUrl = webZoning.sourceUrl;
+      // Fallback: the county's own GIS zoning layer at the parcel point.
+      const liveZoning = await fetchCountyZoningCode(countyName, lng, lat);
+      if (liveZoning) {
+        zoningCode = liveZoning.code;
+        zoningDescription = liveZoning.description || `${countyName} County GIS zoning district`;
+        zoningSource = 'county-gis';
       } else {
         // Never show "See map" — the user needs the actual district. We couldn't
         // pin it automatically here; the report's grounded zoning section verifies
