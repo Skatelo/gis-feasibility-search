@@ -880,11 +880,12 @@ export async function executeLandAnalysis(
     return sp;
   });
 
-  // STAGE 3 — zoning. FUSION FIRST: the Gemini + DeepSeek web lookup determines
-  // the district; the county's own GIS zoning layer at the parcel point is the
-  // FALLBACK used when the fusion can't confirm a code. Never fabricated.
-  // Cache the RESOLVED district by parcel so re-running or refining a search is
-  // instant. Only successful (non-N/A) resolutions are cached.
+  // STAGE 3 — zoning. COMBINE the county's authoritative GIS zoning layer with a
+  // Gemini verification: the GIS code at the parcel point SEEDS the AI, which
+  // confirms it against the official zoning map (or fills it in for city parcels
+  // the county layer leaves blank). GIS stays authoritative — the AI confirms it,
+  // fills gaps, or flags a discrepancy to verify. Never fabricated.
+  // Cache the RESOLVED district by parcel so re-running a search is instant.
   const zoningCacheKey = `gisfs:zoning:v2:${parcelId !== 'N/A' ? parcelId : `${countyName}:${lat.toFixed(5)}:${lng.toFixed(5)}`}`;
   const cachedZoning = readZoningCache(zoningCacheKey);
   if (cachedZoning) {
@@ -893,29 +894,36 @@ export async function executeLandAnalysis(
     zoningSource = cachedZoning.source;
     zoningSourceUrl = cachedZoning.sourceUrl;
   } else {
-    onStageChange?.("Looking up zoning (AI fusion)...");
-    const webZoning = await fetchZoningViaWebSearch(info.siteadd || addressString, countyName, lat, lng);
-    if (webZoning) {
-      zoningCode = webZoning.code;
-      zoningDescription = `${webZoning.description} (AI fusion — verify)`;
+    onStageChange?.("Resolving zoning (county GIS + AI)...");
+    const gisZoning = await fetchCountyZoningCode(countyName, lng, lat).catch(() => null);
+    const aiZoning = await fetchZoningViaWebSearch(info.siteadd || addressString, countyName, lat, lng, gisZoning?.code || null).catch(() => null);
+    const normZ = (s: string) => (s || '').toUpperCase().replace(/\s+/g, '');
+
+    if (gisZoning && aiZoning && normZ(gisZoning.code) === normZ(aiZoning.code)) {
+      // Both agree → authoritative GIS code, AI-confirmed.
+      zoningCode = gisZoning.code;
+      zoningDescription = `${gisZoning.description || aiZoning.description || `${countyName} County GIS zoning district`} (county GIS — AI-confirmed)`;
+      zoningSource = 'county-gis';
+      zoningSourceUrl = aiZoning.sourceUrl;
+    } else if (gisZoning) {
+      // GIS has the authoritative code (AI couldn't confirm or differed → keep GIS, flag).
+      zoningCode = gisZoning.code;
+      zoningDescription = `${gisZoning.description || `${countyName} County GIS zoning district`}${aiZoning ? ` (county GIS; AI suggested ${aiZoning.code} — verify)` : ''}`;
+      zoningSource = 'county-gis';
+      zoningSourceUrl = aiZoning?.sourceUrl;
+    } else if (aiZoning) {
+      // City parcel / GIS gap → the AI lookup fills it in.
+      zoningCode = aiZoning.code;
+      zoningDescription = `${aiZoning.description} (AI web lookup — verify)`;
       zoningSource = 'web';
-      zoningSourceUrl = webZoning.sourceUrl;
+      zoningSourceUrl = aiZoning.sourceUrl;
     } else {
-      // Fallback: the county's own GIS zoning layer at the parcel point.
-      const liveZoning = await fetchCountyZoningCode(countyName, lng, lat);
-      if (liveZoning) {
-        zoningCode = liveZoning.code;
-        zoningDescription = liveZoning.description || `${countyName} County GIS zoning district`;
-        zoningSource = 'county-gis';
-      } else {
-        // Never show "See map" — the user needs the actual district. We couldn't
-        // pin it automatically here; the report's grounded zoning section verifies
-        // it, and the link points to the authoritative county GIS to read the code.
-        zoningCode = "N/A";
-        zoningDescription = hasCountyZoning(countyName)
-          ? `Not auto-resolved at the parcel point — to be verified against ${countyName} County GIS`
-          : "No published county zoning GIS; web lookup found nothing";
-      }
+      // Never show "See map" — neither source resolved it; the report's grounded
+      // zoning section verifies it against the authoritative county GIS.
+      zoningCode = "N/A";
+      zoningDescription = hasCountyZoning(countyName)
+        ? `Not auto-resolved at the parcel point — to be verified against ${countyName} County GIS`
+        : "No published county zoning GIS; web lookup found nothing";
     }
     if (zoningCode && zoningCode !== 'N/A') {
       writeZoningCache(zoningCacheKey, { code: zoningCode, description: zoningDescription, source: zoningSource, sourceUrl: zoningSourceUrl });
@@ -1894,64 +1902,18 @@ async function zoningViaGemini(promptText: string, geminiKey: string): Promise<Z
   }
 }
 
-/** DeepSeek V4 Pro with the web_search tool (backed by Gemini grounding) → parsed
- *  zoning result. The fusion's second opinion; returns null without a DeepSeek key. */
-async function zoningViaDeepSeek(promptText: string): Promise<ZoningResult | null> {
-  const key = getDeepSeekKey();
-  const geminiKey = getUserKeys().gemini || '';
-  if (!key || !geminiKey) return null;
-  const tools = [{
-    type: 'function',
-    function: {
-      name: 'web_search',
-      description: 'Search the live web for official zoning info (county/city GIS parcel viewer, zoning map, or ordinance) for a specific address/parcel. Returns a brief with source URLs.',
-      parameters: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] },
-    },
-  }];
-  const messages: any[] = [
-    { role: 'system', content: `${ZONING_SYSTEM} Use the web_search tool to look up the parcel. Return ONLY the requested JSON.` },
-    { role: 'user', content: promptText },
-  ];
-  let searches = 0;
-  try {
-    for (let round = 0; round < 4; round++) {
-      const body = JSON.stringify({ model: 'deepseek-v4-pro', messages, tools, tool_choice: 'auto', thinking: { type: 'disabled' }, stream: false, temperature: 0.2, max_tokens: 1500 });
-      const msg = await postDeepSeekOnce(body, key);
-      if (!msg) return null;
-      const calls = Array.isArray(msg.tool_calls) ? msg.tool_calls.filter((t: any) => t?.function?.name === 'web_search') : [];
-      if (calls.length && searches < 4 && round < 3) {
-        messages.push(msg);
-        const results = await Promise.all(calls.map(async (tc: any) => {
-          if (searches >= 4) return { id: tc.id, content: '(search limit reached)' };
-          searches++;
-          let q = ''; try { q = JSON.parse(tc.function.arguments || '{}').query || ''; } catch { /* */ }
-          return { id: tc.id, content: q ? await webSearchViaGemini(q, geminiKey) : '(empty query)' };
-        }));
-        for (const r of results) messages.push({ role: 'tool', tool_call_id: r.id, content: r.content });
-        continue;
-      }
-      if (msg.content) return parseZoningResult(msg.content);
-      const finalMsg = await postDeepSeekOnce(JSON.stringify({ model: 'deepseek-v4-pro', messages, thinking: { type: 'disabled' }, stream: false, temperature: 0.2, max_tokens: 1500 }), key);
-      return finalMsg?.content ? parseZoningResult(finalMsg.content) : null;
-    }
-  } catch (e) { console.warn('DeepSeek zoning lookup failed:', e); }
-  return null;
-}
-
 /**
- * FUSION zoning lookup (used when the county GIS doesn't resolve a code):
- * Gemini 3.5 Flash (Google-Search grounded) and DeepSeek V4 Pro (web_search tool)
- * each determine the district in PARALLEL. If they AGREE, that code is returned
- * (high confidence). If they DISAGREE, Gemini judges — re-verifying against the
- * official source — and the judged code wins. Falls back to whichever single
- * model answered (DeepSeek is skipped when no key is set), so it degrades to the
- * prior Gemini-only behavior gracefully.
+ * Gemini 3.5 Flash with Google-Search grounding over the official county/city
+ * zoning sources. The caller COMBINES this with the county GIS layer to resolve
+ * the district (see executeLandAnalysis STAGE 3). Optionally seeded with the GIS
+ * code so the AI can confirm/correct the authoritative layer.
  */
 export async function fetchZoningViaWebSearch(
   address: string,
   countyName?: string,
   lat?: number,
   lng?: number,
+  gisHint?: string | null,
 ): Promise<ZoningResult | null> {
   const geminiApiKey = getUserKeys().gemini || "";
   if (!geminiApiKey) {
@@ -1961,7 +1923,10 @@ export async function fetchZoningViaWebSearch(
 
   const countyLine = countyName ? ` It is in ${countyName} County, North Carolina.` : '';
   const coordLine = (lat != null && lng != null) ? ` The parcel is at coordinates ${lat.toFixed(6)}, ${lng.toFixed(6)}.` : '';
-  const lookupPrompt = `Find the official ZONING DISTRICT for this exact property: "${address}".${countyLine}${coordLine}
+  const hintLine = gisHint
+    ? `\nThe county GIS zoning layer returns "${gisHint}" at this parcel point — this is usually authoritative. CONFIRM it against the official zoning map, and only return a different code if you find clear official evidence the parcel's actual zoning is different (e.g. it sits inside a municipality with its own zoning).`
+    : '';
+  const lookupPrompt = `Find the official ZONING DISTRICT for this exact property: "${address}".${countyLine}${coordLine}${hintLine}
 Search official sources: the county/municipal zoning map or ordinance, the local GIS/parcel viewer (look up the parcel and read its zoning attribute), or the planning department. Check whether the parcel is inside a municipality (its city zoning applies) or in the county's jurisdiction (county zoning applies).
 Return ONLY a JSON object inside a markdown code block:
 \`\`\`json
@@ -1969,32 +1934,7 @@ Return ONLY a JSON object inside a markdown code block:
 \`\`\`
 Rules: "zoningCode" must be the actual district code that jurisdiction uses for THIS parcel (e.g. R-1, RA, C-2, PUD, MX, RR). Determine the specific code — do NOT answer "see the map" or "varies". If after a genuine search you truly cannot confirm it from a credible official/government source, return {"zoningCode": null}. Never guess or fabricate a code.`;
 
-  // Two independent lookups in parallel (the fusion).
-  const [g, d] = await Promise.all([
-    zoningViaGemini(lookupPrompt, geminiApiKey),
-    zoningViaDeepSeek(lookupPrompt).catch(() => null),
-  ]);
-
-  if (!g && !d) return null;
-  if (!d) return g;
-  if (!g) return d;
-
-  // Agreement → high confidence.
-  const norm = (s: string) => s.toUpperCase().replace(/\s+/g, '');
-  if (norm(g.code) === norm(d.code)) return g;
-
-  // Disagreement → Gemini JUDGE re-verifies and decides.
-  const judgePrompt = `Two independent zoning lookups DISAGREE for the property "${address}".${countyLine}${coordLine}
-- Lookup A: zoning code "${g.code}" (${g.description}) — source: ${g.sourceUrl || 'none'}
-- Lookup B: zoning code "${d.code}" (${d.description}) — source: ${d.sourceUrl || 'none'}
-Verify against the OFFICIAL county/municipal zoning map, GIS parcel viewer, or ordinance for THIS exact parcel, and decide the CORRECT current zoning district. Prefer the official-source answer; if neither is right, return the code you can verify.
-Return ONLY a JSON object inside a markdown code block:
-\`\`\`json
-{ "zoningCode": "R-1", "zoningDescription": "Single-Family Residential", "source": "https://..." }
-\`\`\`
-Never guess or fabricate a code.`;
-  const judged = await zoningViaGemini(judgePrompt, geminiApiKey);
-  return judged || g; // fall back to the grounded Gemini answer
+  return await zoningViaGemini(lookupPrompt, geminiApiKey);
 }
 
 /**
