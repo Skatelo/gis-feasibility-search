@@ -3530,3 +3530,36 @@ img, svg, video, canvas, table, pre { max-width: 100%; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 0.001ms !important; transition-duration: 0.001ms !important; }
 }
+
+/* GIS Feasibility Search — Address / Parcel-ID mode toggle */
+.search-mode-toggle {
+  display: inline-flex;
+  gap: 4px;
+  margin: 0 0 0.75rem;
+  padding: 4px;
+  background: var(--bg-main, #f1f5f9);
+  border: 1px solid var(--bg-card-border);
+  border-radius: var(--radius-md);
+}
+.search-mode-toggle .mode-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  font-family: var(--font-sans);
+  font-weight: 600;
+  font-size: 0.82rem;
+  padding: 7px 16px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: var(--transition);
+}
+.search-mode-toggle .mode-btn:hover:not(.active) { color: var(--text-primary); }
+.search-mode-toggle .mode-btn.active {
+  background: linear-gradient(135deg, var(--primary), var(--secondary));
+  color: #fff;
+  box-shadow: 0 2px 8px var(--primary-glow, rgba(99,102,241,0.3));
+}
+.search-mode-toggle .mode-btn:disabled { opacity: 0.6; cursor: not-allowed; }

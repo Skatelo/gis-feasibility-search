@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import type { FormEvent, KeyboardEvent, FC } from 'react';
 import { createRoot } from 'react-dom/client';
-import { executeLandAnalysis, chatWithGemini, getUserKeys } from '../services/feasibilityService';
+import { executeLandAnalysis, chatWithGemini, getUserKeys, detectNcCounty, lookupParcelById } from '../services/feasibilityService';
 import type { ChatMessage } from '../services/feasibilityService';
 import { saveReport, getReportEtaMs, recordReportDuration } from '../services/reportStore';
 import { ReportsDrawer } from './ReportsDrawer';
@@ -42,6 +42,7 @@ import {
   MessageCircle,
   TrendingUp,
   ImageOff,
+  Landmark,
   X
 } from 'lucide-react';
 
@@ -49,22 +50,6 @@ import {
 
 
 declare const google: any;
-
-const COUNTY_NAMES = [
-  "Alamance", "Alexander", "Alleghany", "Anson", "Ashe", "Avery", "Beaufort", "Bertie", 
-  "Bladen", "Brunswick", "Buncombe", "Burke", "Cabarrus", "Caldwell", "Camden", "Carteret", 
-  "Caswell", "Catawba", "Chatham", "Cherokee", "Chowan", "Clay", "Cleveland", "Columbus", 
-  "Craven", "Cumberland", "Currituck", "Dare", "Davidson", "Davie", "Duplin", "Durham", 
-  "Edgecombe", "Forsyth", "Franklin", "Gaston", "Gates", "Graham", "Granville", "Greene", 
-  "Guilford", "Halifax", "Harnett", "Haywood", "Henderson", "Hertford", "Hoke", "Hyde", 
-  "Iredell", "Jackson", "Johnston", "Jones", "Lee", "Lenoir", "Lincoln", "Macon", 
-  "Madison", "Martin", "McDowell", "Mecklenburg", "Mitchell", "Montgomery", "Moore", "Nash", 
-  "New Hanover", "Northampton", "Onslow", "Orange", "Pamlico", "Pasquotank", "Pender", 
-  "Perquimans", "Person", "Pitt", "Polk", "Randolph", "Richmond", "Robeson", "Rockingham", 
-  "Rowan", "Rutherford", "Sampson", "Scotland", "Stanly", "Stokes", "Surry", "Swain", 
-  "Transylvania", "Tyrrell", "Union", "Vance", "Wake", "Warren", "Washington", "Watauga", 
-  "Wayne", "Wilkes", "Wilson", "Yadkin", "Yancey"
-];
 
 
 const CodeBlock: FC<{ code: string; language: string }> = ({ code, language }) => {
@@ -662,7 +647,8 @@ export const FeasibilitySearch: FC = () => {
   const hasKeys = hasGoogleMapsKey && hasGeminiKey;
 
   const [addressInput, setAddressInput] = useState('');
-  const [selectedCounty, setSelectedCounty] = useState('Mecklenburg');
+  const [searchMode, setSearchMode] = useState<'address' | 'parcel'>('address');
+  const [parcelIdInput, setParcelIdInput] = useState('');
   const [loading, setLoading] = useState(false);
   const [loadingStage, setLoadingStage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -2009,7 +1995,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
     }
   };
 
-  const handleSearch = async (addressToSearch: string, countyToSearch: string = selectedCounty) => {
+  const handleSearch = async (addressToSearch: string, countyOverride?: string) => {
     if (!addressToSearch.trim()) return;
     if (!hasKeys) {
       setError("Please set your personal Google Maps and Gemini API Keys in Account Settings to run feasibility analyses.");
@@ -2018,7 +2004,6 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
 
     const seq = ++searchSeqRef.current; // invalidates any in-flight previous search
     setLoading(true);
-    setLoadingStage("Querying county GIS records...");
     setError(null);
     setData(null);
     resetChatUiState();
@@ -2034,15 +2019,30 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
     };
 
     try {
+      // The county is determined AUTOMATICALLY from the NC address — no manual
+      // selection. (countyOverride comes from a parcel-ID lookup or history.)
+      let county = countyOverride;
+      if (!county) {
+        setLoadingStage("Detecting county…");
+        county = (await detectNcCounty(addressToSearch, getUserKeys().googleMaps || '')) || undefined;
+        if (seq !== searchSeqRef.current) return;
+        if (!county) {
+          setError("Couldn't determine the North Carolina county for that address. Please confirm it's a valid NC address.");
+          setLoading(false); setLoadingStage(null);
+          return;
+        }
+      }
+
+      setLoadingStage("Querying county GIS records...");
       const result = await executeLandAnalysis(
-        countyToSearch,
+        county,
         addressToSearch,
         (stage) => { if (seq === searchSeqRef.current) setLoadingStage(stage); },
         onPartial
       );
       if (seq !== searchSeqRef.current) return;
       setData(result);
-      addToHistory(result.inputAddress, countyToSearch);
+      addToHistory(result.inputAddress, county);
       // All site data is in — generate the AI feasibility report (the countdown
       // timer in the chat panel tracks this phase).
       generateInitialChatReport(result);
@@ -2059,16 +2059,44 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
     }
   };
 
+  // Look up a property by its NC parcel ID (PIN), then run the normal analysis.
+  const handleParcelLookup = async () => {
+    const pin = parcelIdInput.trim();
+    if (!pin) return;
+    if (!hasKeys) {
+      setError("Please set your personal Google Maps and Gemini API Keys in Account Settings to run feasibility analyses.");
+      return;
+    }
+    setLoading(true);
+    setError(null);
+    setLoadingStage("Looking up parcel ID…");
+    try {
+      const found = await lookupParcelById(pin, getUserKeys().googleMaps || '');
+      if (!found) {
+        setError(`No NC parcel found for ID "${pin}". Check the parcel number (PIN) — it must match the county's records exactly.`);
+        setLoading(false); setLoadingStage(null);
+        return;
+      }
+      setAddressInput(found.address);
+      await handleSearch(found.address, found.county); // county known from the parcel record
+    } catch (err: any) {
+      console.error(err);
+      setError(err?.message || "Parcel ID lookup failed.");
+      setLoading(false); setLoadingStage(null);
+    }
+  };
+
   const handleSubmit = (e: FormEvent) => {
     e.preventDefault();
-    handleSearch(addressInput);
+    if (searchMode === 'parcel') handleParcelLookup();
+    else handleSearch(addressInput);
   };
 
   const handleHistoryClick = (item: any) => {
     const address = typeof item === 'string' ? item : item.address;
-    const county = typeof item === 'string' ? 'Mecklenburg' : item.county;
+    const county = typeof item === 'string' ? undefined : item.county;
+    setSearchMode('address');
     setAddressInput(address);
-    setSelectedCounty(county);
     handleSearch(address, county);
   };
 
@@ -2109,54 +2137,79 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
             </div>
           )}
 
-          <form onSubmit={handleSubmit} className="search-form-row">
+          {/* Search by address (county auto-detected) or by NC parcel ID */}
+          <div className="search-mode-toggle">
+            <button
+              type="button"
+              className={`mode-btn ${searchMode === 'address' ? 'active' : ''}`}
+              onClick={() => { setSearchMode('address'); setError(null); }}
+              disabled={loading}
+            >
+              <MapPin size={14} /> Address
+            </button>
+            <button
+              type="button"
+              className={`mode-btn ${searchMode === 'parcel' ? 'active' : ''}`}
+              onClick={() => { setSearchMode('parcel'); setError(null); }}
+              disabled={loading}
+            >
+              <Landmark size={14} /> Parcel ID
+            </button>
+          </div>
 
-            <div className="select-wrapper">
-              <select
-                className="county-select"
-                value={selectedCounty}
-                onChange={(e) => setSelectedCounty(e.target.value)}
-                disabled={loading}
-              >
-                {COUNTY_NAMES.map((county) => (
-                  <option key={county} value={county}>
-                    {county} County
-                  </option>
-                ))}
-              </select>
-            </div>
-            <div className="autocomplete-container" ref={containerRef}>
-              <div className="input-group">
-                <Search className="input-icon" size={20} />
-                <input
-                  type="text"
-                  placeholder="Search address (e.g. 600 E 4th St)..."
-                  value={addressInput}
-                  onChange={(e) => setAddressInput(e.target.value)}
-                  onKeyDown={handleKeyDown}
-                  onFocus={() => {
-                    if (predictions.length > 0) setShowDropdown(true);
-                  }}
-                  disabled={loading}
-                  required
-                />
+          <form onSubmit={handleSubmit} className="search-form-row">
+            {searchMode === 'address' ? (
+              <div className="autocomplete-container" ref={containerRef}>
+                <div className="input-group">
+                  <Search className="input-icon" size={20} />
+                  <input
+                    type="text"
+                    placeholder="Search any NC address — county is detected automatically…"
+                    value={addressInput}
+                    onChange={(e) => setAddressInput(e.target.value)}
+                    onKeyDown={handleKeyDown}
+                    onFocus={() => {
+                      if (predictions.length > 0) setShowDropdown(true);
+                    }}
+                    disabled={loading}
+                    required
+                  />
+                </div>
+                {showDropdown && predictions.length > 0 && (
+                  <ul className="suggestions-list">
+                    {predictions.map((pred, index) => (
+                      <li
+                        key={pred.place_id}
+                        className={`suggestion-item ${index === activeIndex ? "active" : ""}`}
+                        onClick={() => handleSelectPrediction(pred)}
+                      >
+                        <MapPin size={14} className="suggestion-icon" />
+                        <span className="suggestion-text">{pred.description}</span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
               </div>
-              {showDropdown && predictions.length > 0 && (
-                <ul className="suggestions-list">
-                  {predictions.map((pred, index) => (
-                    <li
-                      key={pred.place_id}
-                      className={`suggestion-item ${index === activeIndex ? "active" : ""}`}
-                      onClick={() => handleSelectPrediction(pred)}
-                    >
-                      <MapPin size={14} className="suggestion-icon" />
-                      <span className="suggestion-text">{pred.description}</span>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </div>
-            <button type="submit" disabled={loading || !addressInput.trim() || !hasKeys} className="btn btn-primary">
+            ) : (
+              <div className="autocomplete-container">
+                <div className="input-group">
+                  <Landmark className="input-icon" size={20} />
+                  <input
+                    type="text"
+                    placeholder="Enter NC parcel ID / PIN (e.g. 56120014450000)…"
+                    value={parcelIdInput}
+                    onChange={(e) => setParcelIdInput(e.target.value)}
+                    disabled={loading}
+                    required
+                  />
+                </div>
+              </div>
+            )}
+            <button
+              type="submit"
+              disabled={loading || (searchMode === 'address' ? !addressInput.trim() : !parcelIdInput.trim()) || !hasKeys}
+              className="btn btn-primary"
+            >
               {loading ? (
                 <>
                   <Loader2 className="spinner" size={18} />

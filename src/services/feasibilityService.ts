@@ -464,6 +464,73 @@ function writeZoningCache(key: string, z: CachedZoning): void {
 }
 
 /**
+ * Auto-detect the NC county for an address (so the user never picks one). Google
+ * geocodes the address biased to North Carolina and reads the county
+ * (administrative_area_level_2). Returns the canonical NC county name, or null if
+ * the address isn't a resolvable NC location.
+ */
+export async function detectNcCounty(address: string, googleKey: string): Promise<string | null> {
+  if (!googleKey || !address.trim()) return null;
+  try {
+    const url = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(address)}` +
+      `&components=${encodeURIComponent('administrative_area:NC|country:US')}&key=${googleKey}`;
+    const res = await fetchWithTimeout(url, 8000);
+    if (!res.ok) return null;
+    const data = await res.json();
+    if (data.status !== 'OK' || !data.results?.[0]) return null;
+    const comps = data.results[0].address_components || [];
+    const state = comps.find((c: any) => c.types?.includes('administrative_area_level_1'));
+    if (state && !/north carolina/i.test(state.long_name || '') && !/^NC$/i.test(state.short_name || '')) return null;
+    const countyComp = comps.find((c: any) => c.types?.includes('administrative_area_level_2'));
+    if (!countyComp) return null;
+    const county = String(countyComp.long_name || countyComp.short_name || '').replace(/\s+County$/i, '').trim();
+    return NC_COUNTY_NAMES.find((n) => n.toLowerCase() === county.toLowerCase()) || null;
+  } catch { return null; }
+}
+
+/**
+ * Look up a property by its NC parcel ID (PIN) on the statewide NC OneMap parcel
+ * layer. Returns the parcel's situs address (or a reverse-geocoded one for vacant
+ * land) and county so the normal analysis can run from it. Null if not found.
+ */
+export async function lookupParcelById(pin: string, googleKey: string): Promise<{ address: string; county: string } | null> {
+  const clean = pin.trim().replace(/'/g, "''");
+  if (clean.length < 3) return null;
+  const where = `UPPER(parno) = '${clean.toUpperCase()}'`;
+  const url = `${NC_PARCEL_ENGINE}?where=${encodeURIComponent(where)}` +
+    `&outFields=${encodeURIComponent('parno,siteadd,scity,cntyname')}&returnGeometry=true&outSR=4326&resultRecordCount=1&f=json`;
+  try {
+    const res = await fetchWithTimeout(url, 15000);
+    if (!res.ok) return null;
+    const data = await res.json();
+    const feat = data?.features?.[0];
+    if (!feat) return null;
+    const a = feat.attributes || {};
+    const county = String(a.cntyname || '').trim();
+    const situs = String(a.siteadd || '').trim();
+    const scity = String(a.scity || '').trim();
+    if (situs) return { address: `${situs}${scity ? `, ${scity}` : ''}, NC`, county };
+
+    // Vacant parcel with no situs address — reverse-geocode the polygon centroid.
+    const ring = feat.geometry?.rings?.[0];
+    if (ring?.length && googleKey) {
+      let sx = 0, sy = 0; for (const p of ring) { sx += p[0]; sy += p[1]; }
+      const lng = sx / ring.length, lat = sy / ring.length;
+      try {
+        const gr = await fetchWithTimeout(`https://maps.googleapis.com/maps/api/geocode/json?latlng=${lat},${lng}&key=${googleKey}`, 8000);
+        if (gr.ok) {
+          const gj = await gr.json();
+          const best = gj.results?.find((r: any) => r.types?.some((t: string) => ['street_address', 'premise'].includes(t))) || gj.results?.[0];
+          const addr = (best?.formatted_address || '').replace(/,?\s*USA$/i, '').trim();
+          if (addr) return { address: addr, county };
+        }
+      } catch { /* fall through */ }
+    }
+    return county ? { address: `${county} County parcel ${a.parno}`, county } : null;
+  } catch { return null; }
+}
+
+/**
  * 100-County dynamic geocoding and parcel boundary lookup engine.
  *
  * Progressive loading: `onPartial` is invoked as each independent data layer
