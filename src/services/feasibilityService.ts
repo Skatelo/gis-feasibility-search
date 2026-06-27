@@ -2043,7 +2043,7 @@ function updateZipHealth(zip: string, productive: boolean): void {
 // parcel location (localStorage, 7-day TTL) so repeat searches on the same
 // address are instant AND return identical comps.
 // ---------------------------------------------------------------------------
-const COMPS_CACHE_PREFIX = "gisfs:comps:v20:"; // v20 = robust cover-photo extraction (exterior, no maps/logos)
+const COMPS_CACHE_PREFIX = "gisfs:comps:v21:"; // v21 = Gemini Vision picks the building-EXTERIOR photo per comp
 const COMPS_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 
 function compsCacheKey(lat: number, lng: number, category: string): string {
@@ -2410,44 +2410,37 @@ function isHousePhotoUrl(s: any): s is string {
     && !NON_HOUSE_IMG_RE.test(s);
 }
 
-/** Recursively finds the first real PROPERTY-photo URL in a value (string,
- *  array, or nested object), arrays scanned in order so element [0] — the cover —
- *  wins. Maps / floor plans / logos are filtered out by isHousePhotoUrl. */
-function firstHousePhoto(v: any, depth = 0): string | undefined {
-  if (v == null || depth > 8) return undefined;
-  if (typeof v === "string") return isHousePhotoUrl(v) ? upscaleListingPhoto(v.replace(/^http:/i, "https:")) : undefined;
-  if (Array.isArray(v)) { for (const el of v) { const u = firstHousePhoto(el, depth + 1); if (u) return u; } return undefined; }
-  if (typeof v === "object") {
-    for (const f of ["href", "url", "src", "large", "xl", "full", "medium", "highResolution"]) {
-      if (v[f] != null) { const u = firstHousePhoto(v[f], depth + 1); if (u) return u; }
-    }
-    for (const k of Object.keys(v)) { const u = firstHousePhoto(v[k], depth + 1); if (u) return u; }
+/** Collects property-photo URLs from a value (cover-first, deduped), skipping
+ *  maps / floor plans / logos. Order is preserved so element [0] is the cover. */
+function collectHousePhotos(v: any, out: string[], depth = 0): void {
+  if (v == null || depth > 8 || out.length >= 12) return;
+  if (typeof v === "string") {
+    if (isHousePhotoUrl(v)) { const u = upscaleListingPhoto(v.replace(/^http:/i, "https:")); if (!out.includes(u)) out.push(u); }
+    return;
   }
-  return undefined;
+  if (Array.isArray(v)) { for (const el of v) collectHousePhotos(el, out, depth + 1); return; }
+  if (typeof v === "object") {
+    for (const f of ["href", "url", "src", "large", "xl", "full", "medium", "highResolution"]) if (v[f] != null) collectHousePhotos(v[f], out, depth + 1);
+    for (const k of Object.keys(v)) collectHousePhotos(v[k], out, depth + 1);
+  }
 }
 
-/** Returns the listing's COVER / PRIMARY photo — in MLS data this is the building
- *  EXTERIOR (interior shots come later in the photo set). Prefers the explicit
- *  primary/cover field and the FIRST element of a photo collection; only as a
- *  last resort scans the whole record. Maps / floor plans / logos / agent
- *  headshots are always rejected, so a comp shows the building itself. */
-function findPhotoUrl(raw: any): string | undefined {
-  if (!raw || typeof raw !== "object") return undefined;
+/** Ordered list of a listing's property photos (cover-first), so Gemini Vision
+ *  can later pick the one that actually shows the building EXTERIOR. */
+function findPhotoUrls(raw: any, max = 6): string[] {
+  if (!raw || typeof raw !== "object") return [];
+  const out: string[] = [];
   const nodes = [raw, raw.property, raw.homeData, raw.hdpView, raw.description].filter((n) => n && typeof n === "object");
-  // 1) explicit primary/cover photo field (recursing within it for nested URLs)
-  for (const n of nodes) {
-    for (const k of ["primary_photo", "primaryPhoto", "coverPhoto", "cover_photo", "heroImage", "imgSrc", "img_src"]) {
-      if (n[k] != null) { const u = firstHousePhoto(n[k]); if (u) return u; }
-    }
-  }
-  // 2) FIRST element of a photo collection (the cover = exterior)
-  for (const n of nodes) {
-    for (const k of ["photos", "carouselPhotos", "property_photos", "allPropertyPhotos", "media", "images", "photoData"]) {
-      if (n[k] != null) { const u = firstHousePhoto(n[k]); if (u) return u; }
-    }
-  }
-  // 3) last resort: first property photo anywhere in the record (still no maps/logos).
-  return firstHousePhoto(raw);
+  for (const n of nodes) for (const k of ["primary_photo", "primaryPhoto", "coverPhoto", "cover_photo", "heroImage", "imgSrc", "img_src"]) if (n[k] != null) collectHousePhotos(n[k], out);
+  for (const n of nodes) for (const k of ["photos", "carouselPhotos", "property_photos", "allPropertyPhotos", "media", "images", "photoData"]) if (n[k] != null) collectHousePhotos(n[k], out);
+  if (!out.length) collectHousePhotos(raw, out);
+  return out.slice(0, max);
+}
+
+/** The listing's cover photo (first property photo). Real exterior selection is
+ *  done later by Gemini Vision over the full findPhotoUrls() set. */
+function findPhotoUrl(raw: any): string | undefined {
+  return findPhotoUrls(raw, 1)[0];
 }
 
 function normalizeRealtyListing(raw: any, platform: 'realtor' | 'redfin' | 'zillow'): any | null {
@@ -2538,6 +2531,7 @@ function normalizeRealtyListing(raw: any, platform: 'realtor' | 'redfin' | 'zill
     coords,
     zip,
     imageUrl: findPhotoUrl(raw),
+    photoUrls: findPhotoUrls(raw),
     status: "sold",
     listingStatus: _isStr(rawStatus) ? rawStatus : (rawStatus != null ? String(rawStatus) : undefined),
     newConstructionFlag: false, // set true by the caller (year-filtered query)
@@ -3049,7 +3043,7 @@ async function backfillCompPhotos(comps: CompProperty[], key: string): Promise<v
   const targets = comps.filter((c) => !c.imageUrl && c.coords && typeof c.coords.lat === 'number');
   if (!targets.length) return;
 
-  const lookOn = async (platform: 'realtor' | 'zillow' | 'redfin', c: CompProperty): Promise<string | undefined> => {
+  const lookOn = async (platform: 'realtor' | 'zillow' | 'redfin', c: CompProperty): Promise<string[] | undefined> => {
     try {
       const q = new URLSearchParams({ latitude: String(c.coords!.lat), longitude: String(c.coords!.lng), radius: '0.2', page: '1' });
       if (platform === 'zillow') { q.set('listingStatus', 'Sold'); q.set('soldInLast', '12_months'); }
@@ -3059,16 +3053,73 @@ async function backfillCompPhotos(comps: CompProperty[], key: string): Promise<v
       const want = normalizeStreetKey(c.address);
       for (const raw of extractRealtyListings(await res.json())) {
         const n = normalizeRealtyListing(raw, platform);
-        if (n?.address && n.imageUrl && normalizeStreetKey(n.address) === want) return n.imageUrl as string;
+        if (n?.address && Array.isArray(n.photoUrls) && n.photoUrls.length && normalizeStreetKey(n.address) === want) return n.photoUrls as string[];
       }
     } catch { /* ignore */ }
     return undefined;
   };
 
   await Promise.all(targets.slice(0, 14).map(async (c) => {
-    const photo = (await lookOn('realtor', c)) || (await lookOn('zillow', c)) || (await lookOn('redfin', c));
-    if (photo) c.imageUrl = photo;
+    const photos = (await lookOn('realtor', c)) || (await lookOn('zillow', c)) || (await lookOn('redfin', c));
+    if (photos && photos.length) { c.photoUrls = photos; c.imageUrl = photos[0]; }
   }));
+}
+
+/** Fetch an image URL and return it as Gemini inline_data (base64). Bounded. */
+async function imageUrlToInline(url: string): Promise<{ mimeType: string; data: string } | null> {
+  try {
+    const res = await fetchWithTimeout(url, 10000);
+    if (!res.ok) return null;
+    const mime = (res.headers.get("content-type") || "image/jpeg").split(";")[0];
+    if (!/^image\//i.test(mime)) return null;
+    const buf = new Uint8Array(await res.arrayBuffer());
+    if (!buf.length || buf.length > 4_000_000) return null;
+    let bin = "";
+    for (let i = 0; i < buf.length; i++) bin += String.fromCharCode(buf[i]);
+    return { mimeType: mime, data: btoa(bin) };
+  } catch { return null; }
+}
+
+/** Gemini Vision: index of the photo showing the building's FRONT EXTERIOR among
+ *  a listing's images, or -1 if none. null on failure. */
+async function geminiPickExteriorIndex(images: { mimeType: string; data: string }[], geminiKey: string): Promise<number | null> {
+  try {
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=${geminiKey}`;
+    const parts: any[] = [{
+      text: `These ${images.length} images (indexed 0 to ${images.length - 1}, in order) are photos from ONE home listing. Reply with ONLY the single integer index of the image that best shows the BUILDING'S EXTERIOR — the whole house/structure seen from OUTSIDE (front facade preferred). It must NOT be an interior room (kitchen, bath, bedroom, living room), an aerial/satellite view, a map, a floor plan, a sign, a logo, or any cartoon/graphic. If NONE clearly shows a building exterior, reply -1. Reply with just the number.`,
+    }];
+    images.forEach((img) => parts.push({ inline_data: { mime_type: img.mimeType, data: img.data } }));
+    const res = await fetchWithTimeout(url, 30000, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ contents: [{ role: "user", parts }], generationConfig: { temperature: 0, maxOutputTokens: 256 } }) });
+    if (!res.ok) return null;
+    const data = await res.json();
+    const text = data.candidates?.[0]?.content?.parts?.map((p: any) => p.text).filter(Boolean).join("") || "";
+    const m = text.match(/-?\d+/);
+    return m ? parseInt(m[0], 10) : null;
+  } catch { return null; }
+}
+
+/** Sets each comp's imageUrl to the photo that actually shows the building
+ *  EXTERIOR (Gemini Vision over its photo set). When none of a comp's photos is an
+ *  exterior, imageUrl is cleared so the UI shows a neutral placeholder instead of
+ *  an interior / graphic. Bounded concurrency; never throws. */
+async function selectExteriorComps(comps: CompProperty[], geminiKey: string): Promise<void> {
+  if (!geminiKey) return;
+  const targets = comps.filter((c) => Array.isArray(c.photoUrls) && c.photoUrls.length).slice(0, 40);
+  if (!targets.length) return;
+  let i = 0;
+  const worker = async () => {
+    while (i < targets.length) {
+      const c = targets[i++];
+      const urls = (c.photoUrls || []).slice(0, 4);
+      const encoded = await Promise.all(urls.map(async (u) => ({ u, img: await imageUrlToInline(u) })));
+      const valid = encoded.filter((e): e is { u: string; img: { mimeType: string; data: string } } => !!e.img);
+      if (!valid.length) continue; // couldn't fetch — keep the cover photo
+      const idx = await geminiPickExteriorIndex(valid.map((e) => e.img), geminiKey);
+      if (idx == null) continue; // vision unavailable — keep the cover photo
+      c.imageUrl = idx >= 0 && idx < valid.length ? valid[idx].u : undefined; // -1 -> no exterior -> placeholder
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(6, targets.length) }, worker));
 }
 
 export async function fetchGoogleDistanceMatrixComps(
@@ -3263,6 +3314,7 @@ export async function fetchGoogleDistanceMatrixComps(
       url: c.url,
       zip: c.zip,
       imageUrl: c.imageUrl,
+      photoUrls: c.photoUrls,
       propertyId: c.propertyId,
       sourceName: c.sourceName,
       newConstructionFlag: c.newConstructionFlag,
@@ -3330,9 +3382,15 @@ export async function fetchGoogleDistanceMatrixComps(
   });
 
   // Backfill REAL listing photos for any comp that still lacks one (e.g. the
-  // Google-search comps) so every comp shows an actual property photo. Best-effort.
+  // Google-search comps) so every comp has a property photo set. Best-effort.
   onStageChange?.('Fetching listing photos…');
   await backfillCompPhotos(result, getRealtyApiKey());
+
+  // Make each comp's photo the BUILDING EXTERIOR: Gemini Vision picks the exterior
+  // shot from the listing's photos (new-construction covers are often interiors,
+  // renderings, or marketing graphics). Clears the photo when none is an exterior.
+  onStageChange?.('Selecting exterior photos…');
+  await selectExteriorComps(result, getUserKeys().gemini || '');
 
   console.log(`Returning ${result.length} verified new-construction comps.`);
   if (result.length > 0) writeCompsCache(cacheKey, result, summary);

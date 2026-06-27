@@ -59,6 +59,8 @@ export interface CompProperty {
   zip?: string;
   /** Listing photo URL from the source feed (Realtor/Redfin/Zillow CDN), when available. */
   imageUrl?: string;
+  /** All listing photos (cover-first) — used to pick the exterior shot. */
+  photoUrls?: string[];
 }
 
 export interface FloodZoneInfo {
