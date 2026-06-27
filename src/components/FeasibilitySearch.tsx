@@ -2987,6 +2987,9 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                           <span><strong>{costEstimate.plannedSqft.toLocaleString()}</strong> sqft home</span>
                         </div>
                         <div className="cost-locality"><MapPin size={11} /> {costEstimate.locality}</div>
+                        {costEstimate.laborBasis && (
+                          <div className="cost-labor-basis"><Hammer size={11} /> {costEstimate.laborBasis}</div>
+                        )}
                       </div>
 
                       {groupCostItems(costEstimate.lineItems).map(([cat, items]) => (

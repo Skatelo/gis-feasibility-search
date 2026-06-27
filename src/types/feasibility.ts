@@ -81,6 +81,7 @@ export interface ConstructionCostEstimate {
   contingency: number;
   totalCost: number;       // hardCostTotal + builderFee + contingency
   costPerSqft: number;     // totalCost / plannedSqft
+  laborBasis?: string;     // e.g. "Labor: BLS Charlotte metro median wages (2025)"
   assumptions: string[];
   sources: string[];
   generatedAt: number;

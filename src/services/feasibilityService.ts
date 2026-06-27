@@ -3489,13 +3489,98 @@ export async function fetchGoogleDistanceMatrixComps(
   return { comps: result, summary };
 }
 
+// NC county → BLS OEWS metropolitan area code (CBSA zero-padded to 7). Counties
+// not in a metro fall back to the NC statewide wage. Covers the state's main
+// development markets; the rest use statewide.
+const NC_COUNTY_MSA: Record<string, { code: string; name: string }> = (() => {
+  const m: Record<string, { code: string; name: string }> = {};
+  const add = (code: string, name: string, counties: string[]) => counties.forEach((c) => { m[c] = { code, name }; });
+  add('0016740', 'Charlotte', ['Mecklenburg', 'Cabarrus', 'Gaston', 'Union', 'Iredell', 'Lincoln', 'Rowan', 'Anson']);
+  add('0039580', 'Raleigh', ['Wake', 'Johnston', 'Franklin']);
+  add('0020500', 'Durham–Chapel Hill', ['Durham', 'Orange', 'Chatham', 'Person', 'Granville']);
+  add('0024660', 'Greensboro–High Point', ['Guilford', 'Randolph', 'Rockingham']);
+  add('0049180', 'Winston-Salem', ['Forsyth', 'Davidson', 'Davie', 'Stokes', 'Yadkin']);
+  add('0011700', 'Asheville', ['Buncombe', 'Haywood', 'Henderson', 'Madison']);
+  add('0048900', 'Wilmington', ['New Hanover', 'Pender', 'Brunswick']);
+  add('0022180', 'Fayetteville', ['Cumberland', 'Harnett', 'Hoke']);
+  add('0025860', 'Hickory', ['Catawba', 'Burke', 'Caldwell', 'Alexander']);
+  add('0024780', 'Greenville', ['Pitt']);
+  add('0027340', 'Jacksonville', ['Onslow']);
+  add('0015500', 'Burlington', ['Alamance']);
+  add('0024140', 'Goldsboro', ['Wayne']);
+  add('0040580', 'Rocky Mount', ['Nash', 'Edgecombe']);
+  add('0035100', 'New Bern', ['Craven', 'Jones', 'Pamlico']);
+  return m;
+})();
+
+// Construction trades and their SOC codes for the BLS OEWS wage query.
+const BLS_TRADES: { soc: string; label: string }[] = [
+  { soc: '472061', label: 'Construction laborers' },
+  { soc: '472031', label: 'Carpenters' },
+  { soc: '472051', label: 'Cement masons' },
+  { soc: '472021', label: 'Brick/blockmasons' },
+  { soc: '472111', label: 'Electricians' },
+  { soc: '472152', label: 'Plumbers' },
+  { soc: '499021', label: 'HVAC techs' },
+  { soc: '472081', label: 'Drywall installers' },
+  { soc: '472141', label: 'Painters' },
+  { soc: '472181', label: 'Roofers' },
+];
+
+interface BlsLocalWages { areaName: string; year: string; wages: { label: string; hourly: number }[]; sourceUrl: string }
+
+/** Real local construction-trade hourly MEDIAN wages from the U.S. BLS OEWS
+ *  (datatype 08), by metro for the parcel's county (NC statewide fallback). This
+ *  is the authoritative LABOR anchor for the cost estimate. Cached ~30 days. */
+async function fetchBlsLocalWages(county: string): Promise<BlsLocalWages | null> {
+  const msa = NC_COUNTY_MSA[county];
+  const attempts = [
+    ...(msa ? [{ type: 'M', area: msa.code, name: `${msa.name} metro` }] : []),
+    { type: 'S', area: '3700000', name: 'North Carolina' },
+  ];
+  for (const at of attempts) {
+    const ck = `gisfs:bls:v1:${at.type}${at.area}`;
+    try {
+      const cached = localStorage.getItem(ck);
+      if (cached) {
+        const v = JSON.parse(cached);
+        if (v && Date.now() - (v.t || 0) < 30 * 864e5 && Array.isArray(v.wages) && v.wages.length) {
+          return { areaName: at.name, year: v.year, wages: v.wages, sourceUrl: 'https://www.bls.gov/oes/' };
+        }
+      }
+    } catch { /* ignore */ }
+    try {
+      const ids = BLS_TRADES.map((t) => `OEU${at.type}${at.area}000000${t.soc}08`);
+      const res = await fetchWithTimeout('https://api.bls.gov/publicAPI/v2/timeseries/data/', 15000, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ seriesid: ids }),
+      });
+      if (!res.ok) continue;
+      const j = await res.json();
+      const wages: { label: string; hourly: number }[] = [];
+      let year = '';
+      for (const s of (j.Results?.series || [])) {
+        const soc = String(s.seriesID).slice(17, 23);
+        const trade = BLS_TRADES.find((t) => t.soc === soc);
+        const d = (s.data || []).find((x: any) => x.value && x.value !== '-');
+        if (trade && d && Number.isFinite(Number(d.value))) { wages.push({ label: trade.label, hourly: Math.round(Number(d.value) * 100) / 100 }); year = d.year || year; }
+      }
+      if (wages.length >= 4) {
+        try { localStorage.setItem(ck, JSON.stringify({ t: Date.now(), year, wages })); } catch { /* ignore */ }
+        return { areaName: at.name, year, wages, sourceUrl: 'https://www.bls.gov/oes/' };
+      }
+    } catch { /* try next attempt */ }
+  }
+  return null;
+}
+
 /**
  * INSTANT construction-cost estimate (Handoff-style): a detailed, ITEMIZED
  * new-construction budget at CURRENT LOCAL prices for building a single-family
- * home on this parcel. Gemini 3.5 Flash researches current local unit costs for
- * this metro via Google Search, sizes the home to the verified comps, and adds
- * site-specific costs (clearing, grading, well/septic) from the parcel data.
- * Returns null on failure; never fabricates (cites sources).
+ * home on this parcel. LABOR is anchored to REAL local wages from the U.S. BLS
+ * OEWS (by metro); MATERIALS are researched at current local prices via Gemini +
+ * Google Search. Sizes the home to the verified comps; adds site-specific costs
+ * (clearing, grading, well/septic) from the parcel data. Returns null on failure;
+ * never fabricates (cites sources).
  */
 export async function fetchConstructionCostEstimate(reportData: SiteFeasibilityData): Promise<ConstructionCostEstimate | null> {
   const geminiKey = getUserKeys().gemini || "";
@@ -3512,12 +3597,18 @@ export async function fetchConstructionCostEstimate(reportData: SiteFeasibilityD
   const fz = reportData.floodZone;
   const floodLine = fz && fz.status === 'mapped' ? `FEMA flood: Zone ${fz.zone}${fz.inSFHA ? ' (in SFHA)' : ''}.` : '';
 
+  // Real local LABOR rates from the U.S. BLS (the authoritative labor anchor).
+  const bls = await fetchBlsLocalWages(reportData.countyName).catch(() => null);
+  const laborBlock = bls
+    ? `\nLOCAL LABOR RATES — use these REAL U.S. BLS median hourly wages for ${bls.areaName} (${bls.year}) as the basis for the LABOR portion of every line item; do NOT invent labor rates (apply a realistic crew burden/overhead on top): ${bls.wages.map((w) => `${w.label} $${w.hourly}/hr`).join(', ')}.`
+    : '';
+
   const prompt = `Produce a DETAILED, ITEMIZED new-construction cost estimate at CURRENT LOCAL prices for building ONE single-family home on this parcel.
 PROPERTY: ${reportData.inputAddress} — ${reportData.countyName} County, North Carolina.
 PLANNED HOME: ~${plannedSqft} sqft single-family (sized to the local new-construction comps), zoning ${reportData.zoningCode || 'residential'}.
-SITE: lot ${reportData.gisAcres?.toFixed(2)} acres. ${slopeLine} ${floodLine}${medianPpsf ? ` Local comps sell around $${medianPpsf}/sqft finished.` : ''}
+SITE: lot ${reportData.gisAcres?.toFixed(2)} acres. ${slopeLine} ${floodLine}${medianPpsf ? ` Local comps sell around $${medianPpsf}/sqft finished.` : ''}${laborBlock}
 
-Use Google Search to find CURRENT LOCAL unit prices for THIS metro from MULTIPLE recent sources — do NOT use generic national averages. Build a complete itemized hard-cost budget covering: site clearing & tree removal, grading/earthwork, foundation (crawlspace/slab/basement), framing material + framing labor, roofing, windows, exterior doors, siding, plumbing, HVAC, electrical, insulation, drywall, interior trim & paint, cabinets, countertops, flooring, appliances, gutters, driveway/landscaping, and EITHER well drilling + septic system (if rural/no public utilities) OR water/sewer tap & impact fees, plus building permits and survey. Add site-specific ADDERS where the site warrants them (extra clearing if wooded, extra grading/retaining/engineering if slope >= 15%, well + septic if no public water/sewer).
+For LABOR, base each line item on the BLS local wages above. For MATERIALS, use Google Search to find CURRENT LOCAL unit prices for THIS metro from MULTIPLE recent sources — do NOT use generic national averages. Build a complete itemized hard-cost budget covering: site clearing & tree removal, grading/earthwork, foundation (crawlspace/slab/basement), framing material + framing labor, roofing, windows, exterior doors, siding, plumbing, HVAC, electrical, insulation, drywall, interior trim & paint, cabinets, countertops, flooring, appliances, gutters, driveway/landscaping, and EITHER well drilling + septic system (if rural/no public utilities) OR water/sewer tap & impact fees, plus building permits and survey. Add site-specific ADDERS where the site warrants them (extra clearing if wooded, extra grading/retaining/engineering if slope >= 15%, well + septic if no public water/sewer).
 
 Return ONLY a JSON object inside a \`\`\`json code block:
 \`\`\`json
@@ -3576,8 +3667,12 @@ Rules: every "cost" is a whole-dollar USD number for THIS home/lot from cited CU
       contingency,
       totalCost,
       costPerSqft: sqft > 0 ? Math.round(totalCost / sqft) : 0,
+      laborBasis: bls ? `Labor anchored to U.S. BLS OEWS median wages — ${bls.areaName} (${bls.year})` : undefined,
       assumptions: Array.isArray(obj.assumptions) ? obj.assumptions.map((a: any) => String(a)).filter(Boolean).slice(0, 8) : [],
-      sources: Array.isArray(obj.sources) ? obj.sources.map((s: any) => String(s)).filter((s: string) => /^https?:\/\//.test(s)).slice(0, 8) : [],
+      sources: [
+        ...(bls ? [bls.sourceUrl] : []),
+        ...(Array.isArray(obj.sources) ? obj.sources.map((s: any) => String(s)).filter((s: string) => /^https?:\/\//.test(s)) : []),
+      ].slice(0, 8),
       generatedAt: Date.now(),
     };
   } catch (e) {

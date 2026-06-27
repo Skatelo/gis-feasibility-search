@@ -3613,3 +3613,10 @@ img, svg, video, canvas, table, pre { max-width: 100%; }
 .cost-sources-label { font-weight: 600; }
 .cost-sources a { color: var(--primary); text-decoration: underline; }
 .cost-disclaimer { font-size: 0.68rem; color: var(--text-muted); margin-top: 10px; font-style: italic; line-height: 1.4; }
+.cost-labor-basis {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 0.7rem; color: var(--success); font-weight: 600;
+  background: var(--success-bg); border: 1px solid var(--success-border);
+  border-radius: 999px; padding: 2px 8px; align-self: flex-start;
+}
+.cost-labor-basis svg { color: var(--success); }
