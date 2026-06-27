@@ -2043,7 +2043,7 @@ function updateZipHealth(zip: string, productive: boolean): void {
 // parcel location (localStorage, 7-day TTL) so repeat searches on the same
 // address are instant AND return identical comps.
 // ---------------------------------------------------------------------------
-const COMPS_CACHE_PREFIX = "gisfs:comps:v18:"; // v18 = capture + backfill real listing photos for every comp
+const COMPS_CACHE_PREFIX = "gisfs:comps:v19:"; // v19 = cover/exterior photo only (no interior/maps/logos)
 const COMPS_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 
 function compsCacheKey(lat: number, lng: number, category: string): string {
@@ -2397,23 +2397,53 @@ function upscaleListingPhoto(url: string): string {
   return url;
 }
 
-/** Finds the first real LISTING-photo URL anywhere in a RealtyAPI record
- *  (Realtor rdcpix / Zillow zillowstatic / Redfin cdn), preferring the primary
- *  photo. Forces https and the full-size variant. */
-function findPhotoUrl(obj: any, depth = 0): string | undefined {
-  if (obj == null || depth > 6) return undefined;
-  if (typeof obj === "string") {
-    if (/^https?:\/\//i.test(obj) && /(rdcpix|zillowstatic|cdn-redfin|ssl\.cdn|\.jpe?g|\.png|\.webp)/i.test(obj) && !/sprite|logo|icon|favicon/i.test(obj)) {
-      return upscaleListingPhoto(obj.replace(/^http:/i, "https:"));
+// Reject anything that isn't a photo of the building: maps, street view,
+// floor plans, logos, icons, agent headshots, watermarks, placeholders.
+const NON_HOUSE_IMG_RE = /staticmap|static_map|map.?image|maps?\.google|\/maps?\/|streetview|street.?view|floor.?plan|sprite|logo|favicon|\bicons?\b|avatar|headshot|\bagent|broker|watermark|placeholder|no.?photo|no.?image|coming.?soon/i;
+
+/** True only for a real PROPERTY-photo URL (listing CDN or image file), never a
+ *  map / floor plan / logo / agent headshot. */
+function isHousePhotoUrl(s: any): s is string {
+  return typeof s === "string"
+    && /^https?:\/\//i.test(s)
+    && (/(rdcpix|zillowstatic|cdn-redfin|ssl\.cdn)/i.test(s) || /\.(jpe?g|png|webp)(\?|$)/i.test(s))
+    && !NON_HOUSE_IMG_RE.test(s);
+}
+
+/** Pulls a cover-photo URL from a string, a {href|url|src} object, or an array
+ *  (using its FIRST element — the cover shot). https + full-size. */
+function coverUrlFrom(v: any): string | undefined {
+  if (isHousePhotoUrl(v)) return upscaleListingPhoto((v as string).replace(/^http:/i, "https:"));
+  if (v && typeof v === "object") {
+    if (Array.isArray(v)) return v.length ? coverUrlFrom(v[0]) : undefined; // [0] = cover = exterior
+    for (const f of ["href", "url", "src", "large", "xl", "full", "medium", "highResolution"]) {
+      const u = coverUrlFrom(v[f]);
+      if (u) return u;
     }
-    return undefined;
   }
-  if (Array.isArray(obj)) { for (const v of obj) { const u = findPhotoUrl(v, depth + 1); if (u) return u; } return undefined; }
-  if (typeof obj === "object") {
-    for (const k of ["primary_photo", "imgSrc", "img_src", "photo", "thumbnail", "image", "photos"]) {
-      if (obj[k] != null) { const u = findPhotoUrl(obj[k], depth + 1); if (u) return u; }
+  return undefined;
+}
+
+/** Returns the listing's COVER / PRIMARY photo — in MLS data this is the building
+ *  EXTERIOR (interior shots come later in the photo set). We only ever use the
+ *  cover image, and never maps / floor plans / logos, so a comp always shows the
+ *  building itself. Returns undefined when no cover photo is present. */
+function findPhotoUrl(raw: any): string | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const nodes = [raw, raw.property, raw.homeData, raw.hdpView, raw.description].filter((n) => n && typeof n === "object");
+  // 1) explicit primary/cover photo field
+  for (const n of nodes) {
+    for (const k of ["primary_photo", "primaryPhoto", "coverPhoto", "cover_photo", "heroImage", "imgSrc", "img_src", "image", "photo", "thumbnail"]) {
+      const u = coverUrlFrom(n[k]);
+      if (u) return u;
     }
-    for (const k of Object.keys(obj)) { const u = findPhotoUrl(obj[k], depth + 1); if (u) return u; }
+  }
+  // 2) FIRST element of a photo collection (the cover = exterior)
+  for (const n of nodes) {
+    for (const k of ["photos", "carouselPhotos", "property_photos", "allPropertyPhotos", "media", "images", "photoData"]) {
+      const u = coverUrlFrom(n[k]);
+      if (u) return u;
+    }
   }
   return undefined;
 }
