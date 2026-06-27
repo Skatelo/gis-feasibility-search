@@ -1,4 +1,4 @@
-import type { SiteFeasibilityData, SlopeProfile, CompProperty, FloodZoneInfo, WetlandsInfo } from '../types/feasibility';
+import type { SiteFeasibilityData, SlopeProfile, CompProperty, FloodZoneInfo, WetlandsInfo, ConstructionCostEstimate, CostLineItem } from '../types/feasibility';
 import { fetchCountyZoningCode, hasCountyZoning, normalizeCountyKey } from '../data/ncZoning';
 import { getSupabase, isSupabaseConfigured } from './supabaseClient';
 
@@ -3487,6 +3487,103 @@ export async function fetchGoogleDistanceMatrixComps(
   console.log(`Returning ${result.length} verified new-construction comps.`);
   if (result.length > 0) writeCompsCache(cacheKey, result, summary);
   return { comps: result, summary };
+}
+
+/**
+ * INSTANT construction-cost estimate (Handoff-style): a detailed, ITEMIZED
+ * new-construction budget at CURRENT LOCAL prices for building a single-family
+ * home on this parcel. Gemini 3.5 Flash researches current local unit costs for
+ * this metro via Google Search, sizes the home to the verified comps, and adds
+ * site-specific costs (clearing, grading, well/septic) from the parcel data.
+ * Returns null on failure; never fabricates (cites sources).
+ */
+export async function fetchConstructionCostEstimate(reportData: SiteFeasibilityData): Promise<ConstructionCostEstimate | null> {
+  const geminiKey = getUserKeys().gemini || "";
+  if (!geminiKey) return null;
+
+  // Size the planned home to the local new-construction comps (median GLA).
+  const sqfts = (reportData.comps || []).map((c) => c.sqft).filter((n): n is number => !!n && n > 0).sort((a, b) => a - b);
+  const plannedSqft = sqfts.length ? Math.round(sqfts[Math.floor(sqfts.length / 2)] / 50) * 50 : 1600;
+  const ppsfs = (reportData.comps || []).map((c) => c.pricePerSqft).filter((n): n is number => !!n && n > 0).sort((a, b) => a - b);
+  const medianPpsf = ppsfs.length ? ppsfs[Math.floor(ppsfs.length / 2)] : null;
+
+  const sp = reportData.slopeProfile;
+  const slopeLine = sp ? `Topography (USGS 3DEP): avg slope ${sp.avgSlope}%, max ${sp.maxSlope}% — ${sp.verdict}.` : '';
+  const fz = reportData.floodZone;
+  const floodLine = fz && fz.status === 'mapped' ? `FEMA flood: Zone ${fz.zone}${fz.inSFHA ? ' (in SFHA)' : ''}.` : '';
+
+  const prompt = `Produce a DETAILED, ITEMIZED new-construction cost estimate at CURRENT LOCAL prices for building ONE single-family home on this parcel.
+PROPERTY: ${reportData.inputAddress} — ${reportData.countyName} County, North Carolina.
+PLANNED HOME: ~${plannedSqft} sqft single-family (sized to the local new-construction comps), zoning ${reportData.zoningCode || 'residential'}.
+SITE: lot ${reportData.gisAcres?.toFixed(2)} acres. ${slopeLine} ${floodLine}${medianPpsf ? ` Local comps sell around $${medianPpsf}/sqft finished.` : ''}
+
+Use Google Search to find CURRENT LOCAL unit prices for THIS metro from MULTIPLE recent sources — do NOT use generic national averages. Build a complete itemized hard-cost budget covering: site clearing & tree removal, grading/earthwork, foundation (crawlspace/slab/basement), framing material + framing labor, roofing, windows, exterior doors, siding, plumbing, HVAC, electrical, insulation, drywall, interior trim & paint, cabinets, countertops, flooring, appliances, gutters, driveway/landscaping, and EITHER well drilling + septic system (if rural/no public utilities) OR water/sewer tap & impact fees, plus building permits and survey. Add site-specific ADDERS where the site warrants them (extra clearing if wooded, extra grading/retaining/engineering if slope >= 15%, well + septic if no public water/sewer).
+
+Return ONLY a JSON object inside a \`\`\`json code block:
+\`\`\`json
+{
+  "locality": "Concord / Cabarrus County metro, NC",
+  "plannedSqft": ${plannedSqft},
+  "lineItems": [
+    { "category": "Site Work", "item": "Clearing & grading", "detail": "~1.3 ac, light tree cover", "cost": 12000 }
+  ],
+  "builderFee": 25000,
+  "contingency": 8000,
+  "assumptions": ["Crawlspace foundation", "Well + septic (no public sewer)"],
+  "sources": ["https://...", "https://..."]
+}
+\`\`\`
+Rules: every "cost" is a whole-dollar USD number for THIS home/lot from cited CURRENT LOCAL prices. Group line items by category in this order: Site Work, Foundation, Framing, Exterior, Mechanical, Interior, Permits & Fees. Put the builder fee and contingency in their OWN fields (not in lineItems). Do NOT include the land/lot purchase price. Never fabricate a number — cite the sources you used. Be EXTREMELY ACCURATE and local.`;
+
+  try {
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=${geminiKey}`;
+    const res = await fetchWithTimeout(url, 60000, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents: [{ role: "user", parts: [{ text: prompt }] }],
+        systemInstruction: { parts: [{ text: "You are a senior residential construction estimator. Use Google Search to price each line item at CURRENT LOCAL costs for the property's metro from multiple credible sources. Return only the requested JSON; never invent prices; cite sources." }] },
+        tools: [{ google_search: {} }],
+      }),
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    const text = data.candidates?.[0]?.content?.parts?.map((p: any) => p.text).filter(Boolean).join("") || "";
+    const m = text.match(/```json\s*([\s\S]*?)\s*```/) || text.match(/\{[\s\S]*\}/);
+    const jsonStr = m ? (m[1] || m[0]) : "";
+    if (!jsonStr) return null;
+    const obj = JSON.parse(jsonStr.replace(/,\s*([}\]])/g, "$1"));
+
+    const lineItems: CostLineItem[] = Array.isArray(obj.lineItems)
+      ? obj.lineItems
+          .filter((li: any) => li && typeof li.item === "string" && Number.isFinite(Number(li.cost)))
+          .map((li: any) => ({ category: String(li.category || "Other").trim(), item: String(li.item).trim(), detail: li.detail ? String(li.detail).trim() : undefined, cost: Math.round(Number(li.cost)) }))
+      : [];
+    if (!lineItems.length) return null;
+
+    const hardCostTotal = lineItems.reduce((s, li) => s + (li.cost || 0), 0);
+    const builderFee = Math.round(Number(obj.builderFee) || 0);
+    const contingency = Math.round(Number(obj.contingency) || 0);
+    const totalCost = hardCostTotal + builderFee + contingency;
+    const sqft = Math.round(Number(obj.plannedSqft) || plannedSqft) || plannedSqft;
+
+    return {
+      locality: String(obj.locality || `${reportData.countyName} County, NC`).trim(),
+      plannedSqft: sqft,
+      lineItems,
+      hardCostTotal,
+      builderFee,
+      contingency,
+      totalCost,
+      costPerSqft: sqft > 0 ? Math.round(totalCost / sqft) : 0,
+      assumptions: Array.isArray(obj.assumptions) ? obj.assumptions.map((a: any) => String(a)).filter(Boolean).slice(0, 8) : [],
+      sources: Array.isArray(obj.sources) ? obj.sources.map((s: any) => String(s)).filter((s: string) => /^https?:\/\//.test(s)).slice(0, 8) : [],
+      generatedAt: Date.now(),
+    };
+  } catch (e) {
+    console.warn("Construction cost estimate failed:", e);
+    return null;
+  }
 }
 
 export interface ChatSource {

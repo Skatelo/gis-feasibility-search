@@ -63,6 +63,29 @@ export interface CompProperty {
   photoUrls?: string[];
 }
 
+/** One line item in the instant construction-cost estimate. */
+export interface CostLineItem {
+  category: string;   // "Site Work", "Foundation", "Framing", "Exterior", "Mechanical", "Interior", "Permits & Fees"
+  item: string;       // "Clearing & grading"
+  detail?: string;    // "~1.3 ac, light tree cover"
+  cost: number;       // USD for this home/lot
+}
+
+/** Instant, locally-priced new-construction cost estimate (Handoff-style). */
+export interface ConstructionCostEstimate {
+  locality: string;        // "Concord / Cabarrus County metro"
+  plannedSqft: number;     // home size used (sized to local comps)
+  lineItems: CostLineItem[];
+  hardCostTotal: number;   // sum of line items
+  builderFee: number;
+  contingency: number;
+  totalCost: number;       // hardCostTotal + builderFee + contingency
+  costPerSqft: number;     // totalCost / plannedSqft
+  assumptions: string[];
+  sources: string[];
+  generatedAt: number;
+}
+
 export interface FloodZoneInfo {
   /** FEMA flood zone code, e.g. "AE", "VE", "A", "X", or "UNKNOWN". */
   zone: string;

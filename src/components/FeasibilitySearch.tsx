@@ -1,11 +1,24 @@
 import { useState, useEffect, useRef } from 'react';
 import type { FormEvent, KeyboardEvent, FC } from 'react';
 import { createRoot } from 'react-dom/client';
-import { executeLandAnalysis, chatWithGemini, getUserKeys, detectNcCounty, lookupParcelById } from '../services/feasibilityService';
+import { executeLandAnalysis, chatWithGemini, getUserKeys, detectNcCounty, lookupParcelById, fetchConstructionCostEstimate } from '../services/feasibilityService';
 import type { ChatMessage } from '../services/feasibilityService';
 import { saveReport, getReportEtaMs, recordReportDuration } from '../services/reportStore';
 import { ReportsDrawer } from './ReportsDrawer';
-import type { SiteFeasibilityData } from '../types/feasibility';
+import type { SiteFeasibilityData, ConstructionCostEstimate, CostLineItem } from '../types/feasibility';
+
+/** Group cost line items by category, preserving first-seen order. (Avoids the
+ *  global Map — lucide-react's `Map` icon is imported in this file.) */
+function groupCostItems(items: CostLineItem[]): [string, CostLineItem[]][] {
+  const order: string[] = [];
+  const groups: Record<string, CostLineItem[]> = {};
+  for (const li of items) {
+    const k = li.category || 'Other';
+    if (!groups[k]) { groups[k] = []; order.push(k); }
+    groups[k].push(li);
+  }
+  return order.map((k) => [k, groups[k]]);
+}
 import { getZoningServices, hasCountyZoning } from '../data/ncZoning';
 import { fetchOsmFeatures } from '../data/osmFeatures';
 import {
@@ -43,6 +56,7 @@ import {
   TrendingUp,
   ImageOff,
   Landmark,
+  Hammer,
   X
 } from 'lucide-react';
 
@@ -653,6 +667,8 @@ export const FeasibilitySearch: FC = () => {
   const [loadingStage, setLoadingStage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [data, setData] = useState<SiteFeasibilityData | null>(null);
+  const [costEstimate, setCostEstimate] = useState<ConstructionCostEstimate | null>(null);
+  const [costLoading, setCostLoading] = useState(false);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [history, setHistory] = useState<any[]>([]);
 
@@ -2006,6 +2022,8 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
     setLoading(true);
     setError(null);
     setData(null);
+    setCostEstimate(null);
+    setCostLoading(false);
     resetChatUiState();
 
     // Progressive loading: merge each partial emission into view state the
@@ -2046,6 +2064,12 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
       // All site data is in — generate the AI feasibility report (the countdown
       // timer in the chat panel tracks this phase).
       generateInitialChatReport(result);
+      // In parallel, build the instant construction-cost estimate (local pricing).
+      setCostLoading(true);
+      fetchConstructionCostEstimate(result)
+        .then((est) => { if (seq === searchSeqRef.current) setCostEstimate(est); })
+        .catch(() => {})
+        .finally(() => { if (seq === searchSeqRef.current) setCostLoading(false); });
     } catch (err: any) {
       if (seq !== searchSeqRef.current) return;
       console.error(err);
@@ -2934,6 +2958,77 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                       ));
                     })()}
                   </div>
+                </div>
+              )}
+
+              {/* Instant Construction Cost Estimate — real-time LOCAL pricing,
+                  shown after the comps and before the full AI report. */}
+              {(costEstimate || costLoading) && (
+                <div className="card registry-card cost-estimate-card">
+                  <h3 className="registry-card-header" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <Hammer size={16} style={{ color: 'var(--primary)' }} />
+                    <span>Instant Construction Cost Estimate</span>
+                  </h3>
+
+                  {costLoading && !costEstimate ? (
+                    <div className="cost-loading">
+                      <Loader2 size={15} className="spinner" />
+                      <span>Pricing this build with current local costs…</span>
+                    </div>
+                  ) : costEstimate ? (
+                    <>
+                      <div className="cost-hero">
+                        <div className="cost-total-block">
+                          <span className="cost-total-label">Estimated build cost</span>
+                          <span className="cost-total-value">${costEstimate.totalCost.toLocaleString()}</span>
+                        </div>
+                        <div className="cost-meta">
+                          <span><strong>${costEstimate.costPerSqft.toLocaleString()}</strong> / sqft</span>
+                          <span><strong>{costEstimate.plannedSqft.toLocaleString()}</strong> sqft home</span>
+                        </div>
+                        <div className="cost-locality"><MapPin size={11} /> {costEstimate.locality}</div>
+                      </div>
+
+                      {groupCostItems(costEstimate.lineItems).map(([cat, items]) => (
+                        <div key={cat} className="cost-group">
+                          <div className="cost-group-head">
+                            <span>{cat}</span>
+                            <span>${items.reduce((s, i) => s + i.cost, 0).toLocaleString()}</span>
+                          </div>
+                          {items.map((li, i) => (
+                            <div key={i} className="cost-line">
+                              <span className="cost-line-item">{li.item}{li.detail && <span className="cost-line-detail"> · {li.detail}</span>}</span>
+                              <span className="cost-line-cost">${li.cost.toLocaleString()}</span>
+                            </div>
+                          ))}
+                        </div>
+                      ))}
+
+                      <div className="cost-group cost-totals">
+                        <div className="cost-line"><span>Hard cost subtotal</span><span>${costEstimate.hardCostTotal.toLocaleString()}</span></div>
+                        {costEstimate.builderFee > 0 && <div className="cost-line"><span>Builder fee</span><span>${costEstimate.builderFee.toLocaleString()}</span></div>}
+                        {costEstimate.contingency > 0 && <div className="cost-line"><span>Contingency</span><span>${costEstimate.contingency.toLocaleString()}</span></div>}
+                        <div className="cost-line cost-grand"><span>Total build cost</span><span>${costEstimate.totalCost.toLocaleString()}</span></div>
+                      </div>
+
+                      {costEstimate.assumptions.length > 0 && (
+                        <div className="cost-assumptions">
+                          <span className="cost-assumptions-label">Assumptions:</span> {costEstimate.assumptions.join(' · ')}
+                        </div>
+                      )}
+                      {costEstimate.sources.length > 0 && (
+                        <div className="cost-sources">
+                          <span className="cost-sources-label">Local pricing sources:</span>
+                          {costEstimate.sources.map((s, i) => (
+                            <a key={i} href={s} target="_blank" rel="noreferrer">
+                              {(() => { try { return new URL(s).hostname.replace(/^www\./, ''); } catch { return 'source'; } })()}
+                            </a>
+                          ))}
+                        </div>
+                      )}
+                      <div className="cost-disclaimer">Instant AI estimate from current local pricing — confirm with local bids before contracting. Excludes the land/lot price.</div>
+                    </>
+                  ) : null}
                 </div>
               )}
 
