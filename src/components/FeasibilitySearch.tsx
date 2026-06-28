@@ -669,6 +669,7 @@ export const FeasibilitySearch: FC = () => {
   const [data, setData] = useState<SiteFeasibilityData | null>(null);
   const [costEstimate, setCostEstimate] = useState<ConstructionCostEstimate | null>(null);
   const [costLoading, setCostLoading] = useState(false);
+  const [costError, setCostError] = useState(false);
   const [materialTakeoff, setMaterialTakeoff] = useState<MaterialTakeoff | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [history, setHistory] = useState<any[]>([]);
@@ -739,6 +740,33 @@ export const FeasibilitySearch: FC = () => {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [chatHistory]);
+
+  // Build the cost estimate + material takeoff (each shows as it arrives). If
+  // BOTH fail (e.g. a transient Gemini rate limit), the card stays and offers a
+  // retry instead of vanishing.
+  const generateCostEstimates = (reportData: SiteFeasibilityData, seq: number) => {
+    setCostLoading(true);
+    setCostError(false);
+    setCostEstimate(null);
+    setMaterialTakeoff(null);
+    let pending = 2;
+    let anySuccess = false;
+    const settle = (ok: boolean) => {
+      if (ok) anySuccess = true;
+      if (--pending === 0 && seq === searchSeqRef.current) {
+        setCostLoading(false);
+        if (!anySuccess) setCostError(true);
+      }
+    };
+    fetchConstructionCostEstimate(reportData).then(
+      (est) => { if (seq === searchSeqRef.current && est) setCostEstimate(est); settle(!!est); },
+      () => settle(false),
+    );
+    fetchMaterialTakeoff(reportData).then(
+      (mt) => { if (seq === searchSeqRef.current && mt) setMaterialTakeoff(mt); settle(!!mt); },
+      () => settle(false),
+    );
+  };
 
   const generateInitialChatReport = async (reportData: SiteFeasibilityData) => {
     setChatLoading(true);
@@ -2025,6 +2053,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
     setData(null);
     setCostEstimate(null);
     setCostLoading(false);
+    setCostError(false);
     setMaterialTakeoff(null);
     resetChatUiState();
 
@@ -2068,14 +2097,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
       generateInitialChatReport(result);
       // In parallel, build the instant construction-cost estimate + the local
       // material takeoff (ZIP-localized unit pricing).
-      setCostLoading(true);
-      fetchConstructionCostEstimate(result)
-        .then((est) => { if (seq === searchSeqRef.current) setCostEstimate(est); })
-        .catch(() => {})
-        .finally(() => { if (seq === searchSeqRef.current) setCostLoading(false); });
-      fetchMaterialTakeoff(result)
-        .then((mt) => { if (seq === searchSeqRef.current) setMaterialTakeoff(mt); })
-        .catch(() => {});
+      generateCostEstimates(result, seq);
     } catch (err: any) {
       if (seq !== searchSeqRef.current) return;
       console.error(err);
@@ -2969,14 +2991,25 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
 
               {/* Instant Construction Cost Estimate — real-time LOCAL pricing,
                   shown after the comps and before the full AI report. */}
-              {(costEstimate || costLoading || materialTakeoff) && (
+              {(costEstimate || costLoading || materialTakeoff || costError) && (
                 <div className="card registry-card cost-estimate-card">
                   <h3 className="registry-card-header" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                     <Hammer size={16} style={{ color: 'var(--primary)' }} />
                     <span>Instant Construction Cost Estimate</span>
                   </h3>
 
-                  {costLoading && !costEstimate && !materialTakeoff ? (
+                  {costError && !costEstimate && !materialTakeoff ? (
+                    <div className="cost-loading" style={{ flexDirection: 'column', alignItems: 'flex-start', gap: '8px' }}>
+                      <span>Couldn't generate the local cost estimate (the pricing service was busy).</span>
+                      <button
+                        type="button"
+                        className="btn-quick-action"
+                        onClick={() => { if (data) generateCostEstimates(data, searchSeqRef.current); }}
+                      >
+                        <Loader2 size={14} className={costLoading ? 'spinner' : ''} /> Retry estimate
+                      </button>
+                    </div>
+                  ) : costLoading && !costEstimate && !materialTakeoff ? (
                     <div className="cost-loading">
                       <Loader2 size={15} className="spinner" />
                       <span>Pricing this build with current local costs…</span>

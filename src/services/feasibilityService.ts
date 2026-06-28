@@ -3489,6 +3489,33 @@ export async function fetchGoogleDistanceMatrixComps(
   return { comps: result, summary };
 }
 
+/** A grounded (Google-Search) Gemini text call with ONE retry on a transient
+ *  rate-limit/5xx — so the cost estimate & material takeoff don't fail (and the
+ *  card doesn't vanish) when they fire alongside the report's Gemini burst. */
+async function groundedGeminiText(geminiKey: string, prompt: string, systemText: string, timeoutMs: number): Promise<string | null> {
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=${geminiKey}`;
+  const body = JSON.stringify({
+    contents: [{ role: 'user', parts: [{ text: prompt }] }],
+    systemInstruction: { parts: [{ text: systemText }] },
+    tools: [{ google_search: {} }],
+  });
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const res = await fetchWithTimeout(url, timeoutMs, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body });
+      if (res.ok) {
+        const data = await res.json();
+        return data.candidates?.[0]?.content?.parts?.map((p: any) => p.text).filter(Boolean).join('') || '';
+      }
+      if ((res.status === 429 || res.status >= 500) && attempt === 0) { await new Promise((r) => setTimeout(r, 2500)); continue; }
+      return null;
+    } catch {
+      if (attempt === 0) { await new Promise((r) => setTimeout(r, 1500)); continue; }
+      return null;
+    }
+  }
+  return null;
+}
+
 // NC county → BLS OEWS metropolitan area code (CBSA zero-padded to 7). Counties
 // not in a metro fall back to the NC statewide wage. Covers the state's main
 // development markets; the rest use statewide.
@@ -3627,19 +3654,13 @@ Return ONLY a JSON object inside a \`\`\`json code block:
 Rules: every "cost" is a whole-dollar USD number for THIS home/lot from cited CURRENT LOCAL prices. Group line items by category in this order: Site Work, Foundation, Framing, Exterior, Mechanical, Interior, Permits & Fees. Put the builder fee and contingency in their OWN fields (not in lineItems). Do NOT include the land/lot purchase price. Never fabricate a number — cite the sources you used. Be EXTREMELY ACCURATE and local.`;
 
   try {
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=${geminiKey}`;
-    const res = await fetchWithTimeout(url, 60000, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        contents: [{ role: "user", parts: [{ text: prompt }] }],
-        systemInstruction: { parts: [{ text: "You are a senior residential construction estimator. Use Google Search to price each line item at CURRENT LOCAL costs for the property's metro from multiple credible sources. Return only the requested JSON; never invent prices; cite sources." }] },
-        tools: [{ google_search: {} }],
-      }),
-    });
-    if (!res.ok) return null;
-    const data = await res.json();
-    const text = data.candidates?.[0]?.content?.parts?.map((p: any) => p.text).filter(Boolean).join("") || "";
+    const text = await groundedGeminiText(
+      geminiKey,
+      prompt,
+      "You are a senior residential construction estimator. Use Google Search to price each line item at CURRENT LOCAL costs for the property's metro from multiple credible sources. Return only the requested JSON; never invent prices; cite sources.",
+      60000,
+    );
+    if (!text) return null;
     const m = text.match(/```json\s*([\s\S]*?)\s*```/) || text.match(/\{[\s\S]*\}/);
     const jsonStr = m ? (m[1] || m[0]) : "";
     if (!jsonStr) return null;
@@ -3718,19 +3739,13 @@ Return ONLY a JSON object inside a \`\`\`json code block:
 Each value is the current LOCAL price in USD: concrete_cuyd = delivered ready-mix concrete per cubic yard; framing_lumber_bf = framing lumber per board-foot (derive from a current 2x4x8 stud price); osb_sheet = one 7/16" 4x8 OSB sheet; shingles_square = architectural shingles per SQUARE (100 sqft, ~3 bundles); drywall_sheet = one 1/2" 4x8 drywall sheet; insulation_sqft = fiberglass batt insulation per sqft of coverage. Use CURRENT LOCAL prices for that ZIP from credible sources; cite them; never invent a price (omit any you cannot find).`;
 
   try {
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=${geminiKey}`;
-    const res = await fetchWithTimeout(url, 45000, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        contents: [{ role: "user", parts: [{ text: prompt }] }],
-        systemInstruction: { parts: [{ text: "You are a construction-material pricing assistant. Use Google Search to find CURRENT LOCAL retail unit prices near the given ZIP. Return only the JSON; cite sources; never invent prices." }] },
-        tools: [{ google_search: {} }],
-      }),
-    });
-    if (!res.ok) return null;
-    const data = await res.json();
-    const text = data.candidates?.[0]?.content?.parts?.map((p: any) => p.text).filter(Boolean).join("") || "";
+    const text = await groundedGeminiText(
+      geminiKey,
+      prompt,
+      "You are a construction-material pricing assistant. Use Google Search to find CURRENT LOCAL retail unit prices near the given ZIP. Return only the JSON; cite sources; never invent prices.",
+      45000,
+    );
+    if (!text) return null;
     const m = text.match(/```json\s*([\s\S]*?)\s*```/) || text.match(/\{[\s\S]*\}/);
     if (!m) return null;
     const obj = JSON.parse((m[1] || m[0]).replace(/,\s*([}\]])/g, "$1"));
