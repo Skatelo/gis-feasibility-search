@@ -1,4 +1,4 @@
-import type { SiteFeasibilityData, SlopeProfile, CompProperty, FloodZoneInfo, WetlandsInfo, ConstructionCostEstimate, CostLineItem } from '../types/feasibility';
+import type { SiteFeasibilityData, SlopeProfile, CompProperty, FloodZoneInfo, WetlandsInfo, ConstructionCostEstimate, CostLineItem, MaterialTakeoff, MaterialTakeoffItem } from '../types/feasibility';
 import { fetchCountyZoningCode, hasCountyZoning, normalizeCountyKey } from '../data/ncZoning';
 import { getSupabase, isSupabaseConfigured } from './supabaseClient';
 
@@ -3677,6 +3677,85 @@ Rules: every "cost" is a whole-dollar USD number for THIS home/lot from cited CU
     };
   } catch (e) {
     console.warn("Construction cost estimate failed:", e);
+    return null;
+  }
+}
+
+// Material "recipe": engineering takeoff factors per sqft of floor area for a
+// typical wood-framed single-family home — the core commodity materials that
+// have clear local retail unit prices. (Step 3 of the GIS + pricing blueprint.)
+const MATERIAL_RECIPE: { key: string; material: string; unit: string; perSqft: number }[] = [
+  { key: 'concrete_cuyd', material: 'Concrete — foundation & slab (ready-mix)', unit: 'cu yd', perSqft: 0.020 },
+  { key: 'framing_lumber_bf', material: 'Framing lumber (2x SPF)', unit: 'board ft', perSqft: 6.5 },
+  { key: 'osb_sheet', material: 'OSB sheathing (7/16" 4x8)', unit: 'sheet', perSqft: 0.056 },
+  { key: 'shingles_square', material: 'Roof shingles (architectural)', unit: 'square', perSqft: 0.013 },
+  { key: 'drywall_sheet', material: 'Drywall (1/2" 4x8)', unit: 'sheet', perSqft: 0.110 },
+  { key: 'insulation_sqft', material: 'Insulation — walls + attic (batts)', unit: 'sqft', perSqft: 2.6 },
+];
+
+/**
+ * LOCAL MATERIAL TAKEOFF (the GIS + pricing blueprint): parcel ZIP → material
+ * QUANTITY (building size × recipe) × current LOCAL unit price = material cost.
+ * Direct big-box scraping (Home Depot/Lowe's) is Akamai-blocked from a server,
+ * so the local unit prices are sourced via Gemini + Google Search for the
+ * parcel's ZIP. Returns a transparent quantity × unit-price line for each core
+ * material. Null on failure; never invents prices (cites sources).
+ */
+export async function fetchMaterialTakeoff(reportData: SiteFeasibilityData): Promise<MaterialTakeoff | null> {
+  const geminiKey = getUserKeys().gemini || "";
+  if (!geminiKey) return null;
+
+  const zip = (String(reportData.inputAddress || "").match(/\b(\d{5})(?:-\d{4})?\b/) || [])[1] || "";
+  const sqfts = (reportData.comps || []).map((c) => c.sqft).filter((n): n is number => !!n && n > 0).sort((a, b) => a - b);
+  const plannedSqft = sqfts.length ? Math.round(sqfts[Math.floor(sqfts.length / 2)] / 50) * 50 : 1600;
+  const locality = zip ? `ZIP ${zip} (${reportData.countyName} County, NC)` : `${reportData.countyName} County, NC`;
+
+  const prompt = `Find the CURRENT LOCAL retail UNIT prices for these core construction materials at the building suppliers nearest to ${locality} (the local Home Depot / Lowe's / building-supply yard for that ZIP).
+Return ONLY a JSON object inside a \`\`\`json code block:
+\`\`\`json
+{ "unitPrices": { "concrete_cuyd": 0, "framing_lumber_bf": 0, "osb_sheet": 0, "shingles_square": 0, "drywall_sheet": 0, "insulation_sqft": 0 }, "sources": ["https://..."] }
+\`\`\`
+Each value is the current LOCAL price in USD: concrete_cuyd = delivered ready-mix concrete per cubic yard; framing_lumber_bf = framing lumber per board-foot (derive from a current 2x4x8 stud price); osb_sheet = one 7/16" 4x8 OSB sheet; shingles_square = architectural shingles per SQUARE (100 sqft, ~3 bundles); drywall_sheet = one 1/2" 4x8 drywall sheet; insulation_sqft = fiberglass batt insulation per sqft of coverage. Use CURRENT LOCAL prices for that ZIP from credible sources; cite them; never invent a price (omit any you cannot find).`;
+
+  try {
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=${geminiKey}`;
+    const res = await fetchWithTimeout(url, 45000, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents: [{ role: "user", parts: [{ text: prompt }] }],
+        systemInstruction: { parts: [{ text: "You are a construction-material pricing assistant. Use Google Search to find CURRENT LOCAL retail unit prices near the given ZIP. Return only the JSON; cite sources; never invent prices." }] },
+        tools: [{ google_search: {} }],
+      }),
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    const text = data.candidates?.[0]?.content?.parts?.map((p: any) => p.text).filter(Boolean).join("") || "";
+    const m = text.match(/```json\s*([\s\S]*?)\s*```/) || text.match(/\{[\s\S]*\}/);
+    if (!m) return null;
+    const obj = JSON.parse((m[1] || m[0]).replace(/,\s*([}\]])/g, "$1"));
+    const up = obj.unitPrices || {};
+
+    const items: MaterialTakeoffItem[] = [];
+    for (const r of MATERIAL_RECIPE) {
+      const unitPrice = Number(up[r.key]);
+      if (!Number.isFinite(unitPrice) || unitPrice <= 0) continue;
+      const quantity = Math.round(r.perSqft * plannedSqft * 10) / 10;
+      items.push({ material: r.material, unit: r.unit, quantity, unitPrice: Math.round(unitPrice * 100) / 100, cost: Math.round(quantity * unitPrice) });
+    }
+    if (items.length < 3) return null;
+
+    return {
+      zip,
+      locality,
+      plannedSqft,
+      items,
+      materialTotal: items.reduce((s, i) => s + i.cost, 0),
+      sources: Array.isArray(obj.sources) ? obj.sources.map((s: any) => String(s)).filter((s: string) => /^https?:\/\//.test(s)).slice(0, 6) : [],
+      generatedAt: Date.now(),
+    };
+  } catch (e) {
+    console.warn("Material takeoff failed:", e);
     return null;
   }
 }

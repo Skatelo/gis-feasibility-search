@@ -87,6 +87,27 @@ export interface ConstructionCostEstimate {
   generatedAt: number;
 }
 
+/** One line in the local material takeoff: quantity (from the building size via a
+ *  recipe) × the current LOCAL unit price = cost. */
+export interface MaterialTakeoffItem {
+  material: string;
+  unit: string;        // "cu yd", "sheet", "square", "board ft", "sqft"
+  quantity: number;
+  unitPrice: number;   // current local $/unit
+  cost: number;        // quantity × unitPrice
+}
+
+/** Local material-cost takeoff for a parcel (ZIP-localized unit pricing). */
+export interface MaterialTakeoff {
+  zip: string;
+  locality: string;
+  plannedSqft: number;
+  items: MaterialTakeoffItem[];
+  materialTotal: number;
+  sources: string[];
+  generatedAt: number;
+}
+
 export interface FloodZoneInfo {
   /** FEMA flood zone code, e.g. "AE", "VE", "A", "X", or "UNKNOWN". */
   zone: string;

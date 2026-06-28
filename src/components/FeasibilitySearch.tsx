@@ -1,11 +1,11 @@
 import { useState, useEffect, useRef } from 'react';
 import type { FormEvent, KeyboardEvent, FC } from 'react';
 import { createRoot } from 'react-dom/client';
-import { executeLandAnalysis, chatWithGemini, getUserKeys, detectNcCounty, lookupParcelById, fetchConstructionCostEstimate } from '../services/feasibilityService';
+import { executeLandAnalysis, chatWithGemini, getUserKeys, detectNcCounty, lookupParcelById, fetchConstructionCostEstimate, fetchMaterialTakeoff } from '../services/feasibilityService';
 import type { ChatMessage } from '../services/feasibilityService';
 import { saveReport, getReportEtaMs, recordReportDuration } from '../services/reportStore';
 import { ReportsDrawer } from './ReportsDrawer';
-import type { SiteFeasibilityData, ConstructionCostEstimate, CostLineItem } from '../types/feasibility';
+import type { SiteFeasibilityData, ConstructionCostEstimate, CostLineItem, MaterialTakeoff } from '../types/feasibility';
 
 /** Group cost line items by category, preserving first-seen order. (Avoids the
  *  global Map — lucide-react's `Map` icon is imported in this file.) */
@@ -669,6 +669,7 @@ export const FeasibilitySearch: FC = () => {
   const [data, setData] = useState<SiteFeasibilityData | null>(null);
   const [costEstimate, setCostEstimate] = useState<ConstructionCostEstimate | null>(null);
   const [costLoading, setCostLoading] = useState(false);
+  const [materialTakeoff, setMaterialTakeoff] = useState<MaterialTakeoff | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [history, setHistory] = useState<any[]>([]);
 
@@ -2024,6 +2025,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
     setData(null);
     setCostEstimate(null);
     setCostLoading(false);
+    setMaterialTakeoff(null);
     resetChatUiState();
 
     // Progressive loading: merge each partial emission into view state the
@@ -2064,12 +2066,16 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
       // All site data is in — generate the AI feasibility report (the countdown
       // timer in the chat panel tracks this phase).
       generateInitialChatReport(result);
-      // In parallel, build the instant construction-cost estimate (local pricing).
+      // In parallel, build the instant construction-cost estimate + the local
+      // material takeoff (ZIP-localized unit pricing).
       setCostLoading(true);
       fetchConstructionCostEstimate(result)
         .then((est) => { if (seq === searchSeqRef.current) setCostEstimate(est); })
         .catch(() => {})
         .finally(() => { if (seq === searchSeqRef.current) setCostLoading(false); });
+      fetchMaterialTakeoff(result)
+        .then((mt) => { if (seq === searchSeqRef.current) setMaterialTakeoff(mt); })
+        .catch(() => {});
     } catch (err: any) {
       if (seq !== searchSeqRef.current) return;
       console.error(err);
@@ -2963,14 +2969,14 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
 
               {/* Instant Construction Cost Estimate — real-time LOCAL pricing,
                   shown after the comps and before the full AI report. */}
-              {(costEstimate || costLoading) && (
+              {(costEstimate || costLoading || materialTakeoff) && (
                 <div className="card registry-card cost-estimate-card">
                   <h3 className="registry-card-header" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                     <Hammer size={16} style={{ color: 'var(--primary)' }} />
                     <span>Instant Construction Cost Estimate</span>
                   </h3>
 
-                  {costLoading && !costEstimate ? (
+                  {costLoading && !costEstimate && !materialTakeoff ? (
                     <div className="cost-loading">
                       <Loader2 size={15} className="spinner" />
                       <span>Pricing this build with current local costs…</span>
@@ -3032,6 +3038,41 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                       <div className="cost-disclaimer">Instant AI estimate from current local pricing — confirm with local bids before contracting. Excludes the land/lot price.</div>
                     </>
                   ) : null}
+
+                  {/* Local Material Takeoff — parcel ZIP → quantity (recipe × size) × local unit price */}
+                  {materialTakeoff && (
+                    <div className="takeoff-section">
+                      <div className="takeoff-head">
+                        <span><Landmark size={13} /> Local Material Takeoff{materialTakeoff.zip ? ` · ZIP ${materialTakeoff.zip}` : ''}</span>
+                        <span className="takeoff-total">${materialTakeoff.materialTotal.toLocaleString()}</span>
+                      </div>
+                      <div className="takeoff-sub">Core materials for a ~{materialTakeoff.plannedSqft.toLocaleString()} sqft build — quantity × current local unit price</div>
+                      <div className="takeoff-table">
+                        <div className="takeoff-row takeoff-row-head">
+                          <span>Material</span><span>Qty</span><span>Unit&nbsp;$</span><span>Cost</span>
+                        </div>
+                        {materialTakeoff.items.map((it, i) => (
+                          <div key={i} className="takeoff-row">
+                            <span className="takeoff-mat">{it.material}</span>
+                            <span>{it.quantity.toLocaleString()} {it.unit}</span>
+                            <span>${it.unitPrice.toLocaleString(undefined, { minimumFractionDigits: it.unitPrice < 10 ? 2 : 0, maximumFractionDigits: 2 })}</span>
+                            <span className="takeoff-cost">${it.cost.toLocaleString()}</span>
+                          </div>
+                        ))}
+                      </div>
+                      {materialTakeoff.sources.length > 0 && (
+                        <div className="cost-sources">
+                          <span className="cost-sources-label">Material price sources:</span>
+                          {materialTakeoff.sources.map((s, i) => (
+                            <a key={i} href={s} target="_blank" rel="noreferrer">
+                              {(() => { try { return new URL(s).hostname.replace(/^www\./, ''); } catch { return 'source'; } })()}
+                            </a>
+                          ))}
+                        </div>
+                      )}
+                      <div className="cost-disclaimer">Core commodity materials (structural shell) — quantities from standard takeoff factors × the building size, priced at current local unit costs. Finishes, fixtures, and labor are in the full estimate above.</div>
+                    </div>
+                  )}
                 </div>
               )}
 
