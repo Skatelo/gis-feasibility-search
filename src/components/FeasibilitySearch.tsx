@@ -749,7 +749,7 @@ export const FeasibilitySearch: FC = () => {
   // Build the cost estimate + material takeoff (each shows as it arrives). If
   // BOTH fail (e.g. a transient Gemini rate limit), the card stays and offers a
   // retry instead of vanishing.
-  const generateCostEstimates = (reportData: SiteFeasibilityData, seq: number) => {
+  const generateCostEstimates = (reportData: SiteFeasibilityData, seq: number): Promise<ConstructionCostEstimate | null> => {
     setCostLoading(true);
     setCostError(false);
     setCostEstimate(null);
@@ -763,14 +763,13 @@ export const FeasibilitySearch: FC = () => {
         if (!anySuccess) setCostError(true);
       }
     };
-    fetchConstructionCostEstimate(reportData).then(
-      (est) => { if (seq === searchSeqRef.current && est) setCostEstimate(est); settle(!!est); },
-      () => settle(false),
-    );
+    const estPromise = fetchConstructionCostEstimate(reportData).catch(() => null);
+    estPromise.then((est) => { if (seq === searchSeqRef.current && est) setCostEstimate(est); settle(!!est); });
     fetchMaterialTakeoff(reportData).then(
       (mt) => { if (seq === searchSeqRef.current && mt) setMaterialTakeoff(mt); settle(!!mt); },
       () => settle(false),
     );
+    return estPromise;
   };
 
   // Re-run ONLY the comps for the current parcel at a new max DRIVING-mile radius
@@ -805,13 +804,26 @@ export const FeasibilitySearch: FC = () => {
     }
   };
 
-  const generateInitialChatReport = async (reportData: SiteFeasibilityData) => {
+  const generateInitialChatReport = async (reportData: SiteFeasibilityData, costEstimate?: ConstructionCostEstimate) => {
     setChatLoading(true);
     setChatHistory([]);
     setReportSaved(false);
     const reportStart = Date.now();
     setReportTimer({ startedAt: reportStart, etaMs: getReportEtaMs() });
     try {
+      // When the Instant Construction Cost Estimate is ready, hand its figures to
+      // the report so Section 20 (Development Cost Considerations) is built FROM
+      // it — same numbers, explicitly linked to the card.
+      const costBlock = costEstimate
+        ? `\n\nINSTANT CONSTRUCTION COST ESTIMATE (already computed for THIS parcel and shown to the user in the "Instant Construction Cost Estimate" card) — USE THESE FIGURES as the authoritative basis for Section 20 (Development Cost Considerations). Present the same itemized lines and totals (you may add site-specific adders + cited sources), keep every number CONSISTENT with the card, and state that the build budget matches the Instant Construction Cost Estimate. Do NOT contradict these totals.
+Planned home: ${costEstimate.plannedSqft.toLocaleString()} sqft · Locality: ${costEstimate.locality}
+Itemized hard costs:
+${costEstimate.lineItems.map((li) => `- ${li.category} — ${li.item}${li.detail ? ` (${li.detail})` : ''}: $${li.cost.toLocaleString()}`).join('\n')}
+Hard cost subtotal: $${costEstimate.hardCostTotal.toLocaleString()}
+Builder fee: $${costEstimate.builderFee.toLocaleString()}
+Contingency: $${costEstimate.contingency.toLocaleString()}
+TOTAL build cost: $${costEstimate.totalCost.toLocaleString()} ($${costEstimate.costPerSqft.toLocaleString()}/sqft)${costEstimate.laborBasis ? `\nLabor basis: ${costEstimate.laborBasis}` : ''}`
+        : '';
       const compsList = reportData.comps && reportData.comps.length > 0
         ? reportData.comps.map((comp, idx) =>
             `- Comp ${idx + 1}: ${comp.address} | Sold: $${comp.price.toLocaleString()}${comp.pricePerSqft ? ` ($${comp.pricePerSqft}/sqft)` : ''} | ${comp.sqft ? `${comp.sqft.toLocaleString()} sqft | ` : ''}Driving: ${comp.distanceMiles.toFixed(2)} mi | Year Built: ${comp.yearBuilt || 'N/A'} | Type: ${comp.propertyType || 'N/A'} | Sale Date: ${comp.saleDate || 'N/A'} | ${comp.verifiedNote || 'RealtyAPI closed-sale record'}`
@@ -880,7 +892,7 @@ Section 17 (Market Saturation & Absorption by Product Type) must be PRECISE and 
 
 Section 18 (Interest Rate & Financing Environment) must state, in detail, the CURRENT 30-year mortgage rate and its recent trend — RISING, FALLING, or STEADY (cite a current source) — the Federal Reserve's posture, and exactly how that affects buyer demand, affordability, absorption pace, and the project's exit timing. Give a short SENSITIVITY read: what a rate move up vs. down would do to demand and to the recommended hold/sell timing.
 
-Section 20 (Development Cost Considerations) must present an ITEMIZED construction-cost TABLE that mirrors the Construction Cost Reference Model in your standards (a real ~$250k / ~1,600 sqft 3BR/2BA new-build budget incl. a $25k builder fee and a contingency), but with each line LOCALIZED to CURRENT prices near this address (cited sources) and SCALED to the planned home's size; show the scaled total hard cost and $/sqft. Search AS MANY local sources as possible for clearing/tree removal, grading, foundation, well + septic (or tap/impact fees), and per-sqft build cost — be EXTREMELY ACCURATE.
+Section 20 (Development Cost Considerations) must present an ITEMIZED construction-cost TABLE that mirrors the Construction Cost Reference Model in your standards (a real ~$250k / ~1,600 sqft 3BR/2BA new-build budget incl. a $25k builder fee and a contingency), but with each line LOCALIZED to CURRENT prices near this address (cited sources) and SCALED to the planned home's size; show the scaled total hard cost and $/sqft. Search AS MANY local sources as possible for clearing/tree removal, grading, foundation, well + septic (or tap/impact fees), and per-sqft build cost — be EXTREMELY ACCURATE.${costEstimate ? ' When the INSTANT CONSTRUCTION COST ESTIMATE figures are provided below, BUILD this section from them — use the SAME line items and totals (you may add the site adders + sources), keep $/sqft and the total CONSISTENT with that card, and note that the budget matches the on-screen Instant Construction Cost Estimate.' : ''}${costBlock}
 
 Sections 22 (Land Valuation) & 23 (Builder/Developer Profitability) must compute, in a pro-forma TABLE, what a builder would PAY FOR THE LAND: start from ARV (from the comps' median $/sqft × planned GLA), subtract the localized total construction cost, subtract SITE-SPECIFIC adders that reduce land value — TREE/lot CLEARING (if wooded), extra GRADING/engineering (if slope ≥15%), and WELL + SEPTIC (if no public water/sewer) — subtract selling/closing/financing, and subtract DEVELOPER PROFIT at THREE margins shown side by side: a little less than 20% of ARV (≈15%), EXACTLY 20% of ARV, and more than 20% of ARV (≈25%). This yields THREE residual land values (one per margin) in the table — a lower profit margin lets the builder pay MORE for the land, a higher margin less. Cross-check against the rule of thumb that builders pay ≈ 20% of ARV for a finished lot (then deduct those same site costs), and present a defensible land-value RANGE that brackets the three figures. Reflect any rezoning/subdivision upside from Sections 6–7 and the saturation/rate context from Sections 17–18 in the highest-and-best-use and valuation. This is development-feasibility "what a builder would pay" — NOT a wholesale max-allowable-offer.
 
@@ -2137,12 +2149,26 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
       if (seq !== searchSeqRef.current) return;
       setData(result);
       addToHistory(result.inputAddress, county);
+      // Kick off the instant construction-cost estimate + local material takeoff
+      // (the card fills as they arrive). Capture the estimate promise so the AI
+      // report's Development Cost Considerations section can be built FROM it
+      // (consistent, linked figures).
+      const estPromise = generateCostEstimates(result, seq);
+      // Show the report card as "generating" immediately so it isn't idle during
+      // the brief wait for the estimate below.
+      setChatLoading(true);
+      setChatHistory([]);
+      // Give the estimate a brief head start so the report can cite it; if it
+      // isn't ready quickly, generate the report anyway (it estimates on its own
+      // and the card still fills in).
+      const est = await Promise.race([
+        estPromise,
+        new Promise<ConstructionCostEstimate | null>((r) => setTimeout(() => r(null), 45000)),
+      ]);
+      if (seq !== searchSeqRef.current) return;
       // All site data is in — generate the AI feasibility report (the countdown
       // timer in the chat panel tracks this phase).
-      generateInitialChatReport(result);
-      // In parallel, build the instant construction-cost estimate + the local
-      // material takeoff (ZIP-localized unit pricing).
-      generateCostEstimates(result, seq);
+      generateInitialChatReport(result, est || undefined);
     } catch (err: any) {
       if (seq !== searchSeqRef.current) return;
       console.error(err);
@@ -3192,19 +3218,44 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                         <span><Landmark size={13} /> Local Material Takeoff{materialTakeoff.zip ? ` · ZIP ${materialTakeoff.zip}` : ''}</span>
                         <span className="takeoff-total">${materialTakeoff.materialTotal.toLocaleString()}</span>
                       </div>
-                      <div className="takeoff-sub">Core materials for a ~{materialTakeoff.plannedSqft.toLocaleString()} sqft build — quantity × current local unit price</div>
+                      <div className="takeoff-sub">Every major material to build a ~{materialTakeoff.plannedSqft.toLocaleString()} sqft house — quantity × current local unit price, phase by phase</div>
                       <div className="takeoff-table">
                         <div className="takeoff-row takeoff-row-head">
                           <span>Material</span><span>Qty</span><span>Unit&nbsp;$</span><span>Cost</span>
                         </div>
-                        {materialTakeoff.items.map((it, i) => (
-                          <div key={i} className="takeoff-row">
-                            <span className="takeoff-mat">{it.material}</span>
-                            <span>{it.quantity.toLocaleString()} {it.unit}</span>
-                            <span>${it.unitPrice.toLocaleString(undefined, { minimumFractionDigits: it.unitPrice < 10 ? 2 : 0, maximumFractionDigits: 2 })}</span>
-                            <span className="takeoff-cost">${it.cost.toLocaleString()}</span>
-                          </div>
-                        ))}
+                        {(() => {
+                          // Group line items by build phase, preserving recipe order.
+                          const order: string[] = [];
+                          const byPhase: Record<string, typeof materialTakeoff.items> = {};
+                          for (const it of materialTakeoff.items) {
+                            const ph = it.phase || 'Materials';
+                            if (!byPhase[ph]) { byPhase[ph] = []; order.push(ph); }
+                            byPhase[ph].push(it);
+                          }
+                          return order.map((ph) => {
+                            const phaseCost = byPhase[ph].reduce((s, it) => s + it.cost, 0);
+                            return (
+                              <div key={ph} className="takeoff-phase">
+                                <div className="takeoff-phase-head">
+                                  <span>{ph}</span>
+                                  <span>${phaseCost.toLocaleString()}</span>
+                                </div>
+                                {byPhase[ph].map((it, i) => (
+                                  <div key={i} className="takeoff-row">
+                                    <span className="takeoff-mat">{it.material}</span>
+                                    <span>{it.quantity.toLocaleString()} {it.unit}</span>
+                                    <span>${it.unitPrice.toLocaleString(undefined, { minimumFractionDigits: it.unitPrice < 10 ? 2 : 0, maximumFractionDigits: 2 })}</span>
+                                    <span className="takeoff-cost">${it.cost.toLocaleString()}</span>
+                                  </div>
+                                ))}
+                              </div>
+                            );
+                          });
+                        })()}
+                        <div className="takeoff-row takeoff-grand">
+                          <span className="takeoff-mat">Total materials</span><span></span><span></span>
+                          <span className="takeoff-cost">${materialTakeoff.materialTotal.toLocaleString()}</span>
+                        </div>
                       </div>
                       {materialTakeoff.sources.length > 0 && (
                         <div className="cost-sources">
@@ -3216,7 +3267,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                           ))}
                         </div>
                       )}
-                      <div className="cost-disclaimer">Core commodity materials (structural shell) — quantities from standard takeoff factors × the building size, priced at current local unit costs. Finishes, fixtures, and labor are in the full estimate above.</div>
+                      <div className="cost-disclaimer">Whole-house material list — quantities from standard takeoff factors × the building size, priced at current local unit costs. This is MATERIALS only; labor, permits, builder fee &amp; contingency are in the full estimate above.</div>
                     </div>
                   )}
                 </div>

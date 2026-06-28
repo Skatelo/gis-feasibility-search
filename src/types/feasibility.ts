@@ -91,10 +91,11 @@ export interface ConstructionCostEstimate {
  *  recipe) × the current LOCAL unit price = cost. */
 export interface MaterialTakeoffItem {
   material: string;
-  unit: string;        // "cu yd", "sheet", "square", "board ft", "sqft"
+  unit: string;        // "cu yd", "sheet", "square", "board ft", "sqft", "each"
   quantity: number;
   unitPrice: number;   // current local $/unit
   cost: number;        // quantity × unitPrice
+  phase?: string;      // build phase: "Foundation & Site", "Framing", "Roofing", etc.
 }
 
 /** Local material-cost takeoff for a parcel (ZIP-localized unit pricing). */

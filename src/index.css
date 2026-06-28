@@ -3690,3 +3690,18 @@ img, svg, video, canvas, table, pre { max-width: 100%; }
   border: 1px solid var(--bg-card-border); background: var(--bg-card, #fff);
   color: var(--text-primary); cursor: pointer;
 }
+
+/* Whole-house material takeoff: phase grouping */
+.takeoff-phase { display: flex; flex-direction: column; }
+.takeoff-phase-head {
+  display: flex; justify-content: space-between; align-items: center;
+  margin-top: 8px; padding: 4px 2px; font-size: 0.7rem; font-weight: 800;
+  text-transform: uppercase; letter-spacing: 0.04em; color: var(--primary);
+  border-bottom: 1px solid var(--bg-card-border);
+}
+.takeoff-phase-head > span:last-child { color: var(--text-secondary); font-variant-numeric: tabular-nums; }
+.takeoff-grand {
+  margin-top: 6px; border-top: 2px solid var(--bg-card-border); border-bottom: none;
+  font-weight: 800; font-size: 0.84rem; color: var(--text-primary); padding-top: 8px;
+}
+.takeoff-grand .takeoff-cost { color: var(--success); }

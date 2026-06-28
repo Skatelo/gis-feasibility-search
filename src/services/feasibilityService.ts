@@ -3798,25 +3798,62 @@ Rules: every "cost" is a whole-dollar USD number for THIS home/lot from cited CU
   }
 }
 
-// Material "recipe": engineering takeoff factors per sqft of floor area for a
-// typical wood-framed single-family home — the core commodity materials that
-// have clear local retail unit prices. (Step 3 of the GIS + pricing blueprint.)
-const MATERIAL_RECIPE: { key: string; material: string; unit: string; perSqft: number }[] = [
-  { key: 'concrete_cuyd', material: 'Concrete — foundation & slab (ready-mix)', unit: 'cu yd', perSqft: 0.020 },
-  { key: 'framing_lumber_bf', material: 'Framing lumber (2x SPF)', unit: 'board ft', perSqft: 6.5 },
-  { key: 'osb_sheet', material: 'OSB sheathing (7/16" 4x8)', unit: 'sheet', perSqft: 0.056 },
-  { key: 'shingles_square', material: 'Roof shingles (architectural)', unit: 'square', perSqft: 0.013 },
-  { key: 'drywall_sheet', material: 'Drywall (1/2" 4x8)', unit: 'sheet', perSqft: 0.110 },
-  { key: 'insulation_sqft', material: 'Insulation — walls + attic (batts)', unit: 'sqft', perSqft: 2.6 },
+// WHOLE-HOUSE material "recipe": engineering takeoff factors for a typical
+// wood-framed NC single-family home, phase by phase. `qty(sqft)` derives the
+// quantity from the planned floor area (per-sqft factors, or counts scaled by
+// size); `priceDesc` tells the grounded pricing step exactly what local unit
+// price to find. (Step 3 of the GIS + pricing blueprint — the full build.)
+interface RecipeItem {
+  key: string; material: string; unit: string; phase: string;
+  qty: (sqft: number) => number; priceDesc: string;
+}
+const MATERIAL_RECIPE: RecipeItem[] = [
+  // Foundation & Site
+  { key: 'concrete_cuyd', material: 'Concrete — footings & slab (ready-mix)', unit: 'cu yd', phase: 'Foundation & Site', qty: (s) => s * 0.022, priceDesc: 'delivered ready-mix concrete per cubic yard' },
+  { key: 'gravel_ton', material: 'Gravel base (crushed stone)', unit: 'ton', phase: 'Foundation & Site', qty: (s) => s * 0.012, priceDesc: 'crushed stone / #57 gravel per ton' },
+  { key: 'vapor_barrier_sqft', material: 'Vapor barrier (6-mil poly)', unit: 'sqft', phase: 'Foundation & Site', qty: (s) => s * 1.05, priceDesc: '6-mil polyethylene vapor barrier per sqft' },
+  // Framing
+  { key: 'framing_lumber_bf', material: 'Framing lumber (2x SPF)', unit: 'board ft', phase: 'Framing', qty: (s) => s * 6.5, priceDesc: 'framing lumber per board-foot (derive from a current 2x4x8 stud price)' },
+  { key: 'osb_wall_sheet', material: 'OSB wall sheathing (7/16" 4x8)', unit: 'sheet', phase: 'Framing', qty: (s) => s * 0.045, priceDesc: 'one 7/16" 4x8 OSB sheet' },
+  { key: 'subfloor_sheet', material: 'Subfloor (3/4" T&G 4x8)', unit: 'sheet', phase: 'Framing', qty: (s) => s * 0.031, priceDesc: 'one 3/4" 4x8 tongue-and-groove subfloor sheet (OSB/plywood)' },
+  { key: 'lvl_beam_lf', material: 'Engineered LVL beams', unit: 'linear ft', phase: 'Framing', qty: (s) => s * 0.02, priceDesc: 'LVL beam per linear foot (e.g. 1.75"x9.25")' },
+  // Roofing
+  { key: 'shingles_square', material: 'Roof shingles (architectural)', unit: 'square', phase: 'Roofing', qty: (s) => s * 0.014, priceDesc: 'architectural shingles per SQUARE (100 sqft, ~3 bundles)' },
+  { key: 'underlayment_square', material: 'Roof underlayment (synthetic)', unit: 'square', phase: 'Roofing', qty: (s) => s * 0.014, priceDesc: 'synthetic roofing underlayment per square (100 sqft)' },
+  // Exterior envelope
+  { key: 'house_wrap_sqft', material: 'House wrap (weather barrier)', unit: 'sqft', phase: 'Exterior', qty: (s) => s * 0.9, priceDesc: 'house wrap / weather-resistive barrier per sqft' },
+  { key: 'siding_square', material: 'Siding (vinyl / fiber-cement)', unit: 'square', phase: 'Exterior', qty: (s) => s * 0.009, priceDesc: 'exterior siding per square (100 sqft) — vinyl or fiber-cement' },
+  { key: 'windows_ea', material: 'Windows (vinyl, installed size)', unit: 'each', phase: 'Exterior', qty: (s) => Math.max(6, Math.round(s / 130)), priceDesc: 'one standard vinyl double-hung window' },
+  { key: 'exterior_doors_ea', material: 'Exterior doors', unit: 'each', phase: 'Exterior', qty: (s) => Math.max(2, Math.round(s / 1200)), priceDesc: 'one exterior entry door (steel/fiberglass)' },
+  { key: 'garage_door_ea', material: 'Garage door', unit: 'each', phase: 'Exterior', qty: () => 1, priceDesc: 'one 16x7 sectional garage door' },
+  // Insulation
+  { key: 'wall_insulation_sqft', material: 'Wall insulation (R-15 batts)', unit: 'sqft', phase: 'Insulation', qty: (s) => s * 0.9, priceDesc: 'R-13/R-15 fiberglass batt wall insulation per sqft' },
+  { key: 'attic_insulation_sqft', material: 'Attic insulation (blown R-38)', unit: 'sqft', phase: 'Insulation', qty: (s) => s * 1.0, priceDesc: 'blown-in R-38 attic insulation per sqft of coverage' },
+  // Drywall & paint
+  { key: 'drywall_sheet', material: 'Drywall (1/2" 4x8)', unit: 'sheet', phase: 'Drywall & Paint', qty: (s) => s * 0.11, priceDesc: 'one 1/2" 4x8 drywall sheet' },
+  { key: 'interior_paint_gal', material: 'Interior paint', unit: 'gallon', phase: 'Drywall & Paint', qty: (s) => s * 0.012, priceDesc: 'one gallon of interior wall paint' },
+  // Interior finishes
+  { key: 'flooring_sqft', material: 'Flooring (LVP / carpet mix)', unit: 'sqft', phase: 'Interior Finishes', qty: (s) => s * 1.0, priceDesc: 'mid-grade flooring per sqft (luxury vinyl plank / carpet)' },
+  { key: 'interior_doors_ea', material: 'Interior doors', unit: 'each', phase: 'Interior Finishes', qty: (s) => Math.max(6, Math.round(s / 220)), priceDesc: 'one prehung interior door' },
+  { key: 'trim_lf', material: 'Trim & baseboard', unit: 'linear ft', phase: 'Interior Finishes', qty: (s) => s * 0.9, priceDesc: 'baseboard/trim molding per linear foot' },
+  { key: 'cabinets_lf', material: 'Kitchen & bath cabinets', unit: 'linear ft', phase: 'Interior Finishes', qty: (s) => Math.max(15, Math.round(s * 0.012)), priceDesc: 'stock cabinets per linear foot (installed run)' },
+  { key: 'countertop_sqft', material: 'Countertops', unit: 'sqft', phase: 'Interior Finishes', qty: (s) => Math.max(40, Math.round(s * 0.03)), priceDesc: 'countertop per sqft (granite/quartz mid-grade)' },
+  // Mechanical
+  { key: 'hvac_ton', material: 'HVAC equipment (heat pump)', unit: 'ton', phase: 'Mechanical', qty: (s) => Math.max(2, Math.ceil(s / 600)), priceDesc: 'central heat-pump/AC equipment per ton of capacity' },
+  { key: 'water_heater_ea', material: 'Water heater', unit: 'each', phase: 'Mechanical', qty: (s) => (s > 2600 ? 2 : 1), priceDesc: 'one 50-gal water heater' },
+  { key: 'electrical_wire_ft', material: 'Electrical wire (romex)', unit: 'ft', phase: 'Mechanical', qty: (s) => s * 1.0, priceDesc: 'NM-B (romex) wire per foot (12/2 average)' },
+  { key: 'plumbing_pipe_ft', material: 'Plumbing pipe (PEX)', unit: 'ft', phase: 'Mechanical', qty: (s) => s * 0.5, priceDesc: 'PEX water-supply pipe per foot' },
+  { key: 'plumbing_fixtures_set', material: 'Plumbing fixtures (per bath)', unit: 'bath set', phase: 'Mechanical', qty: (s) => Math.max(2, Math.round(s / 900)), priceDesc: 'one bathroom fixture set (toilet + sink/vanity + tub/shower)' },
 ];
 
 /**
  * LOCAL MATERIAL TAKEOFF (the GIS + pricing blueprint): parcel ZIP → material
- * QUANTITY (building size × recipe) × current LOCAL unit price = material cost.
+ * QUANTITY (building size × the whole-house recipe) × current LOCAL unit price =
+ * material cost — every major material to build the house, phase by phase.
  * Direct big-box scraping (Home Depot/Lowe's) is Akamai-blocked from a server,
  * so the local unit prices are sourced via Gemini + Google Search for the
- * parcel's ZIP. Returns a transparent quantity × unit-price line for each core
- * material. Null on failure; never invents prices (cites sources).
+ * parcel's ZIP. Returns a transparent quantity × unit-price line per material.
+ * Null on failure; never invents prices (cites sources).
  */
 export async function fetchMaterialTakeoff(reportData: SiteFeasibilityData): Promise<MaterialTakeoff | null> {
   const geminiKey = getUserKeys().gemini || "";
@@ -3827,19 +3864,23 @@ export async function fetchMaterialTakeoff(reportData: SiteFeasibilityData): Pro
   const plannedSqft = sqfts.length ? Math.round(sqfts[Math.floor(sqfts.length / 2)] / 50) * 50 : 1600;
   const locality = zip ? `ZIP ${zip} (${reportData.countyName} County, NC)` : `${reportData.countyName} County, NC`;
 
-  const prompt = `Find the CURRENT LOCAL retail UNIT prices for these core construction materials at the building suppliers nearest to ${locality} (the local Home Depot / Lowe's / building-supply yard for that ZIP).
+  const priceLines = MATERIAL_RECIPE.map((r) => `- ${r.key}: ${r.priceDesc}`).join('\n');
+  const keysJson = `{ ${MATERIAL_RECIPE.map((r) => `"${r.key}": 0`).join(', ')} }`;
+  const prompt = `Find the CURRENT LOCAL retail UNIT prices to build a house — every material below — at the building suppliers nearest to ${locality} (the local Home Depot / Lowe's / building-supply yard / contractor supplier for that ZIP).
 Return ONLY a JSON object inside a \`\`\`json code block:
 \`\`\`json
-{ "unitPrices": { "concrete_cuyd": 0, "framing_lumber_bf": 0, "osb_sheet": 0, "shingles_square": 0, "drywall_sheet": 0, "insulation_sqft": 0 }, "sources": ["https://..."] }
+{ "unitPrices": ${keysJson}, "sources": ["https://..."] }
 \`\`\`
-Each value is the current LOCAL price in USD: concrete_cuyd = delivered ready-mix concrete per cubic yard; framing_lumber_bf = framing lumber per board-foot (derive from a current 2x4x8 stud price); osb_sheet = one 7/16" 4x8 OSB sheet; shingles_square = architectural shingles per SQUARE (100 sqft, ~3 bundles); drywall_sheet = one 1/2" 4x8 drywall sheet; insulation_sqft = fiberglass batt insulation per sqft of coverage. Use CURRENT LOCAL prices for that ZIP from credible sources; cite them; never invent a price (omit any you cannot find).`;
+Each value is the current LOCAL price in USD for that ZIP:
+${priceLines}
+Use CURRENT LOCAL prices from credible sources; cite them; never invent a price (set a key to 0 / omit it if you cannot find it).`;
 
   try {
     const text = await groundedGeminiText(
       geminiKey,
       prompt,
-      "You are a construction-material pricing assistant. Use Google Search to find CURRENT LOCAL retail unit prices near the given ZIP. Return only the JSON; cite sources; never invent prices.",
-      100000,
+      "You are a construction-material pricing assistant. Use Google Search to find CURRENT LOCAL retail unit prices near the given ZIP for a full house build. Return only the JSON; cite sources; never invent prices.",
+      110000,
     );
     if (!text) return null;
     const m = text.match(/```json\s*([\s\S]*?)\s*```/) || text.match(/\{[\s\S]*\}/);
@@ -3851,10 +3892,16 @@ Each value is the current LOCAL price in USD: concrete_cuyd = delivered ready-mi
     for (const r of MATERIAL_RECIPE) {
       const unitPrice = Number(up[r.key]);
       if (!Number.isFinite(unitPrice) || unitPrice <= 0) continue;
-      const quantity = Math.round(r.perSqft * plannedSqft * 10) / 10;
-      items.push({ material: r.material, unit: r.unit, quantity, unitPrice: Math.round(unitPrice * 100) / 100, cost: Math.round(quantity * unitPrice) });
+      const rawQty = r.qty(plannedSqft);
+      const quantity = rawQty >= 50 ? Math.round(rawQty) : Math.round(rawQty * 10) / 10;
+      items.push({
+        material: r.material, unit: r.unit, quantity,
+        unitPrice: Math.round(unitPrice * 100) / 100,
+        cost: Math.round(quantity * unitPrice),
+        phase: r.phase,
+      });
     }
-    if (items.length < 3) return null;
+    if (items.length < 5) return null;
 
     return {
       zip,
@@ -3862,7 +3909,7 @@ Each value is the current LOCAL price in USD: concrete_cuyd = delivered ready-mi
       plannedSqft,
       items,
       materialTotal: items.reduce((s, i) => s + i.cost, 0),
-      sources: Array.isArray(obj.sources) ? obj.sources.map((s: any) => String(s)).filter((s: string) => /^https?:\/\//.test(s)).slice(0, 6) : [],
+      sources: Array.isArray(obj.sources) ? obj.sources.map((s: any) => String(s)).filter((s: string) => /^https?:\/\//.test(s)).slice(0, 8) : [],
       generatedAt: Date.now(),
     };
   } catch (e) {
