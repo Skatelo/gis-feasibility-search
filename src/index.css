@@ -3675,3 +3675,18 @@ img, svg, video, canvas, table, pre { max-width: 100%; }
   transition: all 0.12s ease;
 }
 .comps-viewall-btn:hover { border-color: var(--primary); background: var(--bg-card, #fff); }
+
+/* Comp Search Preferences (Account & API Settings) */
+.comp-pref-pills { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 4px; }
+.comp-pref-pill {
+  font-size: 0.82rem; font-weight: 600; padding: 8px 16px; border-radius: 8px;
+  border: 1px solid var(--bg-card-border); background: var(--bg-card, #fff);
+  color: var(--text-secondary); cursor: pointer; transition: all 0.12s ease;
+}
+.comp-pref-pill:hover { border-color: var(--primary); color: var(--primary); }
+.comp-pref-pill.active { background: var(--primary); border-color: var(--primary); color: #fff; }
+.comp-pref-select {
+  width: 100%; font-size: 0.85rem; font-weight: 500; padding: 10px 12px; border-radius: 8px;
+  border: 1px solid var(--bg-card-border); background: var(--bg-card, #fff);
+  color: var(--text-primary); cursor: pointer;
+}

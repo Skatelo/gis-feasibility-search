@@ -1,7 +1,16 @@
 import { useState, useEffect } from 'react';
-import { X, Key, User, ShieldAlert, LogOut, CheckCircle, Eye, EyeOff, Info, Cloud } from 'lucide-react';
+import { X, Key, User, ShieldAlert, LogOut, CheckCircle, Eye, EyeOff, Info, Cloud, Ruler, Home } from 'lucide-react';
 import { persistUserKeys } from '../services/authService';
 import { isSupabaseConfigured } from '../services/supabaseClient';
+import { getCompPrefs, setCompPrefs } from '../services/feasibilityService';
+
+const COMP_TYPE_OPTIONS = [
+  { value: 'all', label: 'All types' },
+  { value: 'single-family', label: 'Single Family' },
+  { value: 'townhouse', label: 'Townhouse' },
+  { value: 'condo', label: 'Condo' },
+  { value: 'multi-family', label: 'Multi-Family' },
+];
 
 interface SettingsDrawerProps {
   activeUser: any;
@@ -26,6 +35,9 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
   const [showTopographyKey, setShowTopographyKey] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState(false);
   const [validationError, setValidationError] = useState<string | null>(null);
+  // Comp-search preferences (max radius + property type to show)
+  const [compRadiusPref, setCompRadiusPref] = useState(5);
+  const [compTypePref, setCompTypePref] = useState('all');
 
   // Initialize the form ONLY when the drawer opens — not on every activeUser
   // re-render. Supabase refreshes the session when you switch browser tabs,
@@ -39,6 +51,9 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
       setRealtyApiKey(activeUser.keys?.realtyApi || '');
       setDeepSeekKey(activeUser.keys?.deepSeek || '');
       setRentCastKey(activeUser.keys?.rentCast || '');
+      const prefs = getCompPrefs();
+      setCompRadiusPref(prefs.radiusMiles);
+      setCompTypePref(prefs.propertyType);
       setValidationError(null);
       setSaveSuccess(false);
     }
@@ -69,6 +84,9 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
       deepSeek: deepSeekKey.trim(),
       rentCast: rentCastKey.trim()
     };
+
+    // Comp-search preferences persist locally (applied to the next search).
+    setCompPrefs({ radiusMiles: compRadiusPref, propertyType: compTypePref });
 
     try {
       // Persists to the Supabase profile when signed in with a cloud account
@@ -306,6 +324,51 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
               <p className="field-help">Enriches the Investor Buyer List with REAL last-sale prices &amp; dates from RentCast (api.rentcast.io), on demand for the buyers you choose. RentCast bills per request and free plans are limited, so enrichment is opt-in and capped. Get a key at app.rentcast.io.</p>
             </div>
 
+          </div>
+
+          {/* Comp Search Preferences */}
+          <div className="settings-section">
+            <h5 className="section-title">COMP SEARCH PREFERENCES</h5>
+
+            {/* Max comp radius */}
+            <div className="settings-field-group">
+              <div className="field-label-row">
+                <label><Ruler size={14} style={{ verticalAlign: '-2px', marginRight: '5px' }} />Max comp radius</label>
+              </div>
+              <div className="comp-pref-pills">
+                {[3, 5, 10].map((r) => (
+                  <button
+                    key={r}
+                    type="button"
+                    className={`comp-pref-pill${compRadiusPref === r ? ' active' : ''}`}
+                    onClick={() => setCompRadiusPref(r)}
+                  >
+                    {r} miles
+                  </button>
+                ))}
+              </div>
+              <p className="field-help">How far out (driving miles) to search for sold new-construction comps. Larger radii find more comps but farther from the parcel.</p>
+            </div>
+
+            {/* Property type to show */}
+            <div className="settings-field-group">
+              <div className="field-label-row">
+                <label htmlFor="compTypePref"><Home size={14} style={{ verticalAlign: '-2px', marginRight: '5px' }} />Property type to show</label>
+              </div>
+              <div className="field-input-container">
+                <select
+                  id="compTypePref"
+                  className="comp-pref-select"
+                  value={compTypePref}
+                  onChange={(e) => setCompTypePref(e.target.value)}
+                >
+                  {COMP_TYPE_OPTIONS.map((o) => (
+                    <option key={o.value} value={o.value}>{o.label}</option>
+                  ))}
+                </select>
+              </div>
+              <p className="field-help">Which property types to show in Verified Market Comps. You can still change the radius &amp; type per-result on the comps card.</p>
+            </div>
           </div>
         </div>
 

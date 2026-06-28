@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import type { FormEvent, KeyboardEvent, FC } from 'react';
 import { createRoot } from 'react-dom/client';
-import { executeLandAnalysis, chatWithGemini, getUserKeys, detectNcCounty, lookupParcelById, fetchConstructionCostEstimate, fetchMaterialTakeoff, fetchGoogleDistanceMatrixComps } from '../services/feasibilityService';
+import { executeLandAnalysis, chatWithGemini, getUserKeys, detectNcCounty, lookupParcelById, fetchConstructionCostEstimate, fetchMaterialTakeoff, fetchGoogleDistanceMatrixComps, getCompPrefs } from '../services/feasibilityService';
 import type { ChatMessage } from '../services/feasibilityService';
 import { saveReport, getReportEtaMs, recordReportDuration } from '../services/reportStore';
 import { ReportsDrawer } from './ReportsDrawer';
@@ -2085,6 +2085,9 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
     }
 
     const seq = ++searchSeqRef.current; // invalidates any in-flight previous search
+    // Comp-search preferences (Account & API Settings) drive the search radius +
+    // the initial property-type filter for this run.
+    const compPrefs = getCompPrefs();
     setLoading(true);
     setError(null);
     setData(null);
@@ -2092,8 +2095,8 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
     setCostLoading(false);
     setCostError(false);
     setMaterialTakeoff(null);
-    setCompRadius(5);
-    setCompTypeFilter('all');
+    setCompRadius(compPrefs.radiusMiles);
+    setCompTypeFilter(compPrefs.propertyType);
     setCompsShowAll(false);
     setCompsRefetching(false);
     resetChatUiState();
@@ -2128,7 +2131,8 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
         county,
         addressToSearch,
         (stage) => { if (seq === searchSeqRef.current) setLoadingStage(stage); },
-        onPartial
+        onPartial,
+        compPrefs.radiusMiles,
       );
       if (seq !== searchSeqRef.current) return;
       setData(result);

@@ -24,6 +24,30 @@ export function getUserKeys(): UserKeys {
   return {};
 }
 
+/** User comp-search preferences (set in Account & API Settings, persisted locally). */
+export interface CompPrefs {
+  /** Max DRIVING-mile radius for the comp search (3 / 5 / 10). */
+  radiusMiles: number;
+  /** Default property-type display filter: all | single-family | townhouse | condo | multi-family. */
+  propertyType: string;
+}
+const COMP_PREFS_KEY = 'gis_comp_prefs';
+const COMP_RADII = [3, 5, 10];
+export function getCompPrefs(): CompPrefs {
+  try {
+    const p = JSON.parse(localStorage.getItem(COMP_PREFS_KEY) || '{}');
+    return {
+      radiusMiles: COMP_RADII.includes(p.radiusMiles) ? p.radiusMiles : 5,
+      propertyType: typeof p.propertyType === 'string' ? p.propertyType : 'all',
+    };
+  } catch {
+    return { radiusMiles: 5, propertyType: 'all' };
+  }
+}
+export function setCompPrefs(prefs: CompPrefs): void {
+  try { localStorage.setItem(COMP_PREFS_KEY, JSON.stringify(prefs)); } catch { /* ignore */ }
+}
+
 
 
 const NC_GEOCODER = "https://services.nconemap.gov/secure/rest/services/AddressNC/AddressNC_geocoder/GeocodeServer/findAddressCandidates";
@@ -542,7 +566,8 @@ export async function executeLandAnalysis(
   countyName: string,
   addressString: string,
   onStageChange?: (stage: string) => void,
-  onPartial?: (partial: Partial<SiteFeasibilityData>) => void
+  onPartial?: (partial: Partial<SiteFeasibilityData>) => void,
+  compRadiusMiles = 5,
 ): Promise<SiteFeasibilityData> {
   const config = ncCountyConfig[countyName];
   if (!config) {
@@ -1003,7 +1028,7 @@ export async function executeLandAnalysis(
   // Pass the full input address (it has the city/ZIP) so the comp search targets
   // the right area — the parcel's situs field is often street-only.
   const compLocationAddress = `${addressString}${info.scity && !addressString.toLowerCase().includes(String(info.scity).toLowerCase()) ? `, ${info.scity}` : ''}`;
-  const compRun = await fetchGoogleDistanceMatrixComps(lat, lng, parcelId, zoningCode, zoningDescription, compLocationAddress, countyName, onStageChange);
+  const compRun = await fetchGoogleDistanceMatrixComps(lat, lng, parcelId, zoningCode, zoningDescription, compLocationAddress, countyName, onStageChange, compRadiusMiles);
   onPartial?.({ comps: compRun.comps, compRunSummary: compRun.summary });
 
   const slopeProfile = await slopeEmitted;
