@@ -2097,6 +2097,70 @@ function normalizeStreetKey(address: string): string {
     .replace(/[^a-z0-9]/g, "");
 }
 
+// Canonical STREET core (number + normalized street name only — drops city/state/
+// zip and standardizes suffix abbreviations) so the SAME home listed on Realtor,
+// Redfin, and Zillow with slightly different text ("Main St" vs "Main Street, NC
+// 28027") collapses to one key.
+const STREET_SUFFIX: Record<string, string> = {
+  street: 'st', avenue: 'ave', av: 'ave', drive: 'dr', road: 'rd', lane: 'ln', court: 'ct',
+  circle: 'cir', boulevard: 'blvd', place: 'pl', terrace: 'ter', trail: 'trl', parkway: 'pkwy',
+  highway: 'hwy', cove: 'cv', crossing: 'xing', square: 'sq', drives: 'dr', roads: 'rd',
+};
+function streetCoreKey(address: string): string {
+  let s = String(address).toLowerCase().trim();
+  const comma = s.indexOf(',');
+  if (comma > 0) s = s.slice(0, comma);                       // street portion only
+  s = s.replace(/\b(apt|unit|ste|suite|lot|#)\b.*$/i, "");    // strip unit/lot
+  s = s.replace(/\b[a-z]+\b/g, (m) => STREET_SUFFIX[m] || m); // canonicalize suffixes
+  return s.replace(/[^a-z0-9]/g, "");
+}
+
+/** Great-circle distance in meters between two lat/lng points. */
+function metersBetween(a: { lat: number; lng: number }, b: { lat: number; lng: number }): number {
+  const R = 6371000, toRad = (d: number) => (d * Math.PI) / 180;
+  const dLat = toRad(b.lat - a.lat), dLng = toRad(b.lng - a.lng);
+  const h = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(a.lat)) * Math.cos(toRad(b.lat)) * Math.sin(dLng / 2) ** 2;
+  return 2 * R * Math.asin(Math.min(1, Math.sqrt(h)));
+}
+
+/** Collapse duplicate listings of the SAME property (same home across Realtor /
+ *  Redfin / Zillow). Two records match when their canonical street keys agree AND
+ *  they're within ~1 mile (so identical street names in different towns don't
+ *  merge). Keeps the richest record (verified > has photo > confirmed > most
+ *  recent), filling in a missing photo/url from the duplicate. */
+function dedupeComps(comps: any[]): any[] {
+  const pickBetter = (a: any, b: any): any => {
+    const score = (c: any) =>
+      (c.verified ? 4 : 0) +
+      ((Array.isArray(c.photoUrls) && c.photoUrls.length) || c.imageUrl ? 2 : 0) +
+      (c.detailConfirmed ? 1 : 0);
+    const sa = score(a), sb = score(b);
+    const ta = Date.parse(a.saleDate) || 0, tb = Date.parse(b.saleDate) || 0;
+    const winner = sa !== sb ? (sa > sb ? a : b) : (tb > ta ? b : a);
+    const loser = winner === a ? b : a;
+    if (!winner.imageUrl && loser.imageUrl) winner.imageUrl = loser.imageUrl;
+    if ((!winner.photoUrls || !winner.photoUrls.length) && Array.isArray(loser.photoUrls)) winner.photoUrls = loser.photoUrls;
+    if (!winner.url && loser.url) winner.url = loser.url;
+    return winner;
+  };
+  const kept: any[] = [];
+  for (const c of comps) {
+    const ck = streetCoreKey(c.address);
+    const idx = kept.findIndex((k) => {
+      const kk = streetCoreKey(k.address);
+      if (ck && kk && ck === kk) {
+        if (!k.coords || !c.coords) return true;       // same street id, can't compare → dup
+        return metersBetween(k.coords, c.coords) < 1609; // within 1 mile → same property
+      }
+      // Different street text but the SAME rooftop (tight 22m) → still a dup.
+      return !!(k.coords && c.coords && metersBetween(k.coords, c.coords) < 22);
+    });
+    if (idx === -1) kept.push(c);
+    else kept[idx] = pickBetter(kept[idx], c);
+  }
+  return kept;
+}
+
 // ---------------------------------------------------------------------------
 // Google Distance Matrix result cache (per origin/dest pair, rounded to 5
 // decimals ≈ 1m). Only SUCCESSFUL driving results are cached — straight-line
@@ -3393,7 +3457,13 @@ export async function fetchGoogleDistanceMatrixComps(
   );
   // Cheap straight-line pre-prune (allow ~10% slack over the driving-mile radius).
   const STRAIGHT_PRUNE_MILES = EXPANDED_RADIUS_MILES + Math.max(0.5, EXPANDED_RADIUS_MILES * 0.1);
-  const finalCands: any[] = resolved.filter((c): c is any => c !== null && straightMiles(c) <= STRAIGHT_PRUNE_MILES);
+  const prunedCands: any[] = resolved.filter((c): c is any => c !== null && straightMiles(c) <= STRAIGHT_PRUNE_MILES);
+  // Collapse the SAME home listed across Realtor/Redfin/Zillow (different address
+  // text but the same property) so the comp set has no duplicates.
+  const finalCands: any[] = dedupeComps(prunedCands);
+  if (finalCands.length < prunedCands.length) {
+    console.log(`Deduped comps: ${prunedCands.length} → ${finalCands.length} unique properties.`);
+  }
 
   // STEP 6b — driving distance via Google Distance Matrix, with per-pair cache.
   const dests = finalCands.map((c) => ({ lat: c.coords.lat, lng: c.coords.lng }));
