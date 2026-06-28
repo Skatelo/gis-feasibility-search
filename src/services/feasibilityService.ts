@@ -3658,7 +3658,7 @@ Rules: every "cost" is a whole-dollar USD number for THIS home/lot from cited CU
       geminiKey,
       prompt,
       "You are a senior residential construction estimator. Use Google Search to price each line item at CURRENT LOCAL costs for the property's metro from multiple credible sources. Return only the requested JSON; never invent prices; cite sources.",
-      60000,
+      120000,
     );
     if (!text) return null;
     const m = text.match(/```json\s*([\s\S]*?)\s*```/) || text.match(/\{[\s\S]*\}/);
@@ -3743,7 +3743,7 @@ Each value is the current LOCAL price in USD: concrete_cuyd = delivered ready-mi
       geminiKey,
       prompt,
       "You are a construction-material pricing assistant. Use Google Search to find CURRENT LOCAL retail unit prices near the given ZIP. Return only the JSON; cite sources; never invent prices.",
-      45000,
+      100000,
     );
     if (!text) return null;
     const m = text.match(/```json\s*([\s\S]*?)\s*```/) || text.match(/\{[\s\S]*\}/);
