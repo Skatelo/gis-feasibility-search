@@ -1,13 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  Home, Trees, Search, Loader2, AlertCircle, Download, FileJson, Radar,
+  Home, Trees, Search, Loader2, AlertCircle, Download, FileJson, FileText, Radar,
   MapPin, Eye, Sparkles, Target, X, Plus, Trash2, Waves, Droplets, HardHat, Landmark, Flag, User, Users, Building2, Database, Check, Mountain, Mail,
 } from 'lucide-react';
 import {
   analyzeProperty, analyzeCandidate, discoverCandidates, buildBuyerList, buildBuyerDatabase,
   rentCastLastSale, buyerLookupAddress, geocodeDealCounty, matchBuyersToDeal,
   saveBuyerDatabase, loadBuyerDatabase, clearBuyerDatabase,
-  resultsToCsv, buyersToCsv, downloadFile, ncCountyNames,
+  resultsToCsv, buyersToCsv, resultsToPrintableHtml, downloadFile, ncCountyNames,
 } from '../services/propertyFinderService';
 import type { SearchMode, PropertyResult, Candidate, EnvScore, BuyerRecord, SavedBuyerDatabase } from '../services/propertyFinderService';
 
@@ -495,6 +495,24 @@ export function DistressedFinder() {
 
   const exportCsv = () => visibleResults.length && downloadFile(`property-finder-${mode}-${Date.now()}.csv`, resultsToCsv(visibleResults), 'text/csv');
   const exportJson = () => visibleResults.length && downloadFile(`property-finder-${mode}-${Date.now()}.json`, JSON.stringify(visibleResults, null, 2), 'application/json');
+  // PDF via the browser's print engine (hidden iframe) — no PDF library needed.
+  const exportPdf = () => {
+    if (!visibleResults.length) return;
+    const areaLabel = `${county} County${cityZip.trim() ? ` · ${cityZip.trim()}` : ''}, NC`;
+    const html = resultsToPrintableHtml(visibleResults, mode === 'land' ? 'land' : 'house', areaLabel);
+    const iframe = document.createElement('iframe');
+    Object.assign(iframe.style, { position: 'fixed', right: '0', bottom: '0', width: '0', height: '0', border: '0' });
+    document.body.appendChild(iframe);
+    const doc = iframe.contentWindow?.document;
+    if (!doc) { iframe.remove(); return; }
+    doc.open(); doc.write(html); doc.close();
+    // Let the document lay out before invoking the print dialog, then clean up.
+    setTimeout(() => {
+      try { iframe.contentWindow?.focus(); iframe.contentWindow?.print(); }
+      catch (e) { console.warn('PDF export (print) failed:', e); }
+      setTimeout(() => iframe.remove(), 1500);
+    }, 350);
+  };
   const visibleBuyers = useMemo(() => {
     const matchCty = dealMatch?.county?.toLowerCase();
     const list = buyers.filter(
@@ -786,6 +804,7 @@ export function DistressedFinder() {
             <h3>{visibleResults.length} {MODES.find((m) => m.id === mode)?.label}</h3>
             <div className="finder-export-actions">
               <button className="finder-btn-secondary" onClick={exportCsv} type="button"><Download size={15} /> CSV</button>
+              <button className="finder-btn-secondary" onClick={exportPdf} type="button"><FileText size={15} /> PDF</button>
               <button className="finder-btn-secondary" onClick={exportJson} type="button"><FileJson size={15} /> JSON</button>
             </div>
           </div>

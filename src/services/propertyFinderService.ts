@@ -891,6 +891,15 @@ const numOf = (v: unknown): number => {
   return Number.isFinite(n) ? n : NaN;
 };
 
+/** Fisher–Yates in-place shuffle (used to vary which parcels surface per run). */
+function shuffleInPlace<T>(arr: T[]): T[] {
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
+}
+
 /**
  * Discover candidate parcels in an area and prefilter them by mode:
  *  - land:  near-vacant parcels (little/no structure value) within the acreage band
@@ -898,6 +907,10 @@ const numOf = (v: unknown): number => {
  *           statewide layer, so lot size is the gate), ranked by GIS distress lead
  * Returns the FULL ranked candidate pool (the GIS step is not capped) — the
  * caller decides how many to hand to the vision step.
+ *
+ * Each run is RANDOMIZED so repeat scans surface different parcels/areas: the scan
+ * center is jittered within the requested area, and candidates are shuffled WITHIN
+ * quality tiers (best tiers still come first; which parcels within a tier vary).
  */
 export async function discoverCandidates(
   params: DiscoverParams,
@@ -914,11 +927,20 @@ export async function discoverCandidates(
   const center = await geocodeAddress(areaQuery, keys.googleMaps);
   if (!center) throw new Error(`Could not locate "${areaQuery}".`);
 
-  // Build a lat/lng envelope of half-size radiusMiles around the center.
+  // Randomize the scan WINDOW each run: shift the center by a random bearing and a
+  // modest magnitude (25–65% of the radius). The jittered envelope still overlaps
+  // the requested area (so results stay relevant and non-empty), but it brings in a
+  // different slice of parcels every run instead of the same fixed window.
+  const jitterMag = radiusMiles * (0.25 + Math.random() * 0.4);
+  const jitterBearing = Math.random() * 2 * Math.PI;
+  const cLat = center.lat + (jitterMag * Math.cos(jitterBearing)) / 69;
+  const cLng = center.lng + (jitterMag * Math.sin(jitterBearing)) / (69 * Math.cos((center.lat * Math.PI) / 180) || 1);
+
+  // Build a lat/lng envelope of half-size radiusMiles around the jittered center.
   const dLat = radiusMiles / 69;
-  const dLng = radiusMiles / (69 * Math.cos((center.lat * Math.PI) / 180) || 1);
-  const xmin = center.lng - dLng, xmax = center.lng + dLng;
-  const ymin = center.lat - dLat, ymax = center.lat + dLat;
+  const dLng = radiusMiles / (69 * Math.cos((cLat * Math.PI) / 180) || 1);
+  const xmin = cLng - dLng, xmax = cLng + dLng;
+  const ymin = cLat - dLat, ymax = cLat + dLat;
 
   // Page through ALL parcels in the envelope so the GIS step isn't capped by the
   // server's per-request limit. We page until a short page (the last one), the
@@ -1045,21 +1067,21 @@ export async function discoverCandidates(
   // Rank the FULL pool best-first (ranking never drops anything — it only orders).
   // The caller then works straight DOWN the ranked list and keeps going until it
   // hits its target or the whole area is exhausted, so ranking never caps the scan.
+  //
+  // To vary the list per run while KEEPING quality, we shuffle first, then do a
+  // STABLE sort by a coarse quality TIER. V8's sort is stable, so equal-tier
+  // candidates keep their shuffled (random) order — best tiers still lead, but
+  // WHICH parcels surface within a tier differs every run.
+  shuffleInPlace(candidates);
   if (mode === 'land') {
-    // Most-vacant first (lowest share of value in structures), then larger lots.
-    candidates.sort((a, b) => (a.improvementRatio ?? 1) - (b.improvementRatio ?? 1) || b.acres - a.acres);
+    // Most-vacant first, tiered into 5% improvement-ratio bands; ties → random.
+    const landTier = (c: Candidate) => Math.round((c.improvementRatio ?? 1) * 20);
+    candidates.sort((a, b) => landTier(a) - landTier(b));
   } else {
-    // Likeliest distressed/motivated first: GIS distress-lead score (absentee/
-    // out-of-state/estate/long-tenure), then a structure signal (confirmed
-    // building > addressed > other), then longest tenure.
-    const structureSignal = (c: Candidate) =>
-      c.improvementRatio !== undefined ? c.improvementRatio : (/^[1-9]/.test(c.address) ? 0.5 : 0.2);
-    candidates.sort(
-      (a, b) =>
-        (b.gisDistress ?? 0) - (a.gisDistress ?? 0) ||
-        structureSignal(b) - structureSignal(a) ||
-        (a.saleEpoch ?? Infinity) - (b.saleEpoch ?? Infinity),
-    );
+    // Likeliest distressed/motivated first, tiered into ~8-point GIS-distress bands;
+    // ties → random (so the same top leads don't repeat every run).
+    const houseTier = (c: Candidate) => Math.round((c.gisDistress ?? 0) / 8);
+    candidates.sort((a, b) => houseTier(b) - houseTier(a));
   }
   return candidates;
 }
@@ -1649,6 +1671,56 @@ export function resultsToCsv(results: PropertyResult[]): string {
     r.reasons.join('; '), r.recommendation, r.observations.summary || '',
   ].map(esc).join(','));
   return [headers.join(','), ...rows].join('\n');
+}
+
+/** A self-contained, printable HTML document for the finder results. The UI
+ *  prints this through the browser (hidden iframe) so the user can "Save as PDF"
+ *  — no PDF library/dependency needed. */
+export function resultsToPrintableHtml(results: PropertyResult[], mode: 'house' | 'land', areaLabel: string): string {
+  const esc = (v: unknown) =>
+    String(v ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const title = mode === 'land' ? 'Vacant / Builder Lots' : 'Distressed Houses';
+  const date = new Date().toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short' });
+  const rows = results
+    .map((r, i) => {
+      const summary = r.observations?.summary
+        ? `<tr class="sumrow"><td></td><td colspan="9">${esc(r.observations.summary)}</td></tr>`
+        : '';
+      return `<tr>
+        <td>${i + 1}</td>
+        <td><strong>${esc(r.address)}</strong></td>
+        <td>${esc(r.scoreLabel)} (${r.score})</td>
+        <td>${r.parcel?.acres ? r.parcel.acres.toFixed(2) : '—'}</td>
+        <td>${esc(r.parcel?.ownerName || '—')}</td>
+        <td>${esc(r.parcel?.mailingAddress || '—')}</td>
+        <td>${esc(r.flood?.label || '—')}</td>
+        <td>${esc(r.wetlands?.label || '—')}</td>
+        <td>${esc(r.slope?.label || '—')}</td>
+        <td>${esc(r.recommendation || '—')}</td>
+      </tr>${summary}`;
+    })
+    .join('');
+  return `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${title} — ${esc(areaLabel)}</title>
+  <style>
+    *{box-sizing:border-box}
+    body{font-family:-apple-system,'Segoe UI',Roboto,sans-serif;color:#0f172a;margin:24px;font-size:11px}
+    h1{font-size:18px;margin:0 0 2px}
+    .meta{color:#475569;font-size:11px;margin-bottom:14px}
+    table{width:100%;border-collapse:collapse}
+    th,td{text-align:left;padding:5px 6px;border-bottom:1px solid #e2e8f0;vertical-align:top}
+    th{background:#f1f5f9;font-size:10px;text-transform:uppercase;letter-spacing:.03em}
+    tr.sumrow td{color:#475569;font-style:italic;font-size:10px;border-bottom:1px solid #cbd5e1;padding-top:0}
+    tr{break-inside:avoid}
+    @media print{body{margin:0}}
+  </style></head>
+  <body>
+    <h1>${title}</h1>
+    <div class="meta">${esc(areaLabel)} · ${results.length} ${results.length === 1 ? 'property' : 'properties'} · Generated ${esc(date)} · GIS Feasibility Finder</div>
+    <table>
+      <thead><tr><th>#</th><th>Address</th><th>Score</th><th>Acres</th><th>Owner</th><th>Mailing</th><th>Flood</th><th>Wetlands</th><th>Slope</th><th>Recommendation</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+  </body></html>`;
 }
 
 export function buyersToCsv(buyers: BuyerRecord[]): string {
