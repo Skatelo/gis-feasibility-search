@@ -3644,3 +3644,34 @@ img, svg, video, canvas, table, pre { max-width: 100%; }
 }
 .takeoff-mat { color: var(--text-primary); font-weight: 600; }
 .takeoff-cost { color: var(--text-primary); font-weight: 700; }
+
+/* Comp filters (radius + property type) + View-all toggle */
+.comp-filter-bar {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 14px;
+  margin-bottom: 12px; padding-bottom: 10px; border-bottom: 1px dashed var(--bg-card-border);
+}
+.comp-filter-group { display: inline-flex; align-items: center; gap: 6px; }
+.comp-filter-label {
+  font-size: 0.68rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em;
+  color: var(--text-muted);
+}
+.comp-filter-pill {
+  font-size: 0.74rem; font-weight: 600; padding: 4px 10px; border-radius: 999px;
+  border: 1px solid var(--bg-card-border); background: var(--bg-card, #fff);
+  color: var(--text-secondary); cursor: pointer; transition: all 0.12s ease;
+}
+.comp-filter-pill:hover:not(:disabled) { border-color: var(--primary); color: var(--primary); }
+.comp-filter-pill.active { background: var(--primary); border-color: var(--primary); color: #fff; }
+.comp-filter-pill:disabled { opacity: 0.55; cursor: default; }
+.comp-filter-select {
+  font-size: 0.74rem; font-weight: 600; padding: 4px 8px; border-radius: 6px;
+  border: 1px solid var(--bg-card-border); background: var(--bg-card, #fff);
+  color: var(--text-secondary); cursor: pointer;
+}
+.comps-viewall-btn {
+  width: 100%; margin-top: 12px; padding: 9px 12px; border-radius: 8px;
+  border: 1px solid var(--bg-card-border); background: var(--bg-card-hover, #f8fafc);
+  color: var(--primary); font-size: 0.8rem; font-weight: 700; cursor: pointer;
+  transition: all 0.12s ease;
+}
+.comps-viewall-btn:hover { border-color: var(--primary); background: var(--bg-card, #fff); }

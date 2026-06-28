@@ -2138,9 +2138,9 @@ function updateZipHealth(zip: string, productive: boolean): void {
 const COMPS_CACHE_PREFIX = "gisfs:comps:v21:"; // v21 = Gemini Vision picks the building-EXTERIOR photo per comp
 const COMPS_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 
-function compsCacheKey(lat: number, lng: number, category: string): string {
-  // ~1m coordinate precision → the same parcel always maps to the same key.
-  return `${COMPS_CACHE_PREFIX}${lat.toFixed(5)},${lng.toFixed(5)}|${category}`;
+function compsCacheKey(lat: number, lng: number, category: string, radiusMiles = 5): string {
+  // ~1m coordinate precision → the same parcel+radius always maps to the same key.
+  return `${COMPS_CACHE_PREFIX}${lat.toFixed(5)},${lng.toFixed(5)}|${category}|r${radiusMiles}`;
 }
 
 function readCompsCache(key: string): { comps: CompProperty[]; summary: string } | null {
@@ -2790,15 +2790,15 @@ async function fetchRealtyApiSoldComps(
   category: 'residential' | 'commercial' | 'multifamily',
   oneYearAgo: Date,
   onStageChange?: (stage: string) => void,
+  radiusMiles = 5,
 ): Promise<any[]> {
   const key = getRealtyApiKey();
   if (!key) {
     console.warn("No RealtyAPI key configured (Settings -> RealtyAPI Key) — skipping the Realtor/Redfin/Zillow records source.");
     return [];
   }
-  // 5-mile API radius matches the old behavior; the comp engine then applies the
-  // 3 -> 5 DRIVING-mile filter downstream.
-  const RADIUS_MILES = 5;
+  // The API search radius; the comp engine then applies the DRIVING-mile filter downstream.
+  const RADIUS_MILES = radiusMiles;
   onStageChange?.("Scanning RealtyAPI sold records (Realtor, Redfin, Zillow)...");
 
   const platforms: ('realtor' | 'redfin' | 'zillow')[] = ["realtor", "redfin", "zillow"];
@@ -3222,13 +3222,13 @@ export async function fetchGoogleDistanceMatrixComps(
   zoningDesc: string,
   addressString: string,
   _countyName: string,
-  onStageChange?: (stage: string) => void
+  onStageChange?: (stage: string) => void,
+  maxRadiusMiles = 5,
 ): Promise<CompRunResult> {
   onStageChange?.("Searching sold listings...");
 
-  // FIXED comp criteria: NEW CONSTRUCTION (built 2025–2026) matching the
-  // subject's ZONING use category, SOLD within the last 12 months, within 3
-  // DRIVING miles of the subject (expanded to 5 when fewer than 3 qualify).
+  // NEW CONSTRUCTION (built 2025–2026) matching the subject's ZONING use category,
+  // SOLD within the last 12 months, within the requested DRIVING-mile radius.
   // NO minimum distance — same-subdivision sales next door are the BEST comps.
   // NO minimum or maximum square footage.
   const today = new Date();
@@ -3236,14 +3236,14 @@ export async function fetchGoogleDistanceMatrixComps(
   oneYearAgo.setFullYear(today.getFullYear() - 1);
   const MIN_YEAR_BUILT = 2025;
   const MAX_YEAR_BUILT = 2026;
-  const EXPANDED_RADIUS_MILES = 5; // show comps out to the FULL 5 driving miles (no lazy 3-mile cap)
+  const EXPANDED_RADIUS_MILES = Math.max(1, maxRadiusMiles); // selectable max driving radius (3 / 5 / 10)
   const MIN_DIST_MILES = 0;
 
   // Permitted use category (drives the Realtor search property type).
   const category = getPermittedCategory(zoningCode, zoningDesc);
 
-  // Same address searched again? Return the EXACT same verified comp set.
-  const cacheKey = compsCacheKey(lat, lng, category);
+  // Same address+radius searched again? Return the EXACT same verified comp set.
+  const cacheKey = compsCacheKey(lat, lng, category, EXPANDED_RADIUS_MILES);
   const cached = readCompsCache(cacheKey);
   if (cached && cached.comps.length > 0) {
     console.log(`Returning ${cached.comps.length} cached comps for this parcel (deterministic re-run).`);
@@ -3302,7 +3302,7 @@ export async function fetchGoogleDistanceMatrixComps(
   // under-contract listings or inaccurate prices, so it is disabled to keep every
   // comp a verified closed sale. Flip ENABLE_GOOGLE_MLS_COMPS to bring it back.
   const ENABLE_GOOGLE_MLS_COMPS = false;
-  const realtyComps = await fetchRealtyApiSoldComps(lat, lng, category, oneYearAgo, onStageChange).catch((e) => {
+  const realtyComps = await fetchRealtyApiSoldComps(lat, lng, category, oneYearAgo, onStageChange, EXPANDED_RADIUS_MILES).catch((e) => {
     console.warn("RealtyAPI sold comp search failed:", e);
     return [] as any[];
   });
@@ -3366,8 +3366,9 @@ export async function fetchGoogleDistanceMatrixComps(
       return null;
     })
   );
-  // Cheap straight-line pre-prune (anything > ~6.5 mi can't be within 5 driving miles).
-  const finalCands: any[] = resolved.filter((c): c is any => c !== null && straightMiles(c) <= 5.5);
+  // Cheap straight-line pre-prune (allow ~10% slack over the driving-mile radius).
+  const STRAIGHT_PRUNE_MILES = EXPANDED_RADIUS_MILES + Math.max(0.5, EXPANDED_RADIUS_MILES * 0.1);
+  const finalCands: any[] = resolved.filter((c): c is any => c !== null && straightMiles(c) <= STRAIGHT_PRUNE_MILES);
 
   // STEP 6b — driving distance via Google Distance Matrix, with per-pair cache.
   const dests = finalCands.map((c) => ({ lat: c.coords.lat, lng: c.coords.lng }));

@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import type { FormEvent, KeyboardEvent, FC } from 'react';
 import { createRoot } from 'react-dom/client';
-import { executeLandAnalysis, chatWithGemini, getUserKeys, detectNcCounty, lookupParcelById, fetchConstructionCostEstimate, fetchMaterialTakeoff } from '../services/feasibilityService';
+import { executeLandAnalysis, chatWithGemini, getUserKeys, detectNcCounty, lookupParcelById, fetchConstructionCostEstimate, fetchMaterialTakeoff, fetchGoogleDistanceMatrixComps } from '../services/feasibilityService';
 import type { ChatMessage } from '../services/feasibilityService';
 import { saveReport, getReportEtaMs, recordReportDuration } from '../services/reportStore';
 import { ReportsDrawer } from './ReportsDrawer';
@@ -671,6 +671,11 @@ export const FeasibilitySearch: FC = () => {
   const [costLoading, setCostLoading] = useState(false);
   const [costError, setCostError] = useState(false);
   const [materialTakeoff, setMaterialTakeoff] = useState<MaterialTakeoff | null>(null);
+  // Comps display/search filters
+  const [compRadius, setCompRadius] = useState(5);          // max DRIVING-mile radius (3 / 5 / 10) — re-fetches
+  const [compTypeFilter, setCompTypeFilter] = useState('all'); // property-type display filter
+  const [compsShowAll, setCompsShowAll] = useState(false);  // show 10 vs. all
+  const [compsRefetching, setCompsRefetching] = useState(false);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [history, setHistory] = useState<any[]>([]);
 
@@ -766,6 +771,38 @@ export const FeasibilitySearch: FC = () => {
       (mt) => { if (seq === searchSeqRef.current && mt) setMaterialTakeoff(mt); settle(!!mt); },
       () => settle(false),
     );
+  };
+
+  // Re-run ONLY the comps for the current parcel at a new max DRIVING-mile radius
+  // (3 / 5 / 10). The report itself stays as generated; this just widens/tightens
+  // the comp set shown in the card.
+  const changeCompRadius = async (newRadius: number) => {
+    if (newRadius === compRadius) return;
+    setCompRadius(newRadius);
+    setCompsShowAll(false);
+    const d = data;
+    if (!d || !d.coordinates) return;
+    const seq = searchSeqRef.current;
+    setCompsRefetching(true);
+    try {
+      const run = await fetchGoogleDistanceMatrixComps(
+        d.coordinates.lat,
+        d.coordinates.lng,
+        d.parcelId || '',
+        d.zoningCode || '',
+        d.zoningDescription || '',
+        d.inputAddress || '',
+        d.countyName || '',
+        undefined,
+        newRadius,
+      );
+      if (seq !== searchSeqRef.current) return; // a new search superseded this
+      setData((prev) => (prev ? { ...prev, comps: run.comps, compRunSummary: run.summary } : prev));
+    } catch (e) {
+      console.warn('Comp radius re-fetch failed:', e);
+    } finally {
+      if (seq === searchSeqRef.current) setCompsRefetching(false);
+    }
   };
 
   const generateInitialChatReport = async (reportData: SiteFeasibilityData) => {
@@ -2055,6 +2092,10 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
     setCostLoading(false);
     setCostError(false);
     setMaterialTakeoff(null);
+    setCompRadius(5);
+    setCompTypeFilter('all');
+    setCompsShowAll(false);
+    setCompsRefetching(false);
     resetChatUiState();
 
     // Progressive loading: merge each partial emission into view state the
@@ -2157,6 +2198,26 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
     setCopiedId(id);
     setTimeout(() => setCopiedId(null), 2000);
   };
+
+  // Comp property-type buckets for the display filter.
+  const compTypeBucket = (t?: string): string => {
+    const s = String(t || '').toLowerCase().replace(/[_-]+/g, ' ').trim();
+    if (/single|sfr|detached/.test(s)) return 'single-family';
+    if (/townh/.test(s)) return 'townhouse';
+    if (/condo/.test(s)) return 'condo';
+    if (/multi|duplex|triplex|quadruplex|apartment|\bapt\b/.test(s)) return 'multi-family';
+    return 'other';
+  };
+  const COMP_TYPE_OPTIONS: { value: string; label: string }[] = [
+    { value: 'all', label: 'All types' },
+    { value: 'single-family', label: 'Single Family' },
+    { value: 'townhouse', label: 'Townhouse' },
+    { value: 'condo', label: 'Condo' },
+    { value: 'multi-family', label: 'Multi-Family' },
+  ];
+  const allComps = data?.comps || [];
+  const filteredComps = compTypeFilter === 'all' ? allComps : allComps.filter((c) => compTypeBucket(c.propertyType) === compTypeFilter);
+  const visibleComps = compsShowAll ? filteredComps : filteredComps.slice(0, 10);
 
   return (
     <div className="dashboard-container">
@@ -2868,9 +2929,46 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                       </a>
                     )}
                   </div>
-                  <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginBottom: '1rem', fontStyle: 'italic', borderBottom: '1px dashed var(--bg-card-border)', paddingBottom: '0.5rem' }}>
-                    *Criteria: New construction (built 2025–2026) matching this parcel's zoning use, sold within 12 months, no sqft limits, within 3 driving miles (auto-expands to 5). Sources: Realtor.com sold records (radius scan, ✓ confirmed) + public MLS via Google Search.*
+                  <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginBottom: '0.6rem', fontStyle: 'italic', borderBottom: '1px dashed var(--bg-card-border)', paddingBottom: '0.5rem' }}>
+                    *Criteria: New construction (built 2025–2026) matching this parcel's zoning use, sold within 12 months, no sqft limits, within {compRadius} driving miles. Sources: Realtor.com sold records (radius scan, ✓ confirmed) + public MLS via Google Search.*
                   </div>
+                  {/* Comp filters: max radius (re-fetches) + property type (instant) */}
+                  <div className="comp-filter-bar">
+                    <div className="comp-filter-group">
+                      <span className="comp-filter-label">Radius</span>
+                      {[3, 5, 10].map((r) => (
+                        <button
+                          key={r}
+                          type="button"
+                          className={`comp-filter-pill${compRadius === r ? ' active' : ''}`}
+                          disabled={compsRefetching}
+                          onClick={() => changeCompRadius(r)}
+                        >
+                          {r} mi
+                        </button>
+                      ))}
+                      {compsRefetching && <Loader2 size={13} className="spinner" style={{ color: 'var(--text-muted)' }} />}
+                    </div>
+                    <div className="comp-filter-group">
+                      <span className="comp-filter-label">Type</span>
+                      <select
+                        className="comp-filter-select"
+                        value={compTypeFilter}
+                        onChange={(e) => { setCompTypeFilter(e.target.value); setCompsShowAll(false); }}
+                      >
+                        {COMP_TYPE_OPTIONS.map((o) => (
+                          <option key={o.value} value={o.value}>{o.label}</option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+                  {filteredComps.length === 0 ? (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '12px 0', color: 'var(--text-secondary)', fontSize: '0.8rem' }}>
+                      <AlertCircle size={15} style={{ color: 'var(--warning, #d97706)' }} />
+                      <span>No {COMP_TYPE_OPTIONS.find((o) => o.value === compTypeFilter)?.label.toLowerCase()} comps in this set. Try “All types” or a wider radius.</span>
+                    </div>
+                  ) : (
+                  <>
                   <div className="comps-list" style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
                     {(() => {
                       const prettyType = (t?: string) => {
@@ -2884,7 +2982,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                         };
                         return map[s.toLowerCase()] || s.replace(/\b\w/g, (c) => c.toUpperCase());
                       };
-                      return data.comps.map((comp, idx) => (
+                      return visibleComps.map((comp, idx) => (
                       <div key={idx} className="comp-item" style={{
                         padding: '10px',
                         borderRadius: '6px',
@@ -2986,6 +3084,17 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                       ));
                     })()}
                   </div>
+                  {filteredComps.length > 10 && (
+                    <button
+                      type="button"
+                      className="comps-viewall-btn"
+                      onClick={() => setCompsShowAll((v) => !v)}
+                    >
+                      {compsShowAll ? 'Show less' : `View all ${filteredComps.length} comps`}
+                    </button>
+                  )}
+                  </>
+                  )}
                 </div>
               )}
 
