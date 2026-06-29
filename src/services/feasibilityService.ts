@@ -59,7 +59,7 @@ const NC_PARCEL_ENGINE = "https://services.gis.nc.gov/secure/rest/services/NC1Ma
 // Only the fields the app actually uses — requesting these instead of `*` keeps
 // the response small so the (sometimes overloaded) statewide server is far less
 // likely to hit a gateway timeout. The State Plane query needs geometry only.
-const NC_PARCEL_FIELDS = "parno,siteadd,gisacres,ownname,ownname2,mailadd,mcity,mstate,mzip,scity,parval,landval,saledate,reviseyear,sourceref,legdecfull,cntyname";
+const NC_PARCEL_FIELDS = "parno,siteadd,gisacres,ownname,ownname2,ownfrst,ownlast,mailadd,mcity,mstate,mzip,scity,parval,landval,saledate,reviseyear,sourceref,legdecfull,cntyname";
 
 /** fetch() with an abort timeout so a hung GIS server fails fast instead of stalling the UI. */
 async function fetchWithTimeout(url: string, ms = 20000, init?: RequestInit): Promise<Response> {
@@ -882,8 +882,21 @@ export async function executeLandAnalysis(
   };
   let gridics = buildGridics();
 
-  // Format owner name (first name first; reorders "LAST, FIRST" records)
-  let ownerName = formatOwnerName(info.ownname);
+  // Owner name. The GIS's dedicated ownfrst/ownlast fields are AUTHORITATIVE for
+  // first/last order when populated (counties vary: some store ownname surname-
+  // first, others first-last — so parsing ownname alone gets the order wrong).
+  const gisFirst = String(info.ownfrst ?? '').trim();
+  const gisLast = String(info.ownlast ?? '').trim();
+  let ownerName: string;
+  let ownerFirst: string | undefined;
+  let ownerLast: string | undefined;
+  if (gisFirst && gisLast) {
+    ownerName = toTitleCase(`${gisFirst} ${gisLast}`);
+    ownerFirst = gisFirst;
+    ownerLast = gisLast;
+  } else {
+    ownerName = formatOwnerName(info.ownname); // surname-first parse fallback
+  }
   if (info.ownname2 && String(info.ownname2).trim()) {
     ownerName += " & " + formatOwnerName(info.ownname2);
   }
@@ -965,6 +978,8 @@ export async function executeLandAnalysis(
   // Detailed Property Registry data container
   const registryData = {
     ownerName,
+    ownerFirst,
+    ownerLast,
     mailingAddress,
     assessedYear,
     assessedPropertyValue,

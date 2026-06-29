@@ -150,6 +150,10 @@ export interface SiteFeasibilityData {
 
   // Rich Property Registry fields
   ownerName?: string;
+  /** Authoritative owner first/last from the GIS (ownfrst/ownlast) when populated;
+   *  used for display order + skip trace. Empty in some counties. */
+  ownerFirst?: string;
+  ownerLast?: string;
   mailingAddress?: string;
   assessedYear?: number;
   assessedPropertyValue?: number;

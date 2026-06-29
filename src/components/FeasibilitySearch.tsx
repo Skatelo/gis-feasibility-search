@@ -3,22 +3,6 @@ import type { FormEvent, KeyboardEvent, FC } from 'react';
 import { createRoot } from 'react-dom/client';
 import { executeLandAnalysis, chatWithGemini, getUserKeys, detectNcCounty, lookupParcelById, fetchConstructionCostEstimate, fetchMaterialTakeoff, fetchGoogleDistanceMatrixComps, getCompPrefs, enformionConfigured, enformionContactEnrich, enformionPersonSearch, enformionBusinessSearch, looksLikeBusiness, enformionDiagMessage, getLastEnformionShape, getLastEnformionDetail } from '../services/feasibilityService';
 import type { SkipTraceContact } from '../services/feasibilityService';
-import { splitOwnerName } from '../services/propertyFinderService';
-
-// NC GIS stores owner names SURNAME-FIRST ("MCKNIGHT ROSE MARIE"). Display them
-// as First [Middle] Last ("Rose Marie Mcknight"); businesses/trusts/joint owners
-// are shown as recorded (just title-cased).
-const ownerTitleCase = (s: string) => s.toLowerCase().replace(/\b([a-z])/g, (m) => m.toUpperCase())
-  .replace(/\b(Llc|Inc|Lp|Llp|Pllc|Ltd|Pc|Hoa|Ii|Iii|Iv)\b/g, (m) => m.toUpperCase());
-function formatOwnerDisplay(raw?: string): string {
-  const n = (raw || '').trim().replace(/\s+/g, ' ');
-  if (!n) return 'N/A';
-  if (looksLikeBusiness(n) || /\bAND\b|&|\bTRUST\b|\bESTATE\b|\bHEIRS\b|\bLIVING\b/i.test(n)) return ownerTitleCase(n);
-  if (n.includes(',')) { const [last, rest] = n.split(','); return ownerTitleCase([rest.trim(), last.trim()].filter(Boolean).join(' ')); }
-  const parts = n.split(' ');
-  if (parts.length < 2) return ownerTitleCase(n);
-  return ownerTitleCase([...parts.slice(1), parts[0]].join(' ')); // move surname to the end
-}
 import type { ChatMessage } from '../services/feasibilityService';
 import { saveReport, getReportEtaMs, recordReportDuration } from '../services/reportStore';
 import { ReportsDrawer } from './ReportsDrawer';
@@ -839,18 +823,27 @@ export const FeasibilitySearch: FC = () => {
     setOwnerSkip(null);
     try {
       const addr = data?.mailingAddress || undefined;
+      const first = (data?.ownerFirst || '').trim();
+      const last = (data?.ownerLast || '').trim();
+      const ok = (x: SkipTraceContact | null) => !!(x && (x.phones.length || x.emails.length));
       let c: SkipTraceContact | null = null;
       if (looksLikeBusiness(name)) {
         c = await enformionBusinessSearch(name, addr);
       } else {
-        const s = splitOwnerName(name);
-        const personName = `${s.first} ${s.last}`.trim() || name;
-        const ok = (x: SkipTraceContact | null) => !!(x && (x.phones.length || x.emails.length));
-        // Person Search + address, then Contact Enrich + address, then name-only
-        // Person Search (broadest — catches cases where the address blocks a match).
-        c = await enformionPersonSearch(personName, addr);
-        if (!ok(c)) c = await enformionContactEnrich(personName, addr);
-        if (!ok(c) && addr) c = await enformionPersonSearch(personName);
+        // Authoritative GIS first/last when present; else the service-formatted
+        // (first-last) ownerName. As a safety net for the rare wrong-order parcel,
+        // also try the reversed token order.
+        const primary = first && last ? `${first} ${last}` : name;
+        const tryNames = [primary];
+        if (!(first && last)) {
+          const p = name.split(/\s+/).filter(Boolean);
+          if (p.length >= 2) tryNames.push(`${p[p.length - 1]} ${p.slice(0, -1).join(' ')}`);
+        }
+        for (const pn of tryNames) {
+          c = await enformionPersonSearch(pn, addr); if (ok(c)) break;
+          c = await enformionContactEnrich(pn, addr); if (ok(c)) break;
+        }
+        if (!ok(c) && addr) c = await enformionPersonSearch(primary);
       }
       setOwnerSkip(c);
       if (!c || (!c.phones.length && !c.emails.length)) {
@@ -2504,7 +2497,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
               <div className="card registry-header-card">
                 {/* Big Title Name */}
                 <h3 className="registry-title-name">
-                  {data.ownerName ? formatOwnerDisplay(data.ownerName) : "Property Owner"}
+                  {data.ownerName || "Property Owner"}
                 </h3>
                 <div className="registry-title-address">
                   {data.inputAddress}
@@ -2586,7 +2579,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                   <div className="registry-row">
                     <div className="registry-label-with-icon">
                       <User size={16} className="registry-icon-blue" />
-                      <span>{formatOwnerDisplay(data.ownerName)}</span>
+                      <span>{data.ownerName || "N/A"}</span>
                     </div>
                   </div>
                   <div className="registry-row copyable-row">
