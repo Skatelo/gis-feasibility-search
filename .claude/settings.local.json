@@ -35,7 +35,11 @@
       "Bash(awk -F: '$1 > 2050 && $1 < 2260')",
       "Bash(node -e \"const p=require\\('./package.json'\\); console.log\\(Object.keys\\({...p.dependencies,...p.devDependencies}\\).join\\(', '\\)\\)\")",
       "WebFetch(domain:dev.to)",
-      "Bash(node -e ' *)"
+      "Bash(node -e ' *)",
+      "Bash(awk -F: '$1>=650 && $1<=985')",
+      "WebFetch(domain:enformiongo.readme.io)",
+      "Bash(awk -F: '$1>1560 && $1<1620')",
+      "Bash(git rm *)"
     ]
   }
 }

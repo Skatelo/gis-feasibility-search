@@ -8,8 +8,6 @@ export interface UserKeys {
   realtyApi?: string;
   deepSeek?: string;
   rentCast?: string;
-  /** Bright Data API token — powers the Secretary of State scraper (skip trace). */
-  brightData?: string;
   /** Enformion Go API credentials — skip tracing (phones, emails, relatives) for
    *  individuals & businesses from the GIS owner data. */
   enformionApName?: string;
@@ -1345,9 +1343,6 @@ export interface LlcSkipTrace {
   notes?: string | null;
   sources?: string[];
   confidence?: 'high' | 'medium' | 'low' | string | null;
-  /** True when the SOS fields came from a real Bright Data scrape of the record
-   *  (vs. the AI-snippet fallback). */
-  sosScraped?: boolean;
 
   // From NC GIS / county tax records (the reliable backbone — no Cloudflare)
   foundInGIS?: boolean;
@@ -1535,158 +1530,38 @@ Rules: NEVER invent names, addresses, IDs, or dates — use null for anything no
  * Search supplements the SOS registration (registered agent + managers/members)
  * when it can. Returns a result whenever EITHER source finds the entity.
  */
-/** Non-grounded Gemini JSON extraction (forces JSON output). */
-async function geminiExtractJson(geminiKey: string, prompt: string, timeoutMs: number): Promise<any | null> {
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=${geminiKey}`;
-  try {
-    const res = await fetchWithTimeout(url, timeoutMs, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contents: [{ role: 'user', parts: [{ text: prompt }] }],
-        generationConfig: { temperature: 0, responseMimeType: 'application/json' },
-      }),
-    });
-    if (!res.ok) return null;
-    const data = await res.json();
-    const t = data.candidates?.[0]?.content?.parts?.map((p: any) => p.text).filter(Boolean).join('') || '';
-    const m = t.match(/```json\s*([\s\S]*?)\s*```/) || t.match(/\{[\s\S]*\}/);
-    return JSON.parse((m ? (m[1] || m[0]) : t).replace(/,\s*([}\]])/g, '$1'));
-  } catch { return null; }
-}
-
-export interface SosScrapeResult {
-  registeredAgentName?: string | null;
-  registeredAgentAddress?: string | null;
-  principalOffice?: string | null;
-  mailingAddress?: string | null;
-  officials?: { name: string; title?: string; address?: string }[];
-  status?: string | null;
-  entityType?: string | null;
-  sosId?: string | null;
-  formationDate?: string | null;
-  sourceUrl: string;
-}
-
-/**
- * SECRETARY OF STATE SCRAPER (skip trace). Gets the entity's REAL public
- * registration record — registered agent, officers/members, and addresses:
- *  1) Gemini (grounded) finds the exact record URL (official SOS page, else
- *     bizapedia / opencorporates / corporationwiki).
- *  2) Bright Data's Web Unlocker fetches that page server-side (solves anti-bot
- *     challenges, avoids CORS) via the /sos-scrape function.
- *  3) Gemini extracts the structured fields from the fetched record.
- * Returns null (caller falls back to the AI-snippet lookup) when no Bright Data
- * key is set, the URL can't be found, or the page is blocked/empty.
- */
-export async function scrapeSecretaryOfState(name: string, state = 'NC'): Promise<SosScrapeResult | null> {
-  const keys = getUserKeys();
-  const token = keys.brightData || '';
-  const geminiKey = keys.gemini || '';
-  if (!token || !geminiKey || !name.trim()) return null;
-
-  // 1) Find the entity's public registration record URL (grounded search). A
-  // direct, single-answer prompt is far more reliable than a ranked instruction.
-  const findPrompt = `What is the public business-registration record page URL for the company "${name}" in ${state}? Prefer the official ${state} Secretary of State entity page, otherwise its bizapedia.com, opencorporates.com, or corporationwiki.com company page. Return ONLY the full https URL to that specific company page — no other text.`;
-  let url = '';
-  try {
-    const t = await groundedGeminiText(geminiKey, findPrompt, 'Return only the full https URL to the specific company record page.', 30000);
-    url = (String(t || '').match(/https?:\/\/[^\s"'<>)\]]+/) || [])[0] || '';
-  } catch { /* ignore */ }
-  if (!url) return null;
-
-  // 2) Fetch the record page through Bright Data's Web Unlocker (server-side).
-  let html = '';
-  try {
-    const res = await fetchWithTimeout('/.netlify/functions/sos-scrape', 70000, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', 'x-brightdata-key': token },
-      body: JSON.stringify({ url }),
-    });
-    if (!res.ok) return null;
-    const j = await res.json();
-    if (!j || j.blocked || !j.body) return null; // anti-bot challenge / empty → fall back
-    html = String(j.body);
-  } catch { return null; }
-
-  // 3) Strip to text and extract the structured record (non-grounded).
-  const text = html
-    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
-    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
-    .replace(/<[^>]+>/g, ' ')
-    .replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&#0?39;|&apos;/g, "'").replace(/&quot;/g, '"')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .slice(0, 16000);
-  if (text.length < 400) return null;
-
-  const extractPrompt = `From this business-registration record text, extract the entity's details. Use null for anything not present; NEVER invent. JSON only:
-{"registeredAgentName":null,"registeredAgentAddress":null,"principalOffice":null,"mailingAddress":null,"status":null,"entityType":null,"sosId":null,"formationDate":null,"officials":[{"name":"","title":"","address":""}]}
-
-RECORD TEXT:
-${text}`;
-  const r = await geminiExtractJson(geminiKey, extractPrompt, 30000);
-  if (!r) return null;
-  const officials = Array.isArray(r.officials)
-    ? r.officials.filter((o: any) => o && o.name && String(o.name).trim()).map((o: any) => ({ name: String(o.name).trim(), title: o.title ? String(o.title) : undefined, address: o.address ? String(o.address) : undefined }))
-    : [];
-  if (!r.registeredAgentName && !officials.length && !r.principalOffice) return null; // nothing useful
-  return {
-    registeredAgentName: r.registeredAgentName ?? null,
-    registeredAgentAddress: r.registeredAgentAddress ?? null,
-    principalOffice: r.principalOffice ?? null,
-    mailingAddress: r.mailingAddress ?? null,
-    officials,
-    status: r.status ?? null,
-    entityType: r.entityType ?? null,
-    sosId: r.sosId ?? null,
-    formationDate: r.formationDate ?? null,
-    sourceUrl: url,
-  };
-}
-
 export async function skipTraceLLC(query: string, state = 'NC'): Promise<LlcSkipTrace | null> {
   if (!getUserKeys().gemini) throw new Error('Gemini API key required (set it in Account Settings).');
 
   // GIS first (fast, reliable) so it can anchor the AI lookup — the confirmed
   // owner name + counties stop false "not found" results and disambiguate.
   const gis = state === 'NC' ? await skipTraceLLCViaGIS(query).catch(() => null) : null;
-  const anchorName = gis?.canonicalName || query;
 
-  // Preferred: scrape the REAL Secretary of State record via Bright Data. Falls
-  // back to the AI-snippet lookup when no Bright Data key is set or the page is
-  // blocked/empty (so the skip trace never regresses).
-  const sos = getUserKeys().brightData
-    ? await scrapeSecretaryOfState(anchorName, state).catch(() => null)
-    : null;
-  const sosHasContacts = !!(sos && (sos.registeredAgentName || (sos.officials && sos.officials.length) || sos.principalOffice));
+  // Registered agent / members from Gemini + indexed public records (the live SOS
+  // site is Cloudflare-blocked). Enformion (in the Skip Trace UI) then layers the
+  // real phones/emails on top.
+  const ai = await skipTraceLLCViaGemini(
+    query,
+    state,
+    gis ? { canonicalName: gis.canonicalName, counties: gis.counties } : undefined,
+  ).catch(() => null);
 
-  const ai = sosHasContacts
-    ? null
-    : await skipTraceLLCViaGemini(
-        query,
-        state,
-        gis ? { canonicalName: gis.canonicalName, counties: gis.counties } : undefined,
-      ).catch(() => null);
+  if (!gis && !ai) return null;
 
-  if (!gis && !sos && !ai) return null;
-
-  const sosSources = sos ? [sos.sourceUrl] : [];
   const result: LlcSkipTrace = {
     entityName: gis?.canonicalName || ai?.entityName || query.trim(),
-    sosId: sos?.sosId ?? ai?.sosId ?? null,
-    status: sos?.status ?? ai?.status ?? null,
-    entityType: sos?.entityType ?? ai?.entityType ?? null,
-    formationDate: sos?.formationDate ?? ai?.formationDate ?? null,
-    registeredAgentName: sos?.registeredAgentName ?? ai?.registeredAgentName ?? null,
-    registeredAgentAddress: sos?.registeredAgentAddress ?? ai?.registeredAgentAddress ?? null,
-    principalOffice: sos?.principalOffice ?? ai?.principalOffice ?? null,
-    mailingAddress: sos?.mailingAddress ?? ai?.mailingAddress ?? null,
-    officials: (sos?.officials && sos.officials.length ? sos.officials : ai?.officials) ?? [],
+    sosId: ai?.sosId ?? null,
+    status: ai?.status ?? null,
+    entityType: ai?.entityType ?? null,
+    formationDate: ai?.formationDate ?? null,
+    registeredAgentName: ai?.registeredAgentName ?? null,
+    registeredAgentAddress: ai?.registeredAgentAddress ?? null,
+    principalOffice: ai?.principalOffice ?? null,
+    mailingAddress: ai?.mailingAddress ?? null,
+    officials: ai?.officials ?? [],
     recentFiling: ai?.recentFiling ?? null,
-    sources: [...sosSources, ...(ai?.sources ?? [])].filter((v, i, a) => a.indexOf(v) === i),
-    confidence: sosHasContacts ? 'high' : (ai?.confidence ?? null),
-    sosScraped: sosHasContacts,
+    sources: ai?.sources ?? [],
+    confidence: ai?.confidence ?? null,
     // GIS backbone
     foundInGIS: !!gis,
     taxMailingAddress: gis?.mailingAddress ?? null,

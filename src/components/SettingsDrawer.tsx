@@ -23,8 +23,6 @@ interface SettingsDrawerProps {
 export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdateUser }: SettingsDrawerProps) {
   const [googleMapsKey, setGoogleMapsKey] = useState('');
   const [geminiKey, setGeminiKey] = useState('');
-  const [brightDataKey, setBrightDataKey] = useState('');
-  const [showBrightDataKey, setShowBrightDataKey] = useState(false);
   const [enformionName, setEnformionName] = useState('');
   const [enformionPassword, setEnformionPassword] = useState('');
   const [showEnformionPassword, setShowEnformionPassword] = useState(false);
@@ -50,7 +48,6 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
     if (isOpen && activeUser) {
       setGoogleMapsKey(activeUser.keys?.googleMaps || '');
       setGeminiKey(activeUser.keys?.gemini || '');
-      setBrightDataKey(activeUser.keys?.brightData || '');
       setEnformionName(activeUser.keys?.enformionApName || '');
       setEnformionPassword(activeUser.keys?.enformionApPassword || '');
       setRealtyApiKey(activeUser.keys?.realtyApi || '');
@@ -84,7 +81,6 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
     const updatedKeys = {
       googleMaps: googleMapsKey.trim(),
       gemini: geminiKey.trim(),
-      brightData: brightDataKey.trim(),
       enformionApName: enformionName.trim(),
       enformionApPassword: enformionPassword.trim(),
       realtyApi: realtyApiKey.trim(),
@@ -225,32 +221,6 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
                 </button>
               </div>
               <p className="field-help">Powering web-search zoning lookups, comps evaluation, and the Advanced chatbot.</p>
-            </div>
-
-            {/* Bright Data Key (Secretary of State scraper for skip trace) */}
-            <div className="settings-field-group">
-              <div className="field-label-row">
-                <label htmlFor="brightDataKey">Bright Data API Key (Secretary of State scraper)</label>
-                <span className="badge optional">Optional</span>
-              </div>
-              <div className="field-input-container">
-                <Key className="input-icon" size={16} />
-                <input
-                  id="brightDataKey"
-                  type={showBrightDataKey ? "text" : "password"}
-                  placeholder="brd / api token…"
-                  value={brightDataKey}
-                  onChange={(e) => setBrightDataKey(e.target.value)}
-                />
-                <button
-                  type="button"
-                  className="field-toggle-btn"
-                  onClick={() => setShowBrightDataKey(!showBrightDataKey)}
-                >
-                  {showBrightDataKey ? <EyeOff size={16} /> : <Eye size={16} />}
-                </button>
-              </div>
-              <p className="field-help">Powers the LLC Skip Trace's Secretary of State scraper — fetches the entity's public registration record (registered agent, officers, addresses) via Bright Data's Web Unlocker (zone <strong>web_unlocker1</strong>). Requires a Web Unlocker zone that solves anti-bot challenges. Get a token at brightdata.com.</p>
             </div>
 
             {/* Enformion Go — skip tracing (phones, emails, relatives) */}

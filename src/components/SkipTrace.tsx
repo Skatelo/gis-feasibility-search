@@ -313,9 +313,7 @@ export function SkipTrace() {
             <>
               <div className="st-section-title">
                 <ShieldCheck size={14} /> Secretary of State record (registered agent &amp; members)
-                {result.sosScraped
-                  ? <span className="st-conf st-conf-high">scraped record</span>
-                  : (result.confidence && <span className={`st-conf st-conf-${String(result.confidence).toLowerCase()}`}>{result.confidence} confidence</span>)}
+                {result.confidence && <span className={`st-conf st-conf-${String(result.confidence).toLowerCase()}`}>{result.confidence} confidence</span>}
               </div>
               <div className="st-grid">
                 <Field icon={<User size={13} />} label="Registered agent" value={result.registeredAgentName} />
@@ -379,7 +377,7 @@ export function SkipTrace() {
             </div>
           )}
 
-          <div className="st-note"><AlertCircle size={12} /> {result.sosScraped ? 'Scraped from the public registration record — verify against the official Secretary of State record before relying on it.' : 'AI‑gathered from public records — verify against the official Secretary of State record before relying on it.'}</div>
+          <div className="st-note"><AlertCircle size={12} /> AI‑gathered from public records — verify against the official Secretary of State record before relying on it.</div>
         </div>
       )}
 
