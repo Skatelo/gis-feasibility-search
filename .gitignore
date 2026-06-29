@@ -22,3 +22,6 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Local scratch / throwaway test scripts (may contain secrets)
+scratch/
