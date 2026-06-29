@@ -1414,7 +1414,9 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
 
 
     const script = document.createElement("script");
-    script.src = `https://maps.googleapis.com/maps/api/js?key=${apiKey}&libraries=places,geometry`;
+    // loading=async is Google's recommended bootstrap param (silences the
+    // "loaded directly without loading=async" console warning + best perf).
+    script.src = `https://maps.googleapis.com/maps/api/js?key=${apiKey}&libraries=places,geometry&loading=async`;
     script.id = "googleMapsScript";
     script.async = true;
     script.defer = true;
