@@ -1823,6 +1823,40 @@ export async function skipTraceContact(ownerName: string, address?: string): Pro
   return await enformionContactEnrich(ownerName, address).catch(() => null) || viaSearch;
 }
 
+/** Bulk skip trace for the finder's owner list — phones/emails for each owner
+ *  (person via Contact Enrich, business via Business Search), concurrency-limited
+ *  with progress. Keyed by the caller's row id. Skips rows with no usable name. */
+export async function enformionSkipTraceOwners(
+  owners: { id: string; firstName?: string; lastName?: string; ownerName?: string; address?: string }[],
+  onProgress?: (done: number, total: number) => void,
+): Promise<Record<string, { phones: string[]; emails: string[] }>> {
+  const out: Record<string, { phones: string[]; emails: string[] }> = {};
+  if (!enformionConfigured()) return out;
+  const list = owners.filter((o) => (o.firstName && o.lastName) || o.ownerName);
+  const total = list.length;
+  let done = 0, i = 0;
+  const worker = async () => {
+    while (i < list.length) {
+      const o = list[i++];
+      let c: SkipTraceContact | null = null;
+      try {
+        const personName = o.firstName && o.lastName ? `${o.firstName} ${o.lastName}` : (o.ownerName || '');
+        if (personName && (o.firstName || !looksLikeBusiness(personName))) {
+          c = await enformionContactEnrich(personName, o.address);
+        } else if (o.ownerName) {
+          c = await enformionBusinessSearch(o.ownerName, o.address);
+        }
+      } catch { /* skip this owner */ }
+      if (c && (c.phones.length || c.emails.length)) {
+        out[o.id] = { phones: c.phones.map((p) => p.number), emails: c.emails };
+      }
+      onProgress?.(++done, total);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(4, list.length) }, worker));
+  return out;
+}
+
 /** Enrich several people (registered agent + officials) with phones/emails,
  *  concurrency-limited. Returns a map keyed by the input name. */
 export async function enformionEnrichPeople(people: { name: string; address?: string }[]): Promise<Record<string, SkipTraceContact>> {

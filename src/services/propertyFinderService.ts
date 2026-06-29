@@ -70,6 +70,10 @@ export interface ParcelInfo {
   // Owner of record + where the county mails the tax bill (from NC GIS parcel data)
   ownerName?: string;
   mailingAddress?: string;
+  // Raw owner + address components (for the owner-list CSV / skip trace)
+  ownerFirst?: string; ownerLast?: string;
+  propStreet?: string; propCity?: string; propState?: string; propZip?: string;
+  mailStreet?: string; mailCity?: string; mailState?: string; mailZip?: string;
   absenteeOwner?: boolean;
   outOfState?: boolean;
   ownerType?: 'individual' | 'estate' | 'company' | 'public';
@@ -819,6 +823,10 @@ export interface Candidate {
   // Owner of record + mailing address (from NC GIS parcel data)
   ownerName?: string;
   mailingAddress?: string;
+  // Raw owner + address components (for the owner-list CSV / skip trace)
+  ownerFirst?: string; ownerLast?: string;
+  propStreet?: string; propCity?: string; propState?: string; propZip?: string;
+  mailStreet?: string; mailCity?: string; mailState?: string; mailZip?: string;
   // GIS distress lead signals (house mode)
   absenteeOwner?: boolean;
   outOfState?: boolean;
@@ -951,7 +959,7 @@ export async function discoverCandidates(
     `${cfg.parcelUrl}?where=${encodeURIComponent(cfg.extraWhere)}` +
     `&geometry=${xmin},${ymin},${xmax},${ymax}&geometryType=esriGeometryEnvelope&inSR=4326` +
     `&spatialRel=esriSpatialRelIntersects` +
-    `&outFields=${encodeURIComponent('parno,siteadd,scity,mailadd,mcity,mstate,mzip,ownname,gisacres,parval,landval,saledate')}` +
+    `&outFields=${encodeURIComponent('parno,siteadd,scity,sstate,szip,mailadd,mcity,mstate,mzip,ownname,ownfrst,ownlast,gisacres,parval,landval,saledate')}` +
     `&returnGeometry=true&maxAllowableOffset=0.0003&outSR=4326&f=geojson`;
   const PAGE = 2000;
   const MAX_PAGES = 30; // up to 60k parcels — effectively uncapped for any realistic scan
@@ -1040,6 +1048,19 @@ export async function discoverCandidates(
     // Owner of record + mailing address for EVERY parcel (land and house).
     cand.ownerName = String(p.ownname ?? '').trim() || undefined;
     cand.mailingAddress = composeMailing(p) || undefined;
+    // Raw owner + address components for the owner-list CSV / skip trace.
+    cand.ownerFirst = String(p.ownfrst ?? '').trim() || undefined;
+    cand.ownerLast = String(p.ownlast ?? '').trim() || undefined;
+    cand.propStreet = siteadd || undefined;
+    // NC GIS appends the jurisdiction type ("GASTONIA CITY"); strip it for a clean
+    // mailing city + better skip-trace matching.
+    cand.propCity = (scity || '').replace(/\s+(CITY|TOWN|TOWNSHIP|TWP|VILLAGE)$/i, '').trim() || undefined;
+    cand.propState = String(p.sstate ?? '').trim() || 'NC';
+    cand.propZip = String(p.szip ?? '').trim() || undefined;
+    cand.mailStreet = String(p.mailadd ?? '').trim() || undefined;
+    cand.mailCity = String(p.mcity ?? '').trim() || undefined;
+    cand.mailState = String(p.mstate ?? '').trim() || undefined;
+    cand.mailZip = String(p.mzip ?? '').trim() || undefined;
     if (mode === 'house') {
       // GIS distress / motivated-seller targeting from assessor + ownership data.
       const gd = computeGisDistress({
@@ -1104,6 +1125,9 @@ export async function analyzeCandidate(c: Candidate, mode: SearchMode, onStage?:
         parcelId: c.parcelId, acres: c.acres, assessedValue: c.assessedValue,
         landValue: c.landValue, improvementRatio: c.improvementRatio,
         ownerName: c.ownerName, mailingAddress: c.mailingAddress,
+        ownerFirst: c.ownerFirst, ownerLast: c.ownerLast,
+        propStreet: c.propStreet, propCity: c.propCity, propState: c.propState, propZip: c.propZip,
+        mailStreet: c.mailStreet, mailCity: c.mailCity, mailState: c.mailState, mailZip: c.mailZip,
         absenteeOwner: c.absenteeOwner, outOfState: c.outOfState,
         ownerType: c.ownerType, yearsSinceSale: c.yearsSinceSale,
         gisDistress: c.gisDistress, gisSignals: c.gisSignals,
@@ -1646,6 +1670,62 @@ export function matchBuyersToDeal(
 // ---------------------------------------------------------------------------
 // Export
 // ---------------------------------------------------------------------------
+
+/** Skip-trace contacts for the owner CSV, keyed by row id. */
+export interface OwnerContact { phones?: string[]; emails?: string[]; }
+/** Minimal row the owner CSV needs — satisfied by PropertyResult AND by a raw
+ *  discovery Candidate mapped into this shape (so a big GIS-only pull can export
+ *  without vision analysis). */
+export interface OwnerCsvRow { id: string; address: string; score: number; scoreLabel: string; parcel?: ParcelInfo; }
+
+const OWNER_BIZ_RE = /\b(llc|inc|corp|company|co|ltd|lp|llp|trust|holdings|properties|enterprises|group|associates|partners|ventures|investments|realty|builders|construction|homes|development|management|capital|fund|bank|church|hoa)\b/i;
+
+/** Split an owner name into first/last. NC OneMap leaves ownfrst/ownlast empty
+ *  and stores ownname SURNAME-FIRST for individuals ("MCKNIGHT ROSE MARIE" =
+ *  last MCKNIGHT, first ROSE). Businesses go entirely in the last-name column. */
+export function splitOwnerName(name: string): { first: string; last: string } {
+  const n = String(name || '').trim().replace(/\s+/g, ' ');
+  if (!n) return { first: '', last: '' };
+  if (OWNER_BIZ_RE.test(n) || / AND | & |\bTRUST\b|\bESTATE\b|\bHEIRS\b/i.test(n)) return { first: '', last: n };
+  if (n.includes(',')) { const [l, r] = n.split(','); return { last: l.trim(), first: (r || '').trim().split(' ')[0] || '' }; }
+  const parts = n.split(' ');
+  if (parts.length === 1) return { first: '', last: parts[0] };
+  // Surname-first: first token = last name, second token = first name.
+  return { last: parts[0], first: parts[1] || '' };
+}
+
+/**
+ * OWNER LIST CSV — exactly the columns asked for: owner first/last name, full
+ * property address (street, city, state, zip) and full mailing address (street,
+ * city, state, zip), with skip-traced phones/emails when a contacts map is given.
+ */
+export function resultsToOwnerCsv(rowsIn: OwnerCsvRow[], contacts?: Record<string, OwnerContact>): string {
+  const headers = [
+    'owner_first_name', 'owner_last_name',
+    'property_address', 'property_city', 'property_state', 'property_zip',
+    'mailing_address', 'mailing_city', 'mailing_state', 'mailing_zip',
+    'phone_1', 'phone_2', 'phone_3', 'email_1', 'email_2',
+    'parcel_id', 'county', 'acres', 'score', 'score_label',
+  ];
+  const esc = (v: unknown) => { const s = String(v ?? ''); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
+  const rows = rowsIn.map((r) => {
+    const p = r.parcel || {};
+    let first = p.ownerFirst || '', last = p.ownerLast || '';
+    if (!first && !last && p.ownerName) { const s = splitOwnerName(p.ownerName); first = s.first; last = s.last; }
+    const propStreet = p.propStreet || (r.address || '').split(',')[0] || '';
+    const propCity = p.propCity || (() => { const seg = (r.address || '').split(','); return seg.length > 1 ? seg[1].trim() : ''; })();
+    const c = contacts?.[r.id] || {};
+    const ph = c.phones || [], em = c.emails || [];
+    return [
+      first, last,
+      propStreet, propCity, p.propState || 'NC', p.propZip || '',
+      p.mailStreet || '', p.mailCity || '', p.mailState || '', p.mailZip || '',
+      ph[0] || '', ph[1] || '', ph[2] || '', em[0] || '', em[1] || '',
+      p.parcelId || '', p.county || '', p.acres ?? '', r.score, r.scoreLabel,
+    ].map(esc).join(',');
+  });
+  return [headers.join(','), ...rows].join('\n');
+}
 
 export function resultsToCsv(results: PropertyResult[]): string {
   const headers = [

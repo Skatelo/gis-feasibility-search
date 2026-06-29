@@ -1,15 +1,18 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Home, Trees, Search, Loader2, AlertCircle, Download, FileJson, FileText, Radar,
-  MapPin, Eye, Sparkles, Target, X, Plus, Trash2, Waves, Droplets, HardHat, Landmark, Flag, User, Users, Building2, Database, Check, Mountain, Mail,
+  MapPin, Eye, Sparkles, Target, X, Plus, Trash2, Waves, Droplets, HardHat, Landmark, Flag, User, Users, Building2, Database, Check, Mountain, Mail, Phone, ListChecks,
 } from 'lucide-react';
 import {
   analyzeProperty, analyzeCandidate, discoverCandidates, buildBuyerList, buildBuyerDatabase,
   rentCastLastSale, buyerLookupAddress, geocodeDealCounty, matchBuyersToDeal,
   saveBuyerDatabase, loadBuyerDatabase, clearBuyerDatabase,
-  resultsToCsv, buyersToCsv, resultsToPrintableHtml, downloadFile, ncCountyNames,
+  resultsToCsv, resultsToOwnerCsv, buyersToCsv, resultsToPrintableHtml, downloadFile, ncCountyNames, splitOwnerName,
 } from '../services/propertyFinderService';
-import type { SearchMode, PropertyResult, Candidate, EnvScore, BuyerRecord, SavedBuyerDatabase } from '../services/propertyFinderService';
+import type { SearchMode, PropertyResult, Candidate, EnvScore, BuyerRecord, SavedBuyerDatabase, OwnerContact, OwnerCsvRow, ParcelInfo } from '../services/propertyFinderService';
+import { enformionSkipTraceOwners, enformionConfigured } from '../services/feasibilityService';
+
+const OWNER_PULL_CAP = 5000;
 
 /** Read the signed-in user's API keys from local/session storage. */
 function readUserKeys(): { googleMaps?: string; gemini?: string; rentCast?: string } {
@@ -148,6 +151,13 @@ export function DistressedFinder() {
   const [maxAcres, setMaxAcres] = useState(20);
   const [maxAnalyze, setMaxAnalyze] = useState(12);
 
+  // Owner list pull (GIS-only, up to 5,000) + bulk skip trace
+  const [pool, setPool] = useState<Candidate[]>([]);
+  const [pulling, setPulling] = useState(false);
+  const [ownerContacts, setOwnerContacts] = useState<Record<string, OwnerContact>>({});
+  const [skipTracing, setSkipTracing] = useState(false);
+  const [skipProgress, setSkipProgress] = useState({ done: 0, total: 0 });
+
   // Buyer-list inputs/results
   const [minProperties, setMinProperties] = useState(3);
   const [dealAddress, setDealAddress] = useState('');
@@ -239,6 +249,7 @@ export function DistressedFinder() {
         { county, city, zip, mode: sMode, radiusMiles: radius, minAcres, maxAcres },
         (s) => setStage(s),
       );
+      setPool(pool); setOwnerContacts({}); // owner-list export + skip trace work off this
 
       const errs: { address: string; message: string }[] = [];
 
@@ -495,6 +506,82 @@ export function DistressedFinder() {
 
   const exportCsv = () => visibleResults.length && downloadFile(`property-finder-${mode}-${Date.now()}.csv`, resultsToCsv(visibleResults), 'text/csv');
   const exportJson = () => visibleResults.length && downloadFile(`property-finder-${mode}-${Date.now()}.json`, JSON.stringify(visibleResults, null, 2), 'application/json');
+
+  // ---- Owner list (GIS-only pull, up to 5,000) + bulk skip trace ----
+  // Convert the discovered pool (Candidate[]) into owner CSV rows, capped at 5,000.
+  const ownerRows = (): OwnerCsvRow[] => pool.slice(0, OWNER_PULL_CAP).map((c) => ({
+    id: c.parcelId || `${c.lat},${c.lng}`,
+    address: c.address,
+    score: Math.round(mode === 'land' ? (c.improvementRatio != null ? (1 - c.improvementRatio) * 100 : 0) : (c.gisDistress ?? 0)),
+    scoreLabel: mode === 'land' ? 'Vacancy' : 'GIS Distress',
+    parcel: {
+      parcelId: c.parcelId, county, acres: c.acres,
+      ownerName: c.ownerName, mailingAddress: c.mailingAddress,
+      ownerFirst: c.ownerFirst, ownerLast: c.ownerLast,
+      propStreet: c.propStreet, propCity: c.propCity, propState: c.propState, propZip: c.propZip,
+      mailStreet: c.mailStreet, mailCity: c.mailCity, mailState: c.mailState, mailZip: c.mailZip,
+    } as ParcelInfo,
+  }));
+  const ownerCount = Math.min(pool.length, OWNER_PULL_CAP);
+
+  // Pull the owner list for the area WITHOUT vision analysis (fast, up to 5,000).
+  const pullOwnerList = async () => {
+    setPulling(true); setErrors([]); setStage('Pulling owner list…'); setOwnerContacts({});
+    try {
+      const sMode: SearchMode = mode === 'land' ? 'land' : 'house';
+      const [city, zip] = (() => { const v = cityZip.trim(); if (!v) return [undefined, undefined] as const; return /^\d{5}$/.test(v) ? ([undefined, v] as const) : ([v, undefined] as const); })();
+      const p = await discoverCandidates({ county, city, zip, mode: sMode, radiusMiles: radius, minAcres, maxAcres }, (s) => setStage(s));
+      setPool(p);
+      setScanSummary(`Pulled ${p.length.toLocaleString()} owner records${p.length > OWNER_PULL_CAP ? ` (CSV/skip trace use the first ${OWNER_PULL_CAP.toLocaleString()})` : ''}.`);
+      setStage('');
+    } catch (e: any) {
+      setErrors([{ address: `${county}${cityZip ? ' · ' + cityZip : ''}`, message: e?.message || 'Owner-list pull failed' }]);
+    } finally {
+      setPulling(false);
+    }
+  };
+
+  const exportOwnerCsv = () => {
+    if (!pool.length) return;
+    downloadFile(`owner-list-${mode}-${county}-${Date.now()}.csv`, resultsToOwnerCsv(ownerRows(), ownerContacts), 'text/csv');
+  };
+
+  // Skip trace the ENTIRE pulled list via Enformion (phones/emails). Costs one
+  // Enformion lookup per owner, so confirm first.
+  const skipTraceList = async () => {
+    const rows = ownerRows();
+    if (!rows.length || skipTracing) return;
+    if (!enformionConfigured()) { setErrors([{ address: 'Skip trace', message: 'Add your Enformion AP Name & Password in Settings first.' }]); return; }
+    if (!window.confirm(`Skip trace ${rows.length.toLocaleString()} owners via Enformion? This makes up to ${rows.length.toLocaleString()} API lookups (one per owner).`)) return;
+    setSkipTracing(true);
+    setSkipProgress({ done: 0, total: rows.length });
+    try {
+      const owners = rows.map((r) => {
+        const p = r.parcel || {};
+        // GIS leaves ownfrst/ownlast blank and stores ownname surname-first, so
+        // split it (surname-first) into the first/last Enformion expects.
+        let first = p.ownerFirst, last = p.ownerLast;
+        if ((!first || !last) && p.ownerName) { const s = splitOwnerName(p.ownerName); first = first || s.first; last = last || s.last; }
+        return {
+          id: r.id,
+          firstName: first,
+          lastName: last,
+          ownerName: p.ownerName,
+          // The owner's MAILING address (where they actually live — best for
+          // absentee owners), falling back to the property address.
+          address: [p.mailStreet, p.mailCity, p.mailState, p.mailZip].filter(Boolean).join(', ')
+            || [p.propStreet, p.propCity, p.propState].filter(Boolean).join(', '),
+        };
+      });
+      const map = await enformionSkipTraceOwners(owners, (done, total) => setSkipProgress({ done, total }));
+      setOwnerContacts(map);
+      setScanSummary(`Skip traced ${Object.keys(map).length.toLocaleString()} of ${rows.length.toLocaleString()} owners with a phone/email. Export the Owner CSV to include them.`);
+    } catch (e: any) {
+      setErrors([{ address: 'Skip trace', message: e?.message || 'Skip trace failed' }]);
+    } finally {
+      setSkipTracing(false);
+    }
+  };
   // PDF via the browser's print engine (hidden iframe) — no PDF library needed.
   const exportPdf = () => {
     if (!visibleResults.length) return;
@@ -742,6 +829,33 @@ export function DistressedFinder() {
                 <button className="finder-btn-primary" onClick={runAutoScan} type="button">
                   <Radar size={16} /> Scan {county}{cityZip ? ` · ${cityZip}` : ''}
                 </button>
+              )}
+            </div>
+
+            {/* Owner list pull (GIS-only, up to 5,000) + bulk skip trace */}
+            <div className="finder-owner-list">
+              <div className="finder-owner-head"><ListChecks size={15} /> Owner list — up to {OWNER_PULL_CAP.toLocaleString()} (CSV + skip trace)</div>
+              <p className="finder-owner-sub">Pulls owner first/last name + full property &amp; mailing address for every matching parcel — no vision, fast. Then skip‑trace the whole list for phones &amp; emails.</p>
+              <div className="finder-owner-actions">
+                <button className="finder-btn-secondary" type="button" onClick={pullOwnerList} disabled={pulling || running}>
+                  {pulling ? <Loader2 size={15} className="finder-spin" /> : <ListChecks size={15} />}
+                  {pulling ? 'Pulling…' : 'Pull owner list'}
+                </button>
+                {pool.length > 0 && (
+                  <>
+                    <button className="finder-btn-secondary" type="button" onClick={exportOwnerCsv}><Download size={15} /> Owner CSV ({ownerCount.toLocaleString()})</button>
+                    <button className="finder-btn-secondary" type="button" onClick={skipTraceList} disabled={skipTracing || !enformionConfigured()}>
+                      {skipTracing ? <Loader2 size={15} className="finder-spin" /> : <Phone size={15} />}
+                      {skipTracing ? `Skip tracing ${skipProgress.done}/${skipProgress.total}…` : `Skip trace list${Object.keys(ownerContacts).length ? ` (${Object.keys(ownerContacts).length} found)` : ''}`}
+                    </button>
+                  </>
+                )}
+              </div>
+              {pool.length > 0 && (
+                <div className="finder-owner-count">
+                  {pool.length.toLocaleString()} owners pulled{pool.length > OWNER_PULL_CAP ? ` · CSV/skip trace use the first ${OWNER_PULL_CAP.toLocaleString()}` : ''}
+                  {!enformionConfigured() ? ' · add Enformion in Settings to skip trace' : ''}
+                </div>
               )}
             </div>
           </div>
