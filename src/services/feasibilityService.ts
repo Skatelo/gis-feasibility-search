@@ -1559,13 +1559,16 @@ export function enformionConfigured(): boolean {
 }
 
 /** Last Enformion call outcome, for surfacing a real reason in the UI. */
-export interface EnformionDiag { status: number; host?: string; reason?: string; shape?: any; }
+export interface EnformionDiag { status: number; host?: string; reason?: string; shape?: any; detail?: string; }
 let lastEnformionDiag: EnformionDiag = { status: 0 };
 export function getLastEnformionDiag(): EnformionDiag { return lastEnformionDiag; }
 /** PII-safe shape (key names + types only) of the last Enformion response. */
 export function getLastEnformionShape(): string {
   try { return lastEnformionDiag.shape ? JSON.stringify(lastEnformionDiag.shape) : ''; } catch { return ''; }
 }
+/** PII-safe outcome VALUES (message, totalResults, input errors/warnings, request
+ *  type) of the last Enformion response — the actual reason for a 0-result. */
+export function getLastEnformionDetail(): string { return lastEnformionDiag.detail || ''; }
 export function enformionDiagMessage(): string {
   const d = lastEnformionDiag;
   if (d.status === 401 || d.status === 403) return 'Enformion rejected the credentials — check the AP Name / AP Password in Account Settings.';
@@ -1593,7 +1596,14 @@ async function enformionCall(path: string, searchType: string, body: any): Promi
     });
     if (!res.ok) { lastEnformionDiag = { status: 0, reason: 'proxy error' }; return null; }
     const env = await res.json(); // { ok, status, host, data, error }
-    lastEnformionDiag = { status: Number(env?.status) || 0, host: env?.host, reason: env?.error, shape: env?.data != null ? describeShape(env.data) : undefined };
+    const d = env?.data;
+    // PII-safe outcome values — system fields about the REQUEST, not a person.
+    const detail = d ? JSON.stringify({
+      requestType: d.requestType, message: d.message, isError: d.isError,
+      totalResults: d.pagination?.totalResults,
+      inputErrors: d.error?.inputErrors, warnings: d.error?.warnings,
+    }) : undefined;
+    lastEnformionDiag = { status: Number(env?.status) || 0, host: env?.host, reason: env?.error, shape: d != null ? describeShape(d) : undefined, detail };
     if (!env?.ok) {
       if (env?.status === 401 || env?.status === 403) console.warn(`Enformion ${path}: auth failed (HTTP ${env.status}) — check the AP Name / AP Password in Settings.`);
       else console.warn(`Enformion ${path}: HTTP ${env?.status} via ${env?.host || '?'}.`, env?.error || '');
