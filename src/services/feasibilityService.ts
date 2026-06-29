@@ -1740,7 +1740,11 @@ async function enformionCall(path: string, searchType: string, body: any): Promi
       },
       body: JSON.stringify(body),
     });
-    if (!res.ok) return null;
+    if (!res.ok) {
+      if (res.status === 401 || res.status === 403) console.warn(`Enformion ${path}: auth failed (HTTP ${res.status}) — check the AP Name / AP Password in Settings.`);
+      else console.warn(`Enformion ${path}: HTTP ${res.status}.`);
+      return null;
+    }
     return await res.json();
   } catch { return null; }
 }
@@ -1815,11 +1819,61 @@ function normNames(arr: any): string[] {
     return [r.firstName, r.middleName, r.lastName].filter(Boolean).join(' ');
   }).filter(Boolean).slice(0, 12);
 }
+// Last-resort recursive scan — finds phones/emails ANYWHERE in the object so the
+// integration works even if Enformion nests them under unexpected keys. Scoped to
+// a single person/business object (the caller resolves that first).
+function deepCollectContacts(root: any): { phones: SkipPhone[]; emails: string[] } {
+  const phones: SkipPhone[] = [];
+  const emails: string[] = [];
+  const seenP = new Set<string>(), seenE = new Set<string>();
+  const emailRe = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
+  const phoneRe = /^\+?1?[\s.\-]?\(?\d{3}\)?[\s.\-]?\d{3}[\s.\-]?\d{4}$/;
+  let nodes = 0;
+  const addPhone = (n: string, type?: string) => { const v = n.trim(); if (v && !seenP.has(v)) { seenP.add(v); phones.push({ number: v, type: type || undefined }); } };
+  const walk = (v: any, key: string) => {
+    if (v == null || nodes++ > 5000) return;
+    if (typeof v === 'string') {
+      const s = v.trim();
+      if (emailRe.test(s)) { const k = s.toLowerCase(); if (!seenE.has(k)) { seenE.add(k); emails.push(s); } }
+      else if (/phone|cell|mobile|tel/i.test(key) && phoneRe.test(s)) addPhone(s);
+      return;
+    }
+    if (Array.isArray(v)) { for (const x of v) walk(x, key); return; }
+    if (typeof v === 'object') {
+      const pn = v.phoneNumber ?? v.number ?? v.phone;
+      if (pn != null && /\d{7,}/.test(String(pn))) addPhone(String(pn), v.phoneType || v.type || v.lineType);
+      const em = v.emailAddress ?? v.email;
+      if (typeof em === 'string' && emailRe.test(em.trim())) { const k = em.trim().toLowerCase(); if (!seenE.has(k)) { seenE.add(k); emails.push(em.trim()); } }
+      for (const k of Object.keys(v)) walk(v[k], k);
+    }
+  };
+  walk(root, '');
+  return { phones: phones.slice(0, 8), emails: emails.slice(0, 8) };
+}
+
+/** Describes an object's SHAPE (nested key names + value types only — never the
+ *  values) for safe debugging of the Enformion response without exposing PII. */
+function describeShape(obj: any, depth = 0): any {
+  if (depth > 4 || obj == null) return typeof obj;
+  if (Array.isArray(obj)) return obj.length ? [describeShape(obj[0], depth + 1)] : [];
+  if (typeof obj === 'object') {
+    const o: Record<string, any> = {};
+    for (const k of Object.keys(obj).slice(0, 40)) o[k] = describeShape(obj[k], depth + 1);
+    return o;
+  }
+  return typeof obj;
+}
+
 function personToContact(person: any, isBusiness: boolean): SkipTraceContact | null {
   if (!person) return null;
-  const phones = normPhones(person.phones || person.phoneNumbers || person.Phones);
-  const emails = normEmails(person.emails || person.emailAddresses || person.Emails);
+  let phones = normPhones(person.phones || person.phoneNumbers || person.Phones);
+  let emails = normEmails(person.emails || person.emailAddresses || person.Emails);
   const addresses = normAddresses(person.addresses || person.Addresses);
+  // Bulletproof fallback: if the structured paths missed, scan the object.
+  if (!phones.length && !emails.length) {
+    const deep = deepCollectContacts(person);
+    phones = deep.phones; emails = deep.emails;
+  }
   if (!phones.length && !emails.length && !addresses.length) return null;
   const nm = person.name || person.fullName;
   const fullName = typeof nm === 'string' ? nm : (nm ? [nm.firstName, nm.middleName, nm.lastName].filter(Boolean).join(' ') : null);
@@ -1845,7 +1899,9 @@ export async function enformionContactEnrich(name: string, address?: string): Pr
   const data = await enformionCall('/Contact/Enrich', 'DevAPIContactEnrich', body);
   if (!data) return null;
   const person = data.person || data.Person || (Array.isArray(data.persons) ? data.persons[0] : null) || data;
-  return personToContact(person, false);
+  const c = personToContact(person, false);
+  if (!c) console.warn('Enformion Contact/Enrich: no contacts parsed. Response shape:', JSON.stringify(describeShape(data)));
+  return c;
 }
 
 /** Enformion Person Search — richer record (relatives, associates, all phones). */
@@ -1859,7 +1915,9 @@ export async function enformionPersonSearch(name: string, address?: string): Pro
   const data = await enformionCall('/PersonSearch', 'Person', body);
   if (!data) return null;
   const person = (Array.isArray(data.persons) && data.persons[0]) || (Array.isArray(data.Persons) && data.Persons[0]) || data.person || null;
-  return personToContact(person, false);
+  const c = personToContact(person, false);
+  if (!c) console.warn('Enformion PersonSearch: no contacts parsed. Response shape:', JSON.stringify(describeShape(data)));
+  return c;
 }
 
 /** Enformion Business Search — business contact + linked principals. */
@@ -1873,6 +1931,7 @@ export async function enformionBusinessSearch(name: string, address?: string): P
   const biz = (Array.isArray(data.businesses) && data.businesses[0]) || (Array.isArray(data.Businesses) && data.Businesses[0]) || data.business || data;
   const c = personToContact(biz, true);
   if (c && !c.fullName) c.fullName = biz?.name || biz?.businessName || name;
+  if (!c) console.warn('Enformion BusinessV2Search: no contacts parsed. Response shape:', JSON.stringify(describeShape(data)));
   return c;
 }
 
