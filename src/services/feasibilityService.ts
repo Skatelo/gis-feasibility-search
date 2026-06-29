@@ -57,7 +57,7 @@ const NC_PARCEL_ENGINE = "https://services.gis.nc.gov/secure/rest/services/NC1Ma
 // Only the fields the app actually uses — requesting these instead of `*` keeps
 // the response small so the (sometimes overloaded) statewide server is far less
 // likely to hit a gateway timeout. The State Plane query needs geometry only.
-const NC_PARCEL_FIELDS = "parno,siteadd,gisacres,ownname,ownname2,mailadd,mcity,mstate,mzip,scity,parval,landval,saledate,reviseyear,sourceref,legdecfull";
+const NC_PARCEL_FIELDS = "parno,siteadd,gisacres,ownname,ownname2,mailadd,mcity,mstate,mzip,scity,parval,landval,saledate,reviseyear,sourceref,legdecfull,cntyname";
 
 /** fetch() with an abort timeout so a hung GIS server fails fast instead of stalling the UI. */
 async function fetchWithTimeout(url: string, ms = 20000, init?: RequestInit): Promise<Response> {
@@ -494,6 +494,27 @@ function writeZoningCache(key: string, z: CachedZoning): void {
  * (administrative_area_level_2). Returns the canonical NC county name, or null if
  * the address isn't a resolvable NC location.
  */
+/**
+ * Authoritative county for a coordinate via the U.S. Census TIGERweb county
+ * boundaries (point-in-polygon). Unlike the parcel layer this has NO coverage
+ * gaps (a point on a road still resolves), and unlike Google's geocoder county
+ * it reflects the TRUE jurisdiction the point falls in. NC only (state FIPS 37).
+ */
+async function ncCountyAtPoint(lat: number, lng: number): Promise<string | null> {
+  try {
+    const url = `https://tigerweb.geo.census.gov/arcgis/rest/services/TIGERweb/State_County/MapServer/1/query` +
+      `?geometry=${lng},${lat}&geometryType=esriGeometryPoint&inSR=4326&spatialRel=esriSpatialRelIntersects` +
+      `&outFields=BASENAME,NAME,STATE&returnGeometry=false&f=json`;
+    const res = await fetchWithTimeout(url, 9000);
+    if (!res.ok) return null;
+    const data = await res.json();
+    const a = data?.features?.[0]?.attributes;
+    if (!a || String(a.STATE) !== '37') return null; // must be North Carolina (FIPS 37)
+    const name = String(a.BASENAME || a.NAME || '').replace(/\s+County$/i, '').trim();
+    return NC_COUNTY_NAMES.find((n) => n.toLowerCase() === name.toLowerCase()) || null;
+  } catch { return null; }
+}
+
 export async function detectNcCounty(address: string, googleKey: string): Promise<string | null> {
   if (!googleKey || !address.trim()) return null;
   try {
@@ -503,9 +524,21 @@ export async function detectNcCounty(address: string, googleKey: string): Promis
     if (!res.ok) return null;
     const data = await res.json();
     if (data.status !== 'OK' || !data.results?.[0]) return null;
-    const comps = data.results[0].address_components || [];
+    const r0 = data.results[0];
+    const comps = r0.address_components || [];
     const state = comps.find((c: any) => c.types?.includes('administrative_area_level_1'));
     if (state && !/north carolina/i.test(state.long_name || '') && !/^NC$/i.test(state.short_name || '')) return null;
+
+    // AUTHORITATIVE: the county whose boundary actually contains the geocoded
+    // point. Google's administrative_area_level_2 is frequently wrong near county
+    // lines or when the mailing city sits in a different county than the parcel.
+    const loc = r0.geometry?.location;
+    if (loc && typeof loc.lat === 'number' && typeof loc.lng === 'number') {
+      const byPoint = await ncCountyAtPoint(loc.lat, loc.lng);
+      if (byPoint) return byPoint;
+    }
+
+    // Fallback only: Google's county component.
     const countyComp = comps.find((c: any) => c.types?.includes('administrative_area_level_2'));
     if (!countyComp) return null;
     const county = String(countyComp.long_name || countyComp.short_name || '').replace(/\s+County$/i, '').trim();
@@ -711,6 +744,19 @@ export async function executeLandAnalysis(
   }
 
   const info = parcelFeature.properties;
+
+  // Self-correct the county from the ACTUAL parcel record (authoritative). The
+  // parcel point query is county-agnostic, so even if the county was mis-detected
+  // up front, the resolved parcel's own cntyname is the truth — use it for zoning,
+  // comps, tax rate, and display so a wrong county never propagates.
+  if (!isSimulated && info?.cntyname) {
+    const parcelCnty = String(info.cntyname).replace(/\s+County$/i, '').trim();
+    const corrected = NC_COUNTY_NAMES.find((n) => n.toLowerCase() === parcelCnty.toLowerCase());
+    if (corrected && corrected.toLowerCase() !== countyName.toLowerCase()) {
+      console.log(`County corrected "${countyName}" -> "${corrected}" from parcel cntyname.`);
+      countyName = corrected;
+    }
+  }
 
   // Extract WGS84 rings from geojson structure to draw the polygon boundary on Google Maps
   let boundaryRings: number[][][] = [];
