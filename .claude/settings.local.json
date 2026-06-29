@@ -14,7 +14,28 @@
       "Bash(node -e \"fetch\\('https://webgis2.durhamnc.gov/server/rest/services?f=json'\\).then\\(r=>r.json\\(\\)\\).then\\(j=>console.log\\(j.folders.join\\(', '\\)\\)\\)\")",
       "Bash(node scratch/probe-zoning.mjs https://webgis2.durhamnc.gov/server/rest/services/PublicServices)",
       "Bash(node scratch/probe-zoning.mjs https://gis.gastoncountync.gov/publicgis/rest/services/PublicGIS/Zoning/MapServer https://location.cabarruscounty.us/arcgisservices/rest/services/Zoning/MapServer https://bcgis.brunswickcountync.gov/arcgis/rest/services/Layers/Zoning/MapServer)",
-      "Bash(node scratch/probe-zoning.mjs \"https://webgis2.durhamnc.gov/server/rest/services/OpenDataServices\")"
+      "Bash(node scratch/probe-zoning.mjs \"https://webgis2.durhamnc.gov/server/rest/services/OpenDataServices\")",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)",
+      "Bash(git ls-remote *)",
+      "Bash(echo \"remote: $\\(git ls-remote origin -h refs/heads/main)",
+      "WebFetch(domain:www.youtube.com)",
+      "Bash(node -e \"const L=require\\('lucide-react'\\); ['Radar','Waves','Droplets','Landmark','HardHat','Trees','Home','Target'].forEach\\(n=>console.log\\(n, typeof L[n]\\)\\)\")",
+      "PowerShell(node scratch/finder-discovery-test.mjs 2>&1)",
+      "PowerShell(node scratch/gis-distress-fields.mjs 2>&1)",
+      "Bash(node --input-type=module -e ' *)",
+      "Bash(node scratch/ph.mjs)",
+      "Bash(mkdir -p scratch/ph)",
+      "Bash(rm -rf scratch/ph)",
+      "Bash(npm run *)",
+      "Bash(Select-String -Pattern \"error TS|error|✓ built\")",
+      "Bash(npx vite *)",
+      "Bash(node scratch/zfuse.mjs)",
+      "Bash(node scratch/zf.mjs)",
+      "Bash(awk -F: '$1 > 2050 && $1 < 2260')",
+      "Bash(node -e \"const p=require\\('./package.json'\\); console.log\\(Object.keys\\({...p.dependencies,...p.devDependencies}\\).join\\(', '\\)\\)\")",
+      "WebFetch(domain:dev.to)",
+      "Bash(node -e ' *)"
     ]
   }
 }

@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(node scratch/gis-rank-test.mjs 2>&1)",
+      "Bash(git commit -m ' *)",
+      "PowerShell(node scratch/page-test.mjs 2>&1)"
+    ]
+  }
+}

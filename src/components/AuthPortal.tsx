@@ -67,7 +67,7 @@ export function AuthPortal({ onLoginSuccess }: AuthPortalProps) {
       user = {
         email: gmail,
         password: '', // Google users don't have passwords
-        keys: { googleMaps: '', gemini: '', openTopography: '' },
+        keys: { googleMaps: '', gemini: '', brightData: '' },
         provider: 'google'
       };
       users.push(user);
@@ -203,7 +203,7 @@ export function AuthPortal({ onLoginSuccess }: AuthPortalProps) {
       const newUser = {
         email: email.trim(),
         password,
-        keys: { googleMaps: '', gemini: '', openTopography: '' },
+        keys: { googleMaps: '', gemini: '', brightData: '' },
         provider: 'email'
       };
 
@@ -223,7 +223,7 @@ export function AuthPortal({ onLoginSuccess }: AuthPortalProps) {
         const defaultDev = {
           email: 'dev@example.com',
           password: 'password',
-          keys: { googleMaps: '', gemini: '', openTopography: '' },
+          keys: { googleMaps: '', gemini: '', brightData: '' },
           provider: 'email'
         };
         users.push(defaultDev);
@@ -244,7 +244,7 @@ export function AuthPortal({ onLoginSuccess }: AuthPortalProps) {
     // Save active session
     const sessionData = {
       email: user.email,
-      keys: user.keys || { googleMaps: '', gemini: '', openTopography: '' },
+      keys: user.keys || { googleMaps: '', gemini: '', brightData: '' },
       provider: user.provider || 'email'
     };
 
