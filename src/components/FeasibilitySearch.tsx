@@ -1,7 +1,9 @@
 import { useState, useEffect, useRef } from 'react';
 import type { FormEvent, KeyboardEvent, FC } from 'react';
 import { createRoot } from 'react-dom/client';
-import { executeLandAnalysis, chatWithGemini, getUserKeys, detectNcCounty, lookupParcelById, fetchConstructionCostEstimate, fetchMaterialTakeoff, fetchGoogleDistanceMatrixComps, getCompPrefs } from '../services/feasibilityService';
+import { executeLandAnalysis, chatWithGemini, getUserKeys, detectNcCounty, lookupParcelById, fetchConstructionCostEstimate, fetchMaterialTakeoff, fetchGoogleDistanceMatrixComps, getCompPrefs, enformionConfigured, enformionContactEnrich, enformionBusinessSearch, looksLikeBusiness } from '../services/feasibilityService';
+import type { SkipTraceContact } from '../services/feasibilityService';
+import { splitOwnerName } from '../services/propertyFinderService';
 import type { ChatMessage } from '../services/feasibilityService';
 import { saveReport, getReportEtaMs, recordReportDuration } from '../services/reportStore';
 import { ReportsDrawer } from './ReportsDrawer';
@@ -23,9 +25,12 @@ import { getZoningServices, hasCountyZoning } from '../data/ncZoning';
 import { fetchOsmFeatures } from '../data/osmFeatures';
 import {
   Search,
-  MapPin, 
-  Layers, 
-  Loader2, 
+  MapPin,
+  Layers,
+  Loader2,
+  Phone,
+  AtSign,
+  Fingerprint,
   Copy, 
   Check, 
   History,
@@ -671,6 +676,10 @@ export const FeasibilitySearch: FC = () => {
   const [costLoading, setCostLoading] = useState(false);
   const [costError, setCostError] = useState(false);
   const [materialTakeoff, setMaterialTakeoff] = useState<MaterialTakeoff | null>(null);
+  // Owner skip trace (Enformion) — phones/emails for the parcel owner
+  const [ownerSkip, setOwnerSkip] = useState<SkipTraceContact | null>(null);
+  const [ownerSkipLoading, setOwnerSkipLoading] = useState(false);
+  const [ownerSkipError, setOwnerSkipError] = useState('');
   // Comps display/search filters
   const [compRadius, setCompRadius] = useState(5);          // max DRIVING-mile radius (3 / 5 / 10) — re-fetches
   const [compTypeFilter, setCompTypeFilter] = useState('all'); // property-type display filter
@@ -801,6 +810,34 @@ export const FeasibilitySearch: FC = () => {
       console.warn('Comp radius re-fetch failed:', e);
     } finally {
       if (seq === searchSeqRef.current) setCompsRefetching(false);
+    }
+  };
+
+  // Skip trace the parcel owner via Enformion (phones/emails). GIS owner names are
+  // surname-first, so split before the (first-last) Enformion lookup.
+  const skipTraceOwner = async () => {
+    const name = (data?.ownerName || '').trim();
+    if (!name || ownerSkipLoading) return;
+    if (!enformionConfigured()) { setOwnerSkipError('Add your Enformion AP Name & Password in Account Settings first.'); return; }
+    setOwnerSkipLoading(true);
+    setOwnerSkipError('');
+    setOwnerSkip(null);
+    try {
+      const addr = data?.mailingAddress || undefined;
+      let c: SkipTraceContact | null = null;
+      if (looksLikeBusiness(name)) {
+        c = await enformionBusinessSearch(name, addr);
+      } else {
+        const s = splitOwnerName(name);
+        const personName = `${s.first} ${s.last}`.trim() || name;
+        c = await enformionContactEnrich(personName, addr);
+      }
+      setOwnerSkip(c);
+      if (!c || (!c.phones.length && !c.emails.length)) setOwnerSkipError('No phone or email match for this owner. Verify the name/address or check your Enformion credentials.');
+    } catch {
+      setOwnerSkipError('Skip trace failed — please try again.');
+    } finally {
+      setOwnerSkipLoading(false);
     }
   };
 
@@ -2107,6 +2144,9 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
     setCostLoading(false);
     setCostError(false);
     setMaterialTakeoff(null);
+    setOwnerSkip(null);
+    setOwnerSkipError('');
+    setOwnerSkipLoading(false);
     setCompRadius(compPrefs.radiusMiles);
     setCompTypeFilter(compPrefs.propertyType);
     setCompsShowAll(false);
@@ -2536,6 +2576,34 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                     >
                       {copiedId === "mailAddress" ? <Check size={14} className="success-icon" /> : <Copy size={14} />}
                     </button>
+                  </div>
+
+                  {/* Skip Trace Owner (Enformion) — phones & emails for this owner */}
+                  <div className="owner-skip">
+                    <button type="button" className="owner-skip-btn" onClick={skipTraceOwner} disabled={ownerSkipLoading || !data.ownerName}>
+                      {ownerSkipLoading ? <Loader2 size={14} className="spinner" /> : <Fingerprint size={14} />}
+                      {ownerSkipLoading ? 'Skip tracing…' : 'Skip Trace Owner'}
+                    </button>
+                    {ownerSkip && (ownerSkip.phones.length > 0 || ownerSkip.emails.length > 0) && (
+                      <div className="owner-skip-result">
+                        {ownerSkip.phones.length > 0 && (
+                          <div className="owner-skip-row"><Phone size={13} />
+                            {ownerSkip.phones.map((p, i) => (
+                              <span key={i} className="owner-skip-chip"><a href={`tel:${p.number.replace(/[^0-9+]/g, '')}`}>{p.number}</a>{p.type ? <em> {p.type}</em> : null}</span>
+                            ))}
+                          </div>
+                        )}
+                        {ownerSkip.emails.length > 0 && (
+                          <div className="owner-skip-row"><AtSign size={13} />
+                            {ownerSkip.emails.map((e, i) => (
+                              <span key={i} className="owner-skip-chip"><a href={`mailto:${e}`}>{e}</a></span>
+                            ))}
+                          </div>
+                        )}
+                        {ownerSkip.relatives && ownerSkip.relatives.length > 0 && <div className="owner-skip-sub">Relatives: {ownerSkip.relatives.slice(0, 5).join(', ')}</div>}
+                      </div>
+                    )}
+                    {ownerSkipError && <div className="owner-skip-err"><AlertCircle size={12} /> {ownerSkipError}</div>}
                   </div>
                 </div>
               </div>

@@ -3732,3 +3732,21 @@ img, svg, video, canvas, table, pre { max-width: 100%; }
 .finder-owner-sub { font-size: 0.74rem; color: var(--text-muted); margin: 4px 0 10px; line-height: 1.45; }
 .finder-owner-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .finder-owner-count { font-size: 0.74rem; color: var(--text-secondary); margin-top: 8px; }
+
+/* Owner skip trace (GIS feasibility search Owner Information card) */
+.owner-skip { margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--bg-card-border); }
+.owner-skip-btn {
+  display: inline-flex; align-items: center; gap: 6px; padding: 7px 13px; border-radius: 8px;
+  border: 1px solid var(--primary); background: var(--primary); color: #fff;
+  font-size: 0.8rem; font-weight: 700; cursor: pointer; transition: opacity 0.12s ease;
+}
+.owner-skip-btn:hover:not(:disabled) { opacity: 0.9; }
+.owner-skip-btn:disabled { opacity: 0.55; cursor: default; }
+.owner-skip-result { margin-top: 9px; display: flex; flex-direction: column; gap: 6px; }
+.owner-skip-row { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; font-size: 0.8rem; }
+.owner-skip-row > svg { color: var(--primary); flex-shrink: 0; }
+.owner-skip-chip { display: inline-flex; align-items: center; gap: 3px; padding: 2px 9px; border-radius: 999px; background: var(--bg-card-hover, #f1f5f9); border: 1px solid var(--bg-card-border); }
+.owner-skip-chip a { color: var(--primary); text-decoration: none; font-weight: 600; }
+.owner-skip-chip em { color: var(--text-muted); font-style: normal; font-size: 0.7rem; }
+.owner-skip-sub { font-size: 0.72rem; color: var(--text-muted); }
+.owner-skip-err { display: flex; align-items: center; gap: 5px; margin-top: 8px; font-size: 0.74rem; color: var(--warning, #d97706); }
