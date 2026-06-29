@@ -3,9 +3,9 @@ import {
   Fingerprint, Search, Loader2, AlertCircle, Building2, User, MapPin, Landmark,
   ExternalLink, Copy, Check, FileText, ShieldCheck, Mail, Home, Layers,
 } from 'lucide-react';
-import { skipTraceLLC, enformionConfigured, skipTraceContact, enformionEnrichPeople } from '../services/feasibilityService';
+import { skipTraceLLC, skipTraceLLCViaGIS, enformionConfigured, skipTraceContact, enformionEnrichPeople, enformionPersonSearch, enformionContactEnrich } from '../services/feasibilityService';
 import type { LlcSkipTrace, SkipTraceContact } from '../services/feasibilityService';
-import { Phone, AtSign } from 'lucide-react';
+import { Phone, AtSign, Building2 as BuildingIcon, UserRound } from 'lucide-react';
 
 const NC_COUNTIES_STATES = ['NC', 'SC', 'VA', 'GA', 'TN', 'FL'];
 
@@ -42,7 +42,9 @@ function Field({ icon, label, value }: { icon: React.ReactNode; label: string; v
 }
 
 export function SkipTrace() {
+  const [mode, setMode] = useState<'business' | 'individual'>('business');
   const [query, setQuery] = useState('');
+  const [addressInput, setAddressInput] = useState('');
   const [state, setState] = useState('NC');
   const [result, setResult] = useState<LlcSkipTrace | null>(null);
   const [searched, setSearched] = useState('');
@@ -60,15 +62,57 @@ export function SkipTrace() {
     } catch { return false; }
   }, []);
 
-  const run = async () => {
-    const q = query.trim();
-    if (!q) return;
+  const run = () => (mode === 'individual' ? runIndividual() : runBusiness());
+
+  const resetRun = (q: string) => {
     setLoading(true);
     setError('');
     setResult(null);
     setEntityContact(null);
     setPeopleContacts({});
     setSearched(q);
+  };
+
+  // INDIVIDUAL skip trace: NC property records (GIS) for the person + Enformion
+  // contacts (phones, emails, age, relatives, associates, addresses).
+  const runIndividual = async () => {
+    const q = query.trim();
+    if (!q) return;
+    resetRun(q);
+    try {
+      const gis = await skipTraceLLCViaGIS(q).catch(() => null);
+      const addr = addressInput.trim() || gis?.mailingAddress || undefined;
+      if (!gis && !enformionConfigured()) {
+        setError(`No NC property records found for "${q}". Add an address, or set your Enformion credentials in Settings to skip-trace this person.`);
+        return;
+      }
+      setResult(gis
+        ? { entityName: gis.canonicalName || q, foundInGIS: true, taxMailingAddress: gis.mailingAddress, properties: gis.properties, propertyCount: gis.propertyCount, propertyCountCapped: gis.capped, countiesOwned: gis.counties, totalAssessedValue: gis.totalAssessed, officials: [], sources: [] }
+        : { entityName: q, foundInGIS: false, officials: [], sources: [] });
+      if (enformionConfigured()) {
+        setEnformionLoading(true);
+        enformionPersonSearch(q, addr)
+          .catch(() => null)
+          .then(async (c) => {
+            let contact = c;
+            if (!contact || (!contact.phones.length && !contact.emails.length)) {
+              contact = (await enformionContactEnrich(q, addr).catch(() => null)) || contact;
+            }
+            setEntityContact(contact);
+          })
+          .finally(() => setEnformionLoading(false));
+      }
+    } catch (e: any) {
+      setError(e?.message || 'Skip-trace failed');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const runBusiness = async () => {
+    const q = query.trim();
+    if (!q) return;
+    resetRun(q);
     try {
       const r = await skipTraceLLC(q, state);
       if (!r) { setError(`No ${state} registration found for "${q}". Try the exact registered name or the SOSID, or check the verification links below.`); return; }
@@ -121,25 +165,47 @@ export function SkipTrace() {
 
   // Verification deep-links (open in the user's real browser, which clears the
   // NC SOS Cloudflare check automatically).
-  const links = (q: string) => [
-    { label: 'NC SOS Business Search', url: 'https://www.sosnc.gov/online_services/search/by_title/Business_Registration' },
-    { label: 'OpenCorporates', url: `https://opencorporates.com/companies/us_${state.toLowerCase()}?q=${encodeURIComponent(q)}` },
-    { label: 'Bizapedia', url: `https://www.bizapedia.com/search/?qfn=${encodeURIComponent(q)}` },
-    { label: 'Google', url: `https://www.google.com/search?q=${encodeURIComponent(`${q} ${state} registered agent secretary of state`)}` },
-  ];
+  const links = (q: string) => (mode === 'individual'
+    ? [
+        { label: 'TruePeopleSearch', url: `https://www.truepeoplesearch.com/results?name=${encodeURIComponent(q)}` },
+        { label: 'FastPeopleSearch', url: `https://www.fastpeoplesearch.com/name/${encodeURIComponent(q.replace(/\s+/g, '-'))}` },
+        { label: 'Whitepages', url: `https://www.whitepages.com/name/${encodeURIComponent(q.replace(/\s+/g, '-'))}` },
+        { label: 'Google', url: `https://www.google.com/search?q=${encodeURIComponent(`${q} ${state} phone address`)}` },
+      ]
+    : [
+        { label: 'NC SOS Business Search', url: 'https://www.sosnc.gov/online_services/search/by_title/Business_Registration' },
+        { label: 'OpenCorporates', url: `https://opencorporates.com/companies/us_${state.toLowerCase()}?q=${encodeURIComponent(q)}` },
+        { label: 'Bizapedia', url: `https://www.bizapedia.com/search/?qfn=${encodeURIComponent(q)}` },
+        { label: 'Google', url: `https://www.google.com/search?q=${encodeURIComponent(`${q} ${state} registered agent secretary of state`)}` },
+      ]);
 
   return (
     <div className="finder-page">
       <div className="finder-hero">
-        <div className="finder-hero-badge"><Fingerprint size={14} /> LLC Skip Trace</div>
-        <h2>Skip Trace an LLC</h2>
+        <div className="finder-hero-badge"><Fingerprint size={14} /> Skip Trace</div>
+        <h2>{mode === 'individual' ? 'Skip Trace a Person' : 'Skip Trace an LLC'}</h2>
         <p>
-          Find the people behind a business entity. The backbone is <strong>NC county tax records (GIS)</strong> —
-          it returns the LLC's <strong>mailing address</strong> (where tax bills go — the best skip‑trace contact)
-          and <strong>every NC property it owns</strong>. That confirmed identity then anchors an AI search of
-          <strong> indexed public records</strong> (Secretary of State snippets, Bizapedia, CorporationWiki) for the
-          <strong> registered agent</strong> and <strong>managers/members</strong>. Great for the LLC owners in your Buyer List.
+          {mode === 'individual' ? (
+            <>Find the <strong>person</strong> behind a property: <strong>NC county tax records (GIS)</strong> return every
+            NC property they own and their mailing address, then <strong>Enformion</strong> returns their real
+            <strong> phone numbers, emails, age, relatives &amp; associates</strong>. Add an address to sharpen the match.</>
+          ) : (
+            <>Find the people behind a business entity. The backbone is <strong>NC county tax records (GIS)</strong> —
+            it returns the LLC's <strong>mailing address</strong> and <strong>every NC property it owns</strong>, then
+            <strong> Enformion</strong> (Business Search) + the SOS record surface the <strong>registered agent, members,
+            phones &amp; emails</strong>. Great for the LLC owners in your Buyer List.</>
+          )}
         </p>
+      </div>
+
+      {/* Mode toggle: Business / Individual */}
+      <div className="st-mode-toggle">
+        <button type="button" className={`st-mode-btn${mode === 'business' ? ' active' : ''}`} onClick={() => { setMode('business'); setResult(null); setError(''); setEntityContact(null); setPeopleContacts({}); }}>
+          <BuildingIcon size={15} /> Business / LLC
+        </button>
+        <button type="button" className={`st-mode-btn${mode === 'individual' ? ' active' : ''}`} onClick={() => { setMode('individual'); setResult(null); setError(''); setEntityContact(null); setPeopleContacts({}); }}>
+          <UserRound size={15} /> Individual
+        </button>
       </div>
 
       {!keysConfigured && (
@@ -148,9 +214,17 @@ export function SkipTrace() {
           <span>Set your <strong>Gemini</strong> API key in Account Settings (top‑right) — it powers the skip‑trace lookup.</span>
         </div>
       )}
+      {!enformionConfigured() && (
+        <div className="finder-alert">
+          <AlertCircle size={18} />
+          <span>Add your <strong>Enformion</strong> AP Name &amp; Password in Account Settings to return real phones, emails, relatives &amp; associates.</span>
+        </div>
+      )}
 
       <div className="finder-search-panel">
-        <label className="finder-input-label">LLC / business name or SOSID <span>(e.g. "David B Miller Rentals LLC")</span></label>
+        <label className="finder-input-label">
+          {mode === 'individual' ? <>Full name <span>(e.g. "John A Smith" or "Smith, John")</span></> : <>LLC / business name or SOSID <span>(e.g. "David B Miller Rentals LLC")</span></>}
+        </label>
         <div className="st-search-row">
           <select value={state} onChange={(e) => setState(e.target.value)} className="st-state">
             {NC_COUNTIES_STATES.map((s) => <option key={s} value={s}>{s}</option>)}
@@ -161,13 +235,22 @@ export function SkipTrace() {
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={(e) => { if (e.key === 'Enter') run(); }}
-            placeholder="Acme Holdings LLC  ·  or  SOSID 1417294"
+            placeholder={mode === 'individual' ? 'John A Smith' : 'Acme Holdings LLC  ·  or  SOSID 1417294'}
           />
           <button className="finder-btn-primary" onClick={run} type="button" disabled={loading || !query.trim()}>
             {loading ? <Loader2 size={16} className="finder-spin" /> : <Search size={16} />}
             {loading ? 'Tracing…' : 'Skip Trace'}
           </button>
         </div>
+        <input
+          type="text"
+          className="st-input"
+          style={{ marginTop: '8px', width: '100%' }}
+          value={addressInput}
+          onChange={(e) => setAddressInput(e.target.value)}
+          onKeyDown={(e) => { if (e.key === 'Enter') run(); }}
+          placeholder={mode === 'individual' ? 'Optional: last known address (sharpens the match) — 123 Main St, Concord, NC' : 'Optional: business address'}
+        />
       </div>
 
       {error && (
@@ -180,7 +263,7 @@ export function SkipTrace() {
         <div className="st-result">
           <div className="st-result-head">
             <div className="st-entity">
-              <Building2 size={18} />
+              {mode === 'individual' ? <UserRound size={18} /> : <Building2 size={18} />}
               <div>
                 <h3>{result.entityName}</h3>
                 <div className="st-entity-sub">

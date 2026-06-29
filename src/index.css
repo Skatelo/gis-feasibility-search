@@ -3715,3 +3715,12 @@ img, svg, video, canvas, table, pre { max-width: 100%; }
 .st-contact-chip a { color: var(--primary); text-decoration: none; font-weight: 600; }
 .st-contact-chip em { color: var(--text-muted); font-style: normal; font-size: 0.7rem; }
 .st-contact-sub { font-size: 0.72rem; color: var(--text-muted); margin-top: 4px; }
+
+/* Skip Trace mode toggle (Business / Individual) */
+.st-mode-toggle { display: inline-flex; gap: 4px; margin: 0 0 14px; padding: 4px; border: 1px solid var(--bg-card-border); border-radius: 10px; background: var(--bg-card-hover, #f1f5f9); }
+.st-mode-btn {
+  display: inline-flex; align-items: center; gap: 6px; padding: 7px 16px; border-radius: 7px;
+  border: none; background: transparent; color: var(--text-secondary); font-size: 0.85rem; font-weight: 600; cursor: pointer; transition: all 0.12s ease;
+}
+.st-mode-btn:hover { color: var(--primary); }
+.st-mode-btn.active { background: var(--primary); color: #fff; }
