@@ -4,6 +4,21 @@ import { createRoot } from 'react-dom/client';
 import { executeLandAnalysis, chatWithGemini, getUserKeys, detectNcCounty, lookupParcelById, fetchConstructionCostEstimate, fetchMaterialTakeoff, fetchGoogleDistanceMatrixComps, getCompPrefs, enformionConfigured, enformionContactEnrich, enformionPersonSearch, enformionBusinessSearch, looksLikeBusiness, enformionDiagMessage, getLastEnformionShape, getLastEnformionDetail } from '../services/feasibilityService';
 import type { SkipTraceContact } from '../services/feasibilityService';
 import { splitOwnerName } from '../services/propertyFinderService';
+
+// NC GIS stores owner names SURNAME-FIRST ("MCKNIGHT ROSE MARIE"). Display them
+// as First [Middle] Last ("Rose Marie Mcknight"); businesses/trusts/joint owners
+// are shown as recorded (just title-cased).
+const ownerTitleCase = (s: string) => s.toLowerCase().replace(/\b([a-z])/g, (m) => m.toUpperCase())
+  .replace(/\b(Llc|Inc|Lp|Llp|Pllc|Ltd|Pc|Hoa|Ii|Iii|Iv)\b/g, (m) => m.toUpperCase());
+function formatOwnerDisplay(raw?: string): string {
+  const n = (raw || '').trim().replace(/\s+/g, ' ');
+  if (!n) return 'N/A';
+  if (looksLikeBusiness(n) || /\bAND\b|&|\bTRUST\b|\bESTATE\b|\bHEIRS\b|\bLIVING\b/i.test(n)) return ownerTitleCase(n);
+  if (n.includes(',')) { const [last, rest] = n.split(','); return ownerTitleCase([rest.trim(), last.trim()].filter(Boolean).join(' ')); }
+  const parts = n.split(' ');
+  if (parts.length < 2) return ownerTitleCase(n);
+  return ownerTitleCase([...parts.slice(1), parts[0]].join(' ')); // move surname to the end
+}
 import type { ChatMessage } from '../services/feasibilityService';
 import { saveReport, getReportEtaMs, recordReportDuration } from '../services/reportStore';
 import { ReportsDrawer } from './ReportsDrawer';
@@ -2489,7 +2504,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
               <div className="card registry-header-card">
                 {/* Big Title Name */}
                 <h3 className="registry-title-name">
-                  {data.ownerName || "Property Owner"}
+                  {data.ownerName ? formatOwnerDisplay(data.ownerName) : "Property Owner"}
                 </h3>
                 <div className="registry-title-address">
                   {data.inputAddress}
@@ -2571,7 +2586,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                   <div className="registry-row">
                     <div className="registry-label-with-icon">
                       <User size={16} className="registry-icon-blue" />
-                      <span>{data.ownerName || "N/A"}</span>
+                      <span>{formatOwnerDisplay(data.ownerName)}</span>
                     </div>
                   </div>
                   <div className="registry-row copyable-row">
