@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import type { FormEvent, KeyboardEvent, FC } from 'react';
 import { createRoot } from 'react-dom/client';
-import { executeLandAnalysis, chatWithGemini, getUserKeys, detectNcCounty, lookupParcelById, fetchConstructionCostEstimate, fetchMaterialTakeoff, fetchGoogleDistanceMatrixComps, getCompPrefs, enformionConfigured, enformionContactEnrich, enformionBusinessSearch, looksLikeBusiness } from '../services/feasibilityService';
+import { executeLandAnalysis, chatWithGemini, getUserKeys, detectNcCounty, lookupParcelById, fetchConstructionCostEstimate, fetchMaterialTakeoff, fetchGoogleDistanceMatrixComps, getCompPrefs, enformionConfigured, enformionContactEnrich, enformionBusinessSearch, looksLikeBusiness, enformionDiagMessage } from '../services/feasibilityService';
 import type { SkipTraceContact } from '../services/feasibilityService';
 import { splitOwnerName } from '../services/propertyFinderService';
 import type { ChatMessage } from '../services/feasibilityService';
@@ -833,7 +833,7 @@ export const FeasibilitySearch: FC = () => {
         c = await enformionContactEnrich(personName, addr);
       }
       setOwnerSkip(c);
-      if (!c || (!c.phones.length && !c.emails.length)) setOwnerSkipError('No phone or email match for this owner. Verify the name/address or check your Enformion credentials.');
+      if (!c || (!c.phones.length && !c.emails.length)) setOwnerSkipError(enformionDiagMessage());
     } catch {
       setOwnerSkipError('Skip trace failed — please try again.');
     } finally {

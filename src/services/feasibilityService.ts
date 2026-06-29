@@ -1600,9 +1600,23 @@ export function enformionConfigured(): boolean {
   return !!(k.enformionApName && k.enformionApPassword);
 }
 
+/** Last Enformion call outcome, for surfacing a real reason in the UI. */
+export interface EnformionDiag { status: number; host?: string; reason?: string; }
+let lastEnformionDiag: EnformionDiag = { status: 0 };
+export function getLastEnformionDiag(): EnformionDiag { return lastEnformionDiag; }
+export function enformionDiagMessage(): string {
+  const d = lastEnformionDiag;
+  if (d.status === 401 || d.status === 403) return 'Enformion rejected the credentials — check the AP Name / AP Password in Account Settings.';
+  if (d.status === 404) return 'Enformion endpoint not found (HTTP 404) — the API host/route may have changed.';
+  if (d.status === 0) return 'Could not reach Enformion (network/credentials not set).';
+  if (d.status >= 500) return `Enformion service error (HTTP ${d.status}). Try again shortly.`;
+  if (d.status >= 200 && d.status < 300) return 'No record matched this name/address in Enformion.';
+  return `Enformion returned HTTP ${d.status}.`;
+}
+
 async function enformionCall(path: string, searchType: string, body: any): Promise<any | null> {
   const k = getUserKeys();
-  if (!k.enformionApName || !k.enformionApPassword) return null;
+  if (!k.enformionApName || !k.enformionApPassword) { lastEnformionDiag = { status: 0, reason: 'not configured' }; return null; }
   try {
     const res = await fetchWithTimeout('/.netlify/functions/enformion', 30000, {
       method: 'POST',
@@ -1615,13 +1629,16 @@ async function enformionCall(path: string, searchType: string, body: any): Promi
       },
       body: JSON.stringify(body),
     });
-    if (!res.ok) {
-      if (res.status === 401 || res.status === 403) console.warn(`Enformion ${path}: auth failed (HTTP ${res.status}) — check the AP Name / AP Password in Settings.`);
-      else console.warn(`Enformion ${path}: HTTP ${res.status}.`);
+    if (!res.ok) { lastEnformionDiag = { status: 0, reason: 'proxy error' }; return null; }
+    const env = await res.json(); // { ok, status, host, data, error }
+    lastEnformionDiag = { status: Number(env?.status) || 0, host: env?.host, reason: env?.error };
+    if (!env?.ok) {
+      if (env?.status === 401 || env?.status === 403) console.warn(`Enformion ${path}: auth failed (HTTP ${env.status}) — check the AP Name / AP Password in Settings.`);
+      else console.warn(`Enformion ${path}: HTTP ${env?.status} via ${env?.host || '?'}.`, env?.error || '');
       return null;
     }
-    return await res.json();
-  } catch { return null; }
+    return env.data;
+  } catch { lastEnformionDiag = { status: 0, reason: 'network' }; return null; }
 }
 
 const cap = (s: string) => (s ? s.charAt(0).toUpperCase() + s.slice(1).toLowerCase() : s);
