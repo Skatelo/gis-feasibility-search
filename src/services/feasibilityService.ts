@@ -1122,7 +1122,9 @@ export async function fetchCurrentMortgageRate(): Promise<{ rate: number; date: 
     return d;
   };
 
-  // 1) Serverless proxy (works in production where FRED CORS would block the browser).
+  // Serverless proxy only — a direct browser fetch to FRED always CORS-fails in
+  // production, so we don't attempt it (it only created console errors). When the
+  // proxy is unavailable the report researches the rate via Google Search instead.
   try {
     const res = await fetchWithTimeout('/.netlify/functions/mortgage-rate', 8000);
     if (res.ok && (res.headers.get('content-type') || '').includes('json')) {
@@ -1130,19 +1132,6 @@ export async function fetchCurrentMortgageRate(): Promise<{ rate: number; date: 
       if (Number.isFinite(data?.rate)) return cache({ rate: data.rate, date: String(data.date || '') });
     }
   } catch { /* fall through */ }
-
-  // 2) Direct FRED CSV (may CORS-fail in the browser; works in some environments).
-  try {
-    const res = await fetchWithTimeout('https://fred.stlouisfed.org/graph/fredgraph.csv?id=MORTGAGE30US', 8000);
-    if (res.ok) {
-      const lines = (await res.text()).trim().split(/\r?\n/);
-      for (let i = lines.length - 1; i > 0; i--) {
-        const [date, val] = lines[i].split(',');
-        const rate = parseFloat(val);
-        if (Number.isFinite(rate)) return cache({ rate, date });
-      }
-    }
-  } catch { /* ignore */ }
 
   return null;
 }
@@ -1181,21 +1170,6 @@ export interface CountyMarketStats {
   newListings?: MarketMetric | null;
 }
 
-/** Parse a FRED CSV body into latest + 3-month-ago + 1-year-ago points. */
-function parseFredCsv(text: string): MarketMetric | null {
-  const lines = text.trim().split(/\r?\n/);
-  const rows: [string, number][] = [];
-  for (let i = 1; i < lines.length; i++) {
-    const [d, v] = lines[i].split(',');
-    const n = parseFloat(v);
-    if (Number.isFinite(n)) rows.push([d, n]);
-  }
-  if (!rows.length) return null;
-  const at = (back: number) => (rows[rows.length - 1 - back] ? rows[rows.length - 1 - back][1] : null);
-  const last = rows[rows.length - 1];
-  return { value: last[1], date: last[0], prev3: at(3), prevYear: at(12) };
-}
-
 /**
  * County housing-market stats (median days on market, active listings, median
  * list price, new listings — all residential, Realtor.com via FRED). Tries the
@@ -1228,25 +1202,9 @@ export async function fetchCountyMarketStats(countyName: string): Promise<County
     }
   } catch { /* fall through */ }
 
-  // 2) Direct FRED CSVs (best-effort; may CORS-fail in the browser).
-  try {
-    const series: Record<string, string> = {
-      medianDaysOnMarket: 'MEDDAYONMAR', activeListings: 'ACTLISCOU',
-      medianListPrice: 'MEDLISPRI', newListings: 'NEWLISCOU',
-    };
-    const entries = await Promise.all(
-      Object.entries(series).map(async ([k, prefix]) => {
-        try {
-          const res = await fetchWithTimeout(`https://fred.stlouisfed.org/graph/fredgraph.csv?id=${prefix}${fips}`, 8000);
-          return [k, res.ok ? parseFredCsv(await res.text()) : null] as const;
-        } catch { return [k, null] as const; }
-      }),
-    );
-    const out: CountyMarketStats = { fips };
-    for (const [k, v] of entries) (out as any)[k] = v;
-    if (out.medianDaysOnMarket || out.activeListings) return cache(out);
-  } catch { /* ignore */ }
-
+  // No direct browser FRED fallback — those cross-origin CSV fetches always
+  // CORS-fail in production (they only spammed the console). The serverless proxy
+  // above is the single path; on failure the report researches §17 via Google.
   return null;
 }
 
@@ -1601,9 +1559,13 @@ export function enformionConfigured(): boolean {
 }
 
 /** Last Enformion call outcome, for surfacing a real reason in the UI. */
-export interface EnformionDiag { status: number; host?: string; reason?: string; }
+export interface EnformionDiag { status: number; host?: string; reason?: string; shape?: any; }
 let lastEnformionDiag: EnformionDiag = { status: 0 };
 export function getLastEnformionDiag(): EnformionDiag { return lastEnformionDiag; }
+/** PII-safe shape (key names + types only) of the last Enformion response. */
+export function getLastEnformionShape(): string {
+  try { return lastEnformionDiag.shape ? JSON.stringify(lastEnformionDiag.shape) : ''; } catch { return ''; }
+}
 export function enformionDiagMessage(): string {
   const d = lastEnformionDiag;
   if (d.status === 401 || d.status === 403) return 'Enformion rejected the credentials — check the AP Name / AP Password in Account Settings.';
@@ -1631,7 +1593,7 @@ async function enformionCall(path: string, searchType: string, body: any): Promi
     });
     if (!res.ok) { lastEnformionDiag = { status: 0, reason: 'proxy error' }; return null; }
     const env = await res.json(); // { ok, status, host, data, error }
-    lastEnformionDiag = { status: Number(env?.status) || 0, host: env?.host, reason: env?.error };
+    lastEnformionDiag = { status: Number(env?.status) || 0, host: env?.host, reason: env?.error, shape: env?.data != null ? describeShape(env.data) : undefined };
     if (!env?.ok) {
       if (env?.status === 401 || env?.status === 403) console.warn(`Enformion ${path}: auth failed (HTTP ${env.status}) — check the AP Name / AP Password in Settings.`);
       else console.warn(`Enformion ${path}: HTTP ${env?.status} via ${env?.host || '?'}.`, env?.error || '');

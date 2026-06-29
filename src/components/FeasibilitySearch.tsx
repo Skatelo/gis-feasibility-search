@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import type { FormEvent, KeyboardEvent, FC } from 'react';
 import { createRoot } from 'react-dom/client';
-import { executeLandAnalysis, chatWithGemini, getUserKeys, detectNcCounty, lookupParcelById, fetchConstructionCostEstimate, fetchMaterialTakeoff, fetchGoogleDistanceMatrixComps, getCompPrefs, enformionConfigured, enformionContactEnrich, enformionBusinessSearch, looksLikeBusiness, enformionDiagMessage } from '../services/feasibilityService';
+import { executeLandAnalysis, chatWithGemini, getUserKeys, detectNcCounty, lookupParcelById, fetchConstructionCostEstimate, fetchMaterialTakeoff, fetchGoogleDistanceMatrixComps, getCompPrefs, enformionConfigured, enformionContactEnrich, enformionPersonSearch, enformionBusinessSearch, looksLikeBusiness, enformionDiagMessage, getLastEnformionShape } from '../services/feasibilityService';
 import type { SkipTraceContact } from '../services/feasibilityService';
 import { splitOwnerName } from '../services/propertyFinderService';
 import type { ChatMessage } from '../services/feasibilityService';
@@ -830,10 +830,15 @@ export const FeasibilitySearch: FC = () => {
       } else {
         const s = splitOwnerName(name);
         const personName = `${s.first} ${s.last}`.trim() || name;
-        c = await enformionContactEnrich(personName, addr);
+        // Person Search first (broader), then Contact Enrich.
+        c = await enformionPersonSearch(personName, addr);
+        if (!c || (!c.phones.length && !c.emails.length)) c = await enformionContactEnrich(personName, addr);
       }
       setOwnerSkip(c);
-      if (!c || (!c.phones.length && !c.emails.length)) setOwnerSkipError(enformionDiagMessage());
+      if (!c || (!c.phones.length && !c.emails.length)) {
+        const shape = getLastEnformionShape();
+        setOwnerSkipError(enformionDiagMessage() + (shape ? `\n\nResponse fields (no values): ${shape}` : ''));
+      }
     } catch {
       setOwnerSkipError('Skip trace failed — please try again.');
     } finally {

@@ -3750,3 +3750,7 @@ img, svg, video, canvas, table, pre { max-width: 100%; }
 .owner-skip-chip em { color: var(--text-muted); font-style: normal; font-size: 0.7rem; }
 .owner-skip-sub { font-size: 0.72rem; color: var(--text-muted); }
 .owner-skip-err { display: flex; align-items: center; gap: 5px; margin-top: 8px; font-size: 0.74rem; color: var(--warning, #d97706); }
+
+/* Owner skip-trace error wraps the PII-safe response shape readably */
+.owner-skip-err { align-items: flex-start; white-space: pre-wrap; word-break: break-word; line-height: 1.45; }
+.owner-skip-err svg { flex-shrink: 0; margin-top: 2px; }
