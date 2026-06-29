@@ -3705,3 +3705,13 @@ img, svg, video, canvas, table, pre { max-width: 100%; }
   font-weight: 800; font-size: 0.84rem; color: var(--text-primary); padding-top: 8px;
 }
 .takeoff-grand .takeoff-cost { color: var(--success); }
+
+/* Enformion skip-trace contact cards (Skip Trace tab) */
+.st-contact { margin: 8px 0; padding: 10px 12px; border: 1px solid var(--bg-card-border); border-radius: 8px; background: var(--bg-card-hover, #f8fafc); }
+.st-contact-title { font-weight: 700; font-size: 0.82rem; color: var(--text-primary); margin-bottom: 6px; }
+.st-contact-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 4px 0; font-size: 0.8rem; color: var(--text-secondary); }
+.st-contact-row > svg { color: var(--primary); flex-shrink: 0; }
+.st-contact-chip { display: inline-flex; align-items: center; gap: 3px; padding: 2px 8px; border-radius: 999px; background: var(--bg-card, #fff); border: 1px solid var(--bg-card-border); }
+.st-contact-chip a { color: var(--primary); text-decoration: none; font-weight: 600; }
+.st-contact-chip em { color: var(--text-muted); font-style: normal; font-size: 0.7rem; }
+.st-contact-sub { font-size: 0.72rem; color: var(--text-muted); margin-top: 4px; }

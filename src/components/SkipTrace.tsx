@@ -3,8 +3,9 @@ import {
   Fingerprint, Search, Loader2, AlertCircle, Building2, User, MapPin, Landmark,
   ExternalLink, Copy, Check, FileText, ShieldCheck, Mail, Home, Layers,
 } from 'lucide-react';
-import { skipTraceLLC } from '../services/feasibilityService';
-import type { LlcSkipTrace } from '../services/feasibilityService';
+import { skipTraceLLC, enformionConfigured, skipTraceContact, enformionEnrichPeople } from '../services/feasibilityService';
+import type { LlcSkipTrace, SkipTraceContact } from '../services/feasibilityService';
+import { Phone, AtSign } from 'lucide-react';
 
 const NC_COUNTIES_STATES = ['NC', 'SC', 'VA', 'GA', 'TN', 'FL'];
 
@@ -47,6 +48,10 @@ export function SkipTrace() {
   const [searched, setSearched] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  // Enformion skip-trace contacts (real phones/emails for the entity + people)
+  const [entityContact, setEntityContact] = useState<SkipTraceContact | null>(null);
+  const [peopleContacts, setPeopleContacts] = useState<Record<string, SkipTraceContact>>({});
+  const [enformionLoading, setEnformionLoading] = useState(false);
 
   const keysConfigured = useMemo(() => {
     try {
@@ -61,17 +66,58 @@ export function SkipTrace() {
     setLoading(true);
     setError('');
     setResult(null);
+    setEntityContact(null);
+    setPeopleContacts({});
     setSearched(q);
     try {
       const r = await skipTraceLLC(q, state);
-      if (!r) setError(`No ${state} registration found for "${q}". Try the exact registered name or the SOSID, or check the verification links below.`);
-      else setResult(r);
+      if (!r) { setError(`No ${state} registration found for "${q}". Try the exact registered name or the SOSID, or check the verification links below.`); return; }
+      setResult(r);
+      // Enformion skip trace: real phones/emails for the entity (person/business)
+      // and each registered agent / official, from the GIS owner data.
+      if (enformionConfigured()) {
+        setEnformionLoading(true);
+        const entityAddr = r.taxMailingAddress || r.mailingAddress || r.principalOffice || undefined;
+        const people = [
+          ...(r.registeredAgentName ? [{ name: r.registeredAgentName, address: r.registeredAgentAddress || undefined }] : []),
+          ...((r.officials || []).map((o) => ({ name: o.name, address: o.address || undefined }))),
+        ];
+        Promise.all([
+          skipTraceContact(r.entityName || q, entityAddr).catch(() => null),
+          enformionEnrichPeople(people).catch(() => ({})),
+        ]).then(([entity, map]) => {
+          setEntityContact(entity);
+          setPeopleContacts(map || {});
+        }).finally(() => setEnformionLoading(false));
+      }
     } catch (e: any) {
       setError(e?.message || 'Skip-trace failed');
     } finally {
       setLoading(false);
     }
   };
+
+  const ContactCard = ({ c, title }: { c: SkipTraceContact; title?: string }) => (
+    <div className="st-contact">
+      {title && <div className="st-contact-title">{title}{c.isBusiness ? ' (business)' : ''}{c.age ? ` · age ${c.age}` : ''}</div>}
+      {c.phones.length > 0 && (
+        <div className="st-contact-row"><Phone size={12} />
+          {c.phones.map((p, i) => (
+            <span key={i} className="st-contact-chip"><a href={`tel:${p.number.replace(/[^0-9+]/g, '')}`}>{p.number}</a>{p.type ? <em> {p.type}</em> : null}<CopyBtn text={p.number} /></span>
+          ))}
+        </div>
+      )}
+      {c.emails.length > 0 && (
+        <div className="st-contact-row"><AtSign size={12} />
+          {c.emails.map((e, i) => (
+            <span key={i} className="st-contact-chip"><a href={`mailto:${e}`}>{e}</a><CopyBtn text={e} /></span>
+          ))}
+        </div>
+      )}
+      {c.relatives && c.relatives.length > 0 && <div className="st-contact-sub">Relatives: {c.relatives.slice(0, 6).join(', ')}</div>}
+      {c.associates && c.associates.length > 0 && <div className="st-contact-sub">Associates: {c.associates.slice(0, 6).join(', ')}</div>}
+    </div>
+  );
 
   // Verification deep-links (open in the user's real browser, which clears the
   // NC SOS Cloudflare check automatically).
@@ -210,6 +256,29 @@ export function SkipTrace() {
               <AlertCircle size={14} />
               <span>Couldn't confirm the <strong>registered agent / members</strong> in indexed public records for this entity. Open the <strong>NC SOS</strong> link below — it clears the Cloudflare check automatically in your browser and shows the agent &amp; company officials directly.</span>
             </div>
+          )}
+
+          {/* Enformion skip trace — real phones / emails / relatives */}
+          {(enformionLoading || entityContact || Object.keys(peopleContacts).length > 0) && (
+            <>
+              <div className="st-section-title">
+                <Phone size={14} /> Skip Trace Contacts (Enformion)
+                {enformionLoading && <Loader2 size={13} className="finder-spin" style={{ marginLeft: '6px' }} />}
+              </div>
+              {entityContact && (entityContact.phones.length > 0 || entityContact.emails.length > 0) && (
+                <ContactCard c={entityContact} title={result.entityName || 'Owner'} />
+              )}
+              {Object.entries(peopleContacts).map(([name, c]) => (
+                <ContactCard key={name} c={c} title={name} />
+              ))}
+              {!enformionLoading && !entityContact && Object.keys(peopleContacts).length === 0 && (
+                <div className="st-agent-missing">
+                  <AlertCircle size={14} />
+                  <span>No Enformion contact matches for this entity or its people. Try a more exact name, or verify the credentials in Settings.</span>
+                </div>
+              )}
+              <div className="st-note"><AlertCircle size={12} /> Skip-trace data from Enformion — use in compliance with the FCRA / DPPA (no credit, employment, tenant, or insurance decisions).</div>
+            </>
           )}
 
           {result.recentFiling && (

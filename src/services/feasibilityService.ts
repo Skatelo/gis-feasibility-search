@@ -10,6 +10,10 @@ export interface UserKeys {
   rentCast?: string;
   /** Bright Data API token — powers the Secretary of State scraper (skip trace). */
   brightData?: string;
+  /** Enformion Go API credentials — skip tracing (phones, emails, relatives) for
+   *  individuals & businesses from the GIS owner data. */
+  enformionApName?: string;
+  enformionApPassword?: string;
 }
 
 export function getUserKeys(): UserKeys {
@@ -1693,6 +1697,214 @@ export async function skipTraceLLC(query: string, state = 'NC'): Promise<LlcSkip
     totalAssessedValue: gis?.totalAssessed ?? 0,
   };
   return result;
+}
+
+// ===========================================================================
+// Enformion Go — real skip tracing (phones, emails, addresses, relatives,
+// associates) for the INDIVIDUALS and BUSINESSES behind GIS-owned properties.
+// Proxied server-side (/.netlify/functions/enformion) to avoid CORS; the user's
+// access-profile credentials are sent per call, never stored server-side.
+// ===========================================================================
+
+export interface SkipPhone { number: string; type?: string }
+export interface SkipTraceContact {
+  fullName?: string | null;
+  age?: number | null;
+  phones: SkipPhone[];
+  emails: string[];
+  addresses: string[];
+  relatives?: string[];
+  associates?: string[];
+  isBusiness?: boolean;
+  source: 'enformion';
+}
+
+/** True when both Enformion access-profile credentials are configured. */
+export function enformionConfigured(): boolean {
+  const k = getUserKeys();
+  return !!(k.enformionApName && k.enformionApPassword);
+}
+
+async function enformionCall(path: string, searchType: string, body: any): Promise<any | null> {
+  const k = getUserKeys();
+  if (!k.enformionApName || !k.enformionApPassword) return null;
+  try {
+    const res = await fetchWithTimeout('/.netlify/functions/enformion', 30000, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-enformion-name': k.enformionApName,
+        'x-enformion-password': k.enformionApPassword,
+        'x-enformion-search-type': searchType,
+        'x-enformion-path': path,
+      },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch { return null; }
+}
+
+const cap = (s: string) => (s ? s.charAt(0).toUpperCase() + s.slice(1).toLowerCase() : s);
+
+/** "123 Main St, Concord, NC 28027" → { line1: "123 Main St", line2: "Concord, NC 28027" }. */
+function splitAddress(addr?: string | null): { addressLine1: string; addressLine2: string } {
+  const s = String(addr || '').trim();
+  if (!s) return { addressLine1: '', addressLine2: '' };
+  const i = s.indexOf(',');
+  if (i < 0) return { addressLine1: s, addressLine2: '' };
+  return { addressLine1: s.slice(0, i).trim(), addressLine2: s.slice(i + 1).replace(/,?\s*USA$/i, '').trim() };
+}
+
+/** Detects an entity (LLC/INC/etc.) vs. a person. */
+export function looksLikeBusiness(name: string): boolean {
+  return /\b(llc|l\.l\.c|inc|incorporated|corp|corporation|company|co|ltd|lp|llp|holdings|properties|enterprises|group|associates|partners|ventures|investments|realty|builders|construction|homes|development|management|capital|fund|bank|church|ministries|hoa)\b/i.test(String(name || ''));
+}
+
+/** Parses "LAST, FIRST MIDDLE" or "FIRST MIDDLE LAST" into name parts. */
+function parsePersonName(name: string): { firstName: string; middleName: string; lastName: string } | null {
+  let n = String(name || '').trim().replace(/\s+/g, ' ');
+  if (!n) return null;
+  n = n.replace(/\b(jr|sr|ii|iii|iv|md|esq|trustee|trust|et al|etal|life estate|le)\b\.?/gi, '').replace(/\s+/g, ' ').trim();
+  if (n.includes(',')) {
+    const [last, rest] = n.split(',');
+    const parts = rest.trim().split(' ').filter(Boolean);
+    if (!last.trim() || !parts.length) return null;
+    return { lastName: cap(last.trim()), firstName: cap(parts[0] || ''), middleName: parts.slice(1).map(cap).join(' ') };
+  }
+  const parts = n.split(' ').filter(Boolean);
+  if (parts.length < 2) return null;
+  return { firstName: cap(parts[0]), lastName: cap(parts[parts.length - 1]), middleName: parts.slice(1, -1).map(cap).join(' ') };
+}
+
+// Defensive normalizers — Enformion field names vary across endpoints, so accept
+// the common shapes (objects/strings, several key spellings).
+function normPhones(arr: any): SkipPhone[] {
+  if (!Array.isArray(arr)) return [];
+  return arr.map((p: any) => {
+    if (!p) return null;
+    if (typeof p === 'string') return { number: p };
+    const number = p.phoneNumber || p.number || p.phone || '';
+    const type = p.phoneType || p.type || p.lineType || undefined;
+    return number ? { number: String(number), type: type ? String(type) : undefined } : null;
+  }).filter(Boolean).slice(0, 8) as SkipPhone[];
+}
+function normEmails(arr: any): string[] {
+  if (!Array.isArray(arr)) return [];
+  return arr.map((e: any) => (typeof e === 'string' ? e : (e?.emailAddress || e?.email || ''))).filter(Boolean).map(String).slice(0, 8);
+}
+function normAddresses(arr: any): string[] {
+  if (!Array.isArray(arr)) return [];
+  return arr.map((a: any) => {
+    if (!a) return '';
+    if (typeof a === 'string') return a;
+    if (a.fullAddress) return String(a.fullAddress);
+    const l1 = a.addressLine1 || a.street || '';
+    const l2 = a.addressLine2 || [a.city, a.state, a.zip || a.zipCode].filter(Boolean).join(' ');
+    return [l1, l2].filter(Boolean).join(', ');
+  }).filter(Boolean).slice(0, 6);
+}
+function normNames(arr: any): string[] {
+  if (!Array.isArray(arr)) return [];
+  return arr.map((r: any) => {
+    if (!r) return '';
+    if (typeof r === 'string') return r;
+    const nm = r.name || r.fullName;
+    if (nm && typeof nm === 'object') return [nm.firstName, nm.middleName, nm.lastName].filter(Boolean).join(' ');
+    if (typeof nm === 'string') return nm;
+    return [r.firstName, r.middleName, r.lastName].filter(Boolean).join(' ');
+  }).filter(Boolean).slice(0, 12);
+}
+function personToContact(person: any, isBusiness: boolean): SkipTraceContact | null {
+  if (!person) return null;
+  const phones = normPhones(person.phones || person.phoneNumbers || person.Phones);
+  const emails = normEmails(person.emails || person.emailAddresses || person.Emails);
+  const addresses = normAddresses(person.addresses || person.Addresses);
+  if (!phones.length && !emails.length && !addresses.length) return null;
+  const nm = person.name || person.fullName;
+  const fullName = typeof nm === 'string' ? nm : (nm ? [nm.firstName, nm.middleName, nm.lastName].filter(Boolean).join(' ') : null);
+  return {
+    fullName,
+    age: typeof person.age === 'number' ? person.age : (person.age ? Number(person.age) || null : null),
+    phones, emails, addresses,
+    relatives: normNames(person.relativesSummary || person.relatives || person.Relatives),
+    associates: normNames(person.associatesSummary || person.associates || person.Associates),
+    isBusiness,
+    source: 'enformion',
+  };
+}
+
+/** Enformion Contact Enrichment — top phones/emails/addresses for ONE person. */
+export async function enformionContactEnrich(name: string, address?: string): Promise<SkipTraceContact | null> {
+  const parsed = parsePersonName(name);
+  if (!parsed || !parsed.firstName || !parsed.lastName) return null;
+  const { addressLine1, addressLine2 } = splitAddress(address);
+  const body: any = { FirstName: parsed.firstName, LastName: parsed.lastName };
+  if (parsed.middleName) body.MiddleName = parsed.middleName;
+  if (addressLine1) body.Address = { addressLine1, addressLine2 };
+  const data = await enformionCall('/Contact/Enrich', 'DevAPIContactEnrich', body);
+  if (!data) return null;
+  const person = data.person || data.Person || (Array.isArray(data.persons) ? data.persons[0] : null) || data;
+  return personToContact(person, false);
+}
+
+/** Enformion Person Search — richer record (relatives, associates, all phones). */
+export async function enformionPersonSearch(name: string, address?: string): Promise<SkipTraceContact | null> {
+  const parsed = parsePersonName(name);
+  if (!parsed || !parsed.firstName || !parsed.lastName) return null;
+  const { addressLine1, addressLine2 } = splitAddress(address);
+  const body: any = { FirstName: parsed.firstName, LastName: parsed.lastName, Page: 1, ResultsPerPage: 1 };
+  if (parsed.middleName) body.MiddleName = parsed.middleName;
+  if (addressLine1 || addressLine2) body.Addresses = [{ addressLine1, addressLine2 }];
+  const data = await enformionCall('/PersonSearch', 'Person', body);
+  if (!data) return null;
+  const person = (Array.isArray(data.persons) && data.persons[0]) || (Array.isArray(data.Persons) && data.Persons[0]) || data.person || null;
+  return personToContact(person, false);
+}
+
+/** Enformion Business Search — business contact + linked principals. */
+export async function enformionBusinessSearch(name: string, address?: string): Promise<SkipTraceContact | null> {
+  if (!name.trim()) return null;
+  const { addressLine1, addressLine2 } = splitAddress(address);
+  const body: any = { Name: name.trim() };
+  if (addressLine1 || addressLine2) body.Address = { addressLine1, addressLine2 };
+  const data = await enformionCall('/BusinessV2Search', 'Business', body);
+  if (!data) return null;
+  const biz = (Array.isArray(data.businesses) && data.businesses[0]) || (Array.isArray(data.Businesses) && data.Businesses[0]) || data.business || data;
+  const c = personToContact(biz, true);
+  if (c && !c.fullName) c.fullName = biz?.name || biz?.businessName || name;
+  return c;
+}
+
+/** One-call skip trace from GIS owner data: picks Person vs. Business by the
+ *  owner name. For people it prefers Person Search (richer), falling back to
+ *  Contact Enrich. Returns null when Enformion isn't configured or finds nothing. */
+export async function skipTraceContact(ownerName: string, address?: string): Promise<SkipTraceContact | null> {
+  if (!enformionConfigured() || !ownerName.trim()) return null;
+  if (looksLikeBusiness(ownerName)) {
+    return await enformionBusinessSearch(ownerName, address).catch(() => null);
+  }
+  const viaSearch = await enformionPersonSearch(ownerName, address).catch(() => null);
+  if (viaSearch && (viaSearch.phones.length || viaSearch.emails.length)) return viaSearch;
+  return await enformionContactEnrich(ownerName, address).catch(() => null) || viaSearch;
+}
+
+/** Enrich several people (registered agent + officials) with phones/emails,
+ *  concurrency-limited. Returns a map keyed by the input name. */
+export async function enformionEnrichPeople(people: { name: string; address?: string }[]): Promise<Record<string, SkipTraceContact>> {
+  const out: Record<string, SkipTraceContact> = {};
+  if (!enformionConfigured()) return out;
+  const list = people.filter((p) => p.name && !looksLikeBusiness(p.name)).slice(0, 6);
+  let i = 0;
+  const worker = async () => {
+    while (i < list.length) {
+      const p = list[i++];
+      const c = await enformionContactEnrich(p.name, p.address).catch(() => null);
+      if (c && (c.phones.length || c.emails.length)) out[p.name] = c;
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(3, list.length) }, worker));
+  return out;
 }
 
 /**

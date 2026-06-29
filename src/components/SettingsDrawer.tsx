@@ -25,6 +25,9 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
   const [geminiKey, setGeminiKey] = useState('');
   const [brightDataKey, setBrightDataKey] = useState('');
   const [showBrightDataKey, setShowBrightDataKey] = useState(false);
+  const [enformionName, setEnformionName] = useState('');
+  const [enformionPassword, setEnformionPassword] = useState('');
+  const [showEnformionPassword, setShowEnformionPassword] = useState(false);
   const [realtyApiKey, setRealtyApiKey] = useState('');
   const [showRealtyKey, setShowRealtyKey] = useState(false);
   const [deepSeekKey, setDeepSeekKey] = useState('');
@@ -48,6 +51,8 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
       setGoogleMapsKey(activeUser.keys?.googleMaps || '');
       setGeminiKey(activeUser.keys?.gemini || '');
       setBrightDataKey(activeUser.keys?.brightData || '');
+      setEnformionName(activeUser.keys?.enformionApName || '');
+      setEnformionPassword(activeUser.keys?.enformionApPassword || '');
       setRealtyApiKey(activeUser.keys?.realtyApi || '');
       setDeepSeekKey(activeUser.keys?.deepSeek || '');
       setRentCastKey(activeUser.keys?.rentCast || '');
@@ -80,6 +85,8 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
       googleMaps: googleMapsKey.trim(),
       gemini: geminiKey.trim(),
       brightData: brightDataKey.trim(),
+      enformionApName: enformionName.trim(),
+      enformionApPassword: enformionPassword.trim(),
       realtyApi: realtyApiKey.trim(),
       deepSeek: deepSeekKey.trim(),
       rentCast: rentCastKey.trim()
@@ -244,6 +251,50 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
                 </button>
               </div>
               <p className="field-help">Powers the LLC Skip Trace's Secretary of State scraper — fetches the entity's public registration record (registered agent, officers, addresses) via Bright Data's Web Unlocker (zone <strong>web_unlocker1</strong>). Requires a Web Unlocker zone that solves anti-bot challenges. Get a token at brightdata.com.</p>
+            </div>
+
+            {/* Enformion Go — skip tracing (phones, emails, relatives) */}
+            <div className="settings-field-group">
+              <div className="field-label-row">
+                <label htmlFor="enformionName">Enformion AP Name (skip trace)</label>
+                <span className="badge optional">Optional</span>
+              </div>
+              <div className="field-input-container">
+                <Key className="input-icon" size={16} />
+                <input
+                  id="enformionName"
+                  type="text"
+                  placeholder="Access Profile name…"
+                  value={enformionName}
+                  onChange={(e) => setEnformionName(e.target.value)}
+                />
+              </div>
+              <p className="field-help">Enformion Go API access-profile NAME. Together with the password it powers Skip Trace — real phones, emails, addresses, relatives &amp; associates for the individuals and businesses behind GIS-owned properties. Get credentials at enformion.com.</p>
+            </div>
+
+            <div className="settings-field-group">
+              <div className="field-label-row">
+                <label htmlFor="enformionPassword">Enformion AP Password (skip trace)</label>
+                <span className="badge optional">Optional</span>
+              </div>
+              <div className="field-input-container">
+                <Key className="input-icon" size={16} />
+                <input
+                  id="enformionPassword"
+                  type={showEnformionPassword ? "text" : "password"}
+                  placeholder="Access Profile password…"
+                  value={enformionPassword}
+                  onChange={(e) => setEnformionPassword(e.target.value)}
+                />
+                <button
+                  type="button"
+                  className="field-toggle-btn"
+                  onClick={() => setShowEnformionPassword(!showEnformionPassword)}
+                >
+                  {showEnformionPassword ? <EyeOff size={16} /> : <Eye size={16} />}
+                </button>
+              </div>
+              <p className="field-help">Enformion Go API access-profile PASSWORD (paired with the AP Name above).</p>
             </div>
 
             {/* RealtyAPI Key (Realtor + Redfin + Zillow sold records) */}
