@@ -1803,7 +1803,7 @@ export async function enformionPersonSearch(name: string, address?: string): Pro
 // The galaxy-search-type for BusinessV2Search isn't documented; "Business" is
 // rejected as an unknown type (requestType "Base", HTTP 400). Try the likely
 // values and remember the first one that's accepted.
-const BUSINESS_SEARCH_TYPES = ['BusinessV2Search', 'BusinessSearch', 'DevAPIBusinessSearch', 'DevAPIBusinessV2Search'];
+const BUSINESS_SEARCH_TYPES = ['BusinessV2Search', 'BusinessSearch', 'Business', 'BusinessV2', 'DevAPIBusinessSearch', 'DevAPIBusinessV2Search', 'DevAPIBusiness', 'Company', 'CompanySearch'];
 let workingBusinessSearchType: string | null = null;
 
 /** Enformion Business Search — business contact + linked principals. */

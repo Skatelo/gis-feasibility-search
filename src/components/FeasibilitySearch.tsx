@@ -849,7 +849,10 @@ export const FeasibilitySearch: FC = () => {
       if (!c || (!c.phones.length && !c.emails.length)) {
         const detail = getLastEnformionDetail();
         const shape = getLastEnformionShape();
-        setOwnerSkipError(enformionDiagMessage() + (detail ? `\n\nEnformion: ${detail}` : '') + (shape ? `\n\nResponse fields: ${shape}` : ''));
+        const llcHint = looksLikeBusiness(name)
+          ? '\n\nThis owner is an LLC/business. Use the Skip Trace tab (Business mode) to find the members/registered agent behind it, then their personal phones & emails.'
+          : '';
+        setOwnerSkipError(enformionDiagMessage() + llcHint + (detail ? `\n\nEnformion: ${detail}` : '') + (shape ? `\n\nResponse fields: ${shape}` : ''));
       }
     } catch {
       setOwnerSkipError('Skip trace failed — please try again.');
