@@ -3456,17 +3456,38 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                           </div>
                         )}
                         <div className="clearing-row clearing-total">
-                          <span>Tree removal total</span>
+                          <span>Per-tree removal total</span>
                           <span className="clearing-amt">${landClearing.total.toLocaleString()}</span>
                         </div>
-                        <div className="clearing-row clearing-bulk">
-                          <span>Or bulk machine clearing ({landClearing.acres.toLocaleString()} ac, {landClearing.density}{landClearing.bulkRealTime ? ', live rate' : ''})</span>
-                          <span className="clearing-amt">${landClearing.bulkClearingCost.toLocaleString()}</span>
-                        </div>
                       </div>
+
+                      {/* Bulk machine-clearing methods (forestry mulching vs. traditional) */}
+                      {landClearing.clearingMethods.length > 0 && (
+                        <div className="clearing-methods">
+                          <div className="clearing-methods-head">Bulk machine clearing — cost by method ({landClearing.acres.toLocaleString()} ac / ~{landClearing.treeCount.toLocaleString()} trees)</div>
+                          {landClearing.clearingMethods.map((mth, i) => (
+                            <div key={i} className="clearing-method">
+                              <div className="clearing-method-top">
+                                <span className="clearing-method-name">{mth.method}</span>
+                                <span className="clearing-method-range">${mth.low.toLocaleString()} – ${mth.high.toLocaleString()}</span>
+                              </div>
+                              <div className="clearing-method-what">{mth.what}</div>
+                              {mth.note && <div className="clearing-method-note">{mth.note}</div>}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+
+                      {landClearing.clearingFactors.length > 0 && (
+                        <div className="clearing-factors">
+                          <div className="clearing-factors-head">What drives the price</div>
+                          <ul>{landClearing.clearingFactors.map((f, i) => <li key={i}>{f}</li>)}</ul>
+                        </div>
+                      )}
+
                       {landClearing.pricingSources.length > 0 && (
                         <div className="cost-sources">
-                          <span className="cost-sources-label">Tree-cost sources:</span>
+                          <span className="cost-sources-label">Pricing sources:</span>
                           {landClearing.pricingSources.map((s, i) => (
                             <a key={i} href={s} target="_blank" rel="noreferrer">
                               {(() => { try { return new URL(s).hostname.replace(/^www\./, ''); } catch { return 'source'; } })()}
@@ -3474,7 +3495,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                           ))}
                         </div>
                       )}
-                      <div className="cost-disclaimer">Trees counted from satellite by AI (estimate) × {landClearing.realTimePricing ? 'current local per-tree removal prices' : 'regional baseline per-tree prices'}. Per-tree pricing fits scattered/lot trees; for large forested tracts the bulk machine-clearing figure is usually closer. A ground assessment / arborist bid will confirm.</div>
+                      <div className="cost-disclaimer">Trees counted from satellite + street view by AI (estimate). Per-tree removal fits scattered/lot trees; the method ranges (forestry mulching vs. traditional excavator) are usually closer for clearing a whole site. {landClearing.realTimePricing ? 'Priced at current local rates' : 'Regional baseline rates'} — a ground assessment / contractor bid will confirm.</div>
                     </>
                   ) : null}
                 </div>

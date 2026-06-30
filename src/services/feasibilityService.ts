@@ -1,4 +1,4 @@
-import type { SiteFeasibilityData, SlopeProfile, CompProperty, FloodZoneInfo, WetlandsInfo, ConstructionCostEstimate, CostLineItem, MaterialTakeoff, MaterialTakeoffItem, LandClearingEstimate, TreeRemovalLine } from '../types/feasibility';
+import type { SiteFeasibilityData, SlopeProfile, CompProperty, FloodZoneInfo, WetlandsInfo, ConstructionCostEstimate, CostLineItem, MaterialTakeoff, MaterialTakeoffItem, LandClearingEstimate, TreeRemovalLine, ClearingMethod } from '../types/feasibility';
 import { fetchCountyZoningCode, hasCountyZoning, normalizeCountyKey } from '../data/ncZoning';
 import { getSupabase, isSupabaseConfigured } from './supabaseClient';
 
@@ -4453,7 +4453,6 @@ Use CURRENT LOCAL prices from credible sources; cite them; never invent a price 
 // kept for comparison on large forested tracts.
 // ===========================================================================
 
-const LAND_CLEARING_RATES = { light: 1500, medium: 3000, heavy: 5500 } as const; // $/acre bulk machine clearing
 // Fallback per-tree rates (Southeast US, used only if the live lookup fails).
 const TREE_RATE_FALLBACK = { small: 350, medium: 800, large: 1500, stumpGrind: 175 };
 
@@ -4519,18 +4518,30 @@ Return ONLY JSON: {"small":<int>,"medium":<int>,"large":<int>,"canopyCoverPct":<
   } catch { return null; }
 }
 
-interface TreeRates { small: number; medium: number; large: number; stumpGrind: number; bulkLight: number; bulkMedium: number; bulkHeavy: number; gradingPerAcre: number; sources: string[]; }
+interface TreeRates {
+  small: number; medium: number; large: number; stumpGrind: number;
+  mulchPerAcre: number; mulchDayRate: number;
+  clearingPerAcre: number; clearingDayRate: number;
+  haulOff: number;
+  sources: string[];
+}
 
-/** Grounded Google Search for CURRENT LOCAL per-tree removal rates AND per-acre
- *  bulk land-clearing + grading rates. */
+/** Grounded Google Search for CURRENT LOCAL per-tree removal rates AND bulk
+ *  clearing method rates (forestry mulching + traditional excavator clearing,
+ *  per-acre + day-rate minimums + haul-off). */
 async function fetchTreeRemovalRates(county: string, zip: string, geminiKey: string): Promise<TreeRates | null> {
   const locality = zip ? `ZIP ${zip} (${county} County, NC)` : `${county} County, NC`;
-  const prompt = `Find CURRENT LOCAL land-clearing prices near ${locality} (${new Date().getFullYear()}): the cost to remove ONE tree by size, stump grinding per stump, AND per-ACRE bulk land clearing by density plus rough grading per acre.
+  const prompt = `Find CURRENT LOCAL land-clearing prices near ${locality} (${new Date().getFullYear()}).
 Return ONLY a JSON object in a \`\`\`json code block:
 \`\`\`json
-{ "small": 0, "medium": 0, "large": 0, "stumpGrind": 0, "bulkLight": 0, "bulkMedium": 0, "bulkHeavy": 0, "gradingPerAcre": 0, "sources": ["https://..."] }
+{ "small": 0, "medium": 0, "large": 0, "stumpGrind": 0, "mulchPerAcre": 0, "mulchDayRate": 0, "clearingPerAcre": 0, "clearingDayRate": 0, "haulOff": 0, "sources": ["https://..."] }
 \`\`\`
-small/medium/large = remove one tree (<30ft / 30-60ft / 60-80+ft); stumpGrind = grind one stump; bulkLight/bulkMedium/bulkHeavy = per-ACRE machine clearing for light/medium/heavy vegetation; gradingPerAcre = rough site grading per acre. Use CURRENT LOCAL prices from credible tree-service / excavation / land-clearing sources; cite them; never invent a price (set unknown values to 0).`;
+- small/medium/large = remove ONE tree (<30ft / 30-60ft / 60-80+ft)
+- stumpGrind = grind one stump
+- mulchPerAcre = forestry MULCHING per acre; mulchDayRate = forestry mulcher day rate (1-day minimum)
+- clearingPerAcre = TRADITIONAL excavator land clearing per acre (trees pulled by roots, debris removed); clearingDayRate = excavator crew day rate
+- haulOff = typical debris haul-off / dump fee for a small lot
+Use CURRENT LOCAL prices from credible tree-service / land-clearing / excavation sources; cite them; never invent (set unknown values to 0).`;
   const text = await groundedGeminiText(geminiKey, prompt, 'You are a land-clearing / tree-service pricing assistant. Use Google Search for current local prices. Return only the JSON; cite sources; never invent prices.', 90000);
   if (!text) return null;
   const m = text.match(/```json\s*([\s\S]*?)\s*```/) || text.match(/\{[\s\S]*\}/);
@@ -4545,13 +4556,56 @@ small/medium/large = remove one tree (<30ft / 30-60ft / 60-80+ft); stumpGrind = 
       medium: medium || TREE_RATE_FALLBACK.medium,
       large: large || TREE_RATE_FALLBACK.large,
       stumpGrind: num(o.stumpGrind) || TREE_RATE_FALLBACK.stumpGrind,
-      bulkLight: num(o.bulkLight),
-      bulkMedium: num(o.bulkMedium),
-      bulkHeavy: num(o.bulkHeavy),
-      gradingPerAcre: num(o.gradingPerAcre),
+      mulchPerAcre: num(o.mulchPerAcre),
+      mulchDayRate: num(o.mulchDayRate),
+      clearingPerAcre: num(o.clearingPerAcre),
+      clearingDayRate: num(o.clearingDayRate),
+      haulOff: num(o.haulOff),
       sources: Array.isArray(o.sources) ? o.sources.map((s: any) => String(s)).filter((s: string) => /^https?:\/\//.test(s)).slice(0, 6) : [],
     };
   } catch { return null; }
+}
+
+// Fallback method rates (Southeast US) when the live lookup omits them.
+const CLEARING_FALLBACK = { mulchPerAcre: 2200, mulchDayRate: 2500, clearingPerAcre: 4500, clearingDayRate: 4000, haulOff: 600 };
+
+/** Build the two bulk-clearing method options (forestry mulching vs. traditional
+ *  excavator) with cost RANGES, applying day-rate minimums on small lots. */
+function buildClearingMethods(acres: number, treeCount: number, largeCount: number, r: TreeRates): ClearingMethod[] {
+  const mulchPerAcre = r.mulchPerAcre || CLEARING_FALLBACK.mulchPerAcre;
+  const mulchDay = r.mulchDayRate || CLEARING_FALLBACK.mulchDayRate;
+  const clearPerAcre = r.clearingPerAcre || CLEARING_FALLBACK.clearingPerAcre;
+  const clearDay = r.clearingDayRate || CLEARING_FALLBACK.clearingDayRate;
+  const haul = r.haulOff || CLEARING_FALLBACK.haulOff;
+
+  // Forestry mulching: per-acre cost, floored by the 1–2 day machine minimum.
+  const mulchAcreCost = acres * mulchPerAcre;
+  const mulchLow = Math.round(Math.max(mulchAcreCost, mulchDay));
+  const mulchHigh = Math.round(Math.max(mulchAcreCost * 1.6, mulchDay * 1.6));
+  // Traditional: higher per-acre + crew day-rate floor; haul-off pushes the top.
+  const clearAcreCost = acres * clearPerAcre;
+  const clearLow = Math.round(Math.max(clearAcreCost, clearDay));
+  const clearHigh = Math.round(Math.max(clearAcreCost * 1.6, clearDay * 1.75) + haul);
+
+  const heavyHardwoods = largeCount >= Math.max(5, treeCount * 0.3);
+  return [
+    {
+      method: 'Forestry Mulching',
+      what: 'A drum/disc mulcher chews underbrush + small/medium trees to ground level, leaving a mulch layer. Stumps are left flush with the dirt.',
+      low: mulchLow,
+      high: mulchHigh,
+      note: heavyHardwoods
+        ? 'Best for brush + small/medium trees — the large hardwoods here may need an excavator instead. Stumps left in ground.'
+        : 'Best for brush + small/medium trees. Stumps left flush (add grinding for a slab/utilities).',
+    },
+    {
+      method: 'Traditional Land Clearing',
+      what: 'An excavator pulls the trees out by the roots; debris is stacked, burned, or hauled away, leaving bare dirt — ready for a foundation.',
+      low: clearLow,
+      high: clearHigh,
+      note: 'Best for building foundations — includes root extraction; haul-off/dump fees raise the top of the range.',
+    },
+  ];
 }
 
 /**
@@ -4583,7 +4637,7 @@ export async function fetchLandClearingEstimate(reportData: SiteFeasibilityData)
   ]);
   if (!vision) return null;
 
-  const r = rates || { ...TREE_RATE_FALLBACK, bulkLight: 0, bulkMedium: 0, bulkHeavy: 0, gradingPerAcre: 0, sources: [] as string[] };
+  const r: TreeRates = rates || { ...TREE_RATE_FALLBACK, mulchPerAcre: 0, mulchDayRate: 0, clearingPerAcre: 0, clearingDayRate: 0, haulOff: 0, sources: [] as string[] };
   const sizes = ['small', 'medium', 'large'] as const;
   const trees: TreeRemovalLine[] = sizes
     .map((size) => ({ size, count: vision[size], unitCost: r[size], cost: Math.round(vision[size] * r[size]) }))
@@ -4592,13 +4646,17 @@ export async function fetchLandClearingEstimate(reportData: SiteFeasibilityData)
   const treeRemovalCost = trees.reduce((s, t) => s + t.cost, 0);
   const stumpGrindCost = Math.round(treeCount * r.stumpGrind);
 
-  // Per-acre bulk machine clearing — prefer the LIVE local per-acre rate by
-  // density; fall back to the regional baseline. Add live (or baseline) grading.
-  const liveBulk = { light: r.bulkLight, medium: r.bulkMedium, heavy: r.bulkHeavy }[vision.density];
-  const bulkRealTime = !!liveBulk;
-  const bulkRate = liveBulk || LAND_CLEARING_RATES[vision.density];
-  const gradingPerAcre = r.gradingPerAcre || 2500;
-  const bulkClearingCost = Math.round(acres * bulkRate + acres * gradingPerAcre);
+  // Bulk machine-clearing METHODS (forestry mulching vs. traditional excavator),
+  // each with a real-time cost range; plus the key cost-driving factors.
+  const clearingMethods = buildClearingMethods(acres, treeCount, vision.large, r);
+  const haul = r.haulOff || CLEARING_FALLBACK.haulOff;
+  const clearingFactors = [
+    vision.large >= Math.max(5, treeCount * 0.3)
+      ? `Tree diameter: ~${vision.large} large/mature trees (>12 in) — too big for a mulcher, so an excavator + chainsaw crew is needed, pushing cost toward the high end.`
+      : `Tree diameter: mostly small/medium trees — a forestry mulcher can clear these quickly (often a 1-day job).`,
+    `Stump management: mulching leaves the root balls in the ground. For a slab/utilities, add stump grinding (~$${r.stumpGrind.toLocaleString()}/stump × ${treeCount.toLocaleString()} ≈ $${stumpGrindCost.toLocaleString()}).`,
+    `Haul-off: leaving mulch on-site is cheapest; hauling the debris off adds roughly $${haul.toLocaleString()}+ in dump fees & fuel.`,
+  ];
 
   return {
     acres: Math.round(acres * 100) / 100,
@@ -4610,8 +4668,8 @@ export async function fetchLandClearingEstimate(reportData: SiteFeasibilityData)
     stumpGrindUnit: r.stumpGrind,
     stumpGrindCost,
     total: treeRemovalCost + stumpGrindCost,
-    bulkClearingCost,
-    bulkRealTime,
+    clearingMethods,
+    clearingFactors,
     satelliteUrl,
     streetViewUrl: streetViewUrl || undefined,
     locality,

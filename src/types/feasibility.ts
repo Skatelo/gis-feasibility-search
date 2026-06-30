@@ -117,6 +117,16 @@ export interface TreeRemovalLine {
   cost: number;        // count × unitCost
 }
 
+/** A bulk site-clearing method (e.g. forestry mulching vs. traditional excavator
+ *  clearing) with a real-time local cost RANGE for this parcel. */
+export interface ClearingMethod {
+  method: string;      // "Forestry Mulching" | "Traditional Land Clearing"
+  what: string;        // what happens
+  low: number;         // range low ($)
+  high: number;        // range high ($)
+  note?: string;       // e.g. "stumps left flush" / "includes root extraction + haul"
+}
+
 /** Land-clearing estimate by TREE COUNT × current local per-tree removal cost
  *  (AI counts trees from satellite; rates are real-time/local). A per-acre bulk
  *  figure is kept for comparison on large forested tracts. */
@@ -130,8 +140,10 @@ export interface LandClearingEstimate {
   stumpGrindUnit: number;          // $/stump
   stumpGrindCost: number;          // treeCount × stumpGrindUnit
   total: number;                   // treeRemovalCost + stumpGrindCost
-  bulkClearingCost: number;        // per-acre machine clearing (comparison)
-  bulkRealTime: boolean;           // bulk rate from live local pricing vs baseline
+  /** Bulk machine-clearing METHODS (forestry mulching vs. traditional) with
+   *  real-time cost ranges for this parcel. */
+  clearingMethods: ClearingMethod[];
+  clearingFactors: string[];       // the cost-driving factors (diameter, stumps, haul-off)
   satelliteUrl: string;            // top-down image used for the count
   streetViewUrl?: string;          // ground-level street view used for tree size
   locality: string;
