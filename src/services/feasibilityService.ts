@@ -1800,32 +1800,82 @@ export async function enformionPersonSearch(name: string, address?: string): Pro
   return c;
 }
 
-// The galaxy-search-type for BusinessV2Search isn't documented; "Business" is
-// rejected as an unknown type (requestType "Base", HTTP 400). Try the likely
-// values and remember the first one that's accepted.
-const BUSINESS_SEARCH_TYPES = ['BusinessV2Search', 'BusinessSearch', 'Business', 'BusinessV2', 'DevAPIBusinessSearch', 'DevAPIBusinessV2Search', 'DevAPIBusiness', 'Company', 'CompanySearch'];
-let workingBusinessSearchType: string | null = null;
+const normBiz = (s: string) => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
 
-/** Enformion Business Search — business contact + linked principals. */
+/** Picks the businessV2 record whose corp/business name best matches the query
+ *  (exact → contains → first), and pulls its officers (members / registered
+ *  agent) with name + address. */
+function parseBusinessV2(data: any, queryName: string): { record: any; officers: { first: string; last: string; raw: string; title: string; address?: string }[] } | null {
+  const records = data?.businessV2Records;
+  if (!Array.isArray(records) || !records.length) return null;
+  const q = normBiz(queryName);
+  const nameOf = (r: any) => [...(r.usCorpFilings || []), ...(r.newBusinessFilings || [])].map((f: any) => f.name || f.company || '').find(Boolean) || '';
+  let record = records.find((r: any) => normBiz(nameOf(r)) === q)
+    || records.find((r: any) => q && (normBiz(nameOf(r)).includes(q) || q.includes(normBiz(nameOf(r)))))
+    || records[0];
+  const officers: { first: string; last: string; raw: string; title: string; address?: string }[] = [];
+  const seen = new Set<string>();
+  for (const f of [...(record.usCorpFilings || []), ...(record.newBusinessFilings || [])]) {
+    for (const o of [...(f.officers || []), ...(f.contacts || [])]) {
+      const nm = o.name || {};
+      const first = String(nm.nameFirst || nm.firstName || '').trim();
+      const last = String(nm.nameLast || nm.lastName || '').trim();
+      const raw = String(nm.nameRaw || nm.fullName || [first, last].filter(Boolean).join(' ')).trim();
+      if (!raw) continue;
+      const key = raw.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const a = o.address;
+      const address = a ? (a.fullAddress || [a.addressLine1, a.addressLine2].filter(Boolean).join(', ')) : undefined;
+      officers.push({ first, last, raw, title: String(o.title || o.officerTitleDesc || '').trim(), address });
+    }
+  }
+  return { record, officers };
+}
+
+/** Enformion Business Search (BusinessV2) — finds the entity, its officers
+ *  (members / registered agent), and enriches the best officer for phones/emails. */
 export async function enformionBusinessSearch(name: string, address?: string): Promise<SkipTraceContact | null> {
   if (!name.trim()) return null;
-  const { addressLine1, addressLine2 } = splitAddress(address);
-  const body: any = { Name: name.trim() };
-  if (addressLine1 || addressLine2) body.Address = { addressLine1, addressLine2 };
-  let data: any = null;
-  const candidates = workingBusinessSearchType ? [workingBusinessSearchType] : BUSINESS_SEARCH_TYPES;
-  for (const st of candidates) {
-    // enformionCall returns null on a 400 (unrecognized search-type); a 200 means
-    // the search-type was accepted, so the first non-null result wins.
-    data = await enformionCall('/BusinessV2Search', st, body);
-    if (data) { workingBusinessSearchType = st; break; }
-  }
+  // BusinessV2 contract: BusinessName + top-level AddressLine2 (state/city,state,zip).
+  const { addressLine2 } = splitAddress(address);
+  const stateMatch = String(address || '').match(/\b([A-Z]{2})\b(?:\s+\d{5})?\s*$/);
+  const body: any = { BusinessName: name.trim(), Page: 1, ResultsPerPage: 10 };
+  body.AddressLine2 = (stateMatch && stateMatch[1]) || addressLine2 || 'NC';
+  const data = await enformionCall('/BusinessV2Search', 'BusinessV2', body);
   if (!data) return null;
-  const biz = (Array.isArray(data.businesses) && data.businesses[0]) || (Array.isArray(data.Businesses) && data.Businesses[0]) || data.business || data;
-  const c = personToContact(biz, true);
-  if (c && !c.fullName) c.fullName = biz?.name || biz?.businessName || name;
-  if (!c) console.warn('Enformion BusinessV2Search: no contacts parsed. Response shape:', JSON.stringify(describeShape(data)));
-  return c;
+  const parsed = parseBusinessV2(data, name);
+  if (!parsed) { console.warn('Enformion BusinessV2: no records. Shape:', JSON.stringify(describeShape(data))); return null; }
+
+  // Business-level phones/emails from the matched record.
+  const deep = deepCollectContacts(parsed.record);
+  let phones = deep.phones;
+  let emails = deep.emails;
+  const officers = parsed.officers;
+
+  // Enrich the best officers (registered agent / members) for a real personal
+  // phone/email of the human behind the LLC. Try the top 2 — Enformion's officer
+  // first/last is sometimes flipped, so a couple of tries gets a clean hit.
+  if (!phones.length) {
+    const rank = (o: { title: string }) => (/REGISTERED AGENT/i.test(o.title) ? 3 : 0) + (/MEMBER|MANAGER|OWNER|PRESIDENT/i.test(o.title) ? 1 : 0);
+    const ranked = officers.filter((o) => o.first && o.last).sort((a, b) => rank(b) - rank(a));
+    for (const o of ranked.slice(0, 2)) {
+      const oc = await enformionContactEnrich(`${o.first} ${o.last}`, o.address).catch(() => null);
+      if (oc && (oc.phones.length || oc.emails.length)) { phones = oc.phones; if (!emails.length) emails = oc.emails; break; }
+    }
+  }
+
+  if (!phones.length && !emails.length && !officers.length) return null;
+  return {
+    fullName: name,
+    age: null,
+    phones,
+    emails,
+    addresses: [],
+    associates: officers.map((o) => `${o.raw}${o.title ? ` — ${o.title}` : ''}`).slice(0, 10),
+    isBusiness: true,
+    source: 'enformion',
+  };
 }
 
 /** One-call skip trace from GIS owner data: picks Person vs. Business by the

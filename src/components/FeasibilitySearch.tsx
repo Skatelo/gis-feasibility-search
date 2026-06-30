@@ -846,7 +846,8 @@ export const FeasibilitySearch: FC = () => {
         if (!ok(c) && addr) c = await enformionPersonSearch(primary);
       }
       setOwnerSkip(c);
-      if (!c || (!c.phones.length && !c.emails.length)) {
+      const gotSomething = !!(c && (c.phones.length || c.emails.length || (c.associates && c.associates.length)));
+      if (!gotSomething) {
         const detail = getLastEnformionDetail();
         const shape = getLastEnformionShape();
         const llcHint = looksLikeBusiness(name)
@@ -2606,7 +2607,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                       {ownerSkipLoading ? <Loader2 size={14} className="spinner" /> : <Fingerprint size={14} />}
                       {ownerSkipLoading ? 'Skip tracing…' : 'Skip Trace Owner'}
                     </button>
-                    {ownerSkip && (ownerSkip.phones.length > 0 || ownerSkip.emails.length > 0) && (
+                    {ownerSkip && (ownerSkip.phones.length > 0 || ownerSkip.emails.length > 0 || (ownerSkip.associates && ownerSkip.associates.length > 0) || (ownerSkip.relatives && ownerSkip.relatives.length > 0)) && (
                       <div className="owner-skip-result">
                         {ownerSkip.phones.length > 0 && (
                           <div className="owner-skip-row"><Phone size={13} />
@@ -2622,6 +2623,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                             ))}
                           </div>
                         )}
+                        {ownerSkip.associates && ownerSkip.associates.length > 0 && <div className="owner-skip-sub">{ownerSkip.isBusiness ? 'Members / officers' : 'Associates'}: {ownerSkip.associates.slice(0, 8).join('; ')}</div>}
                         {ownerSkip.relatives && ownerSkip.relatives.length > 0 && <div className="owner-skip-sub">Relatives: {ownerSkip.relatives.slice(0, 5).join(', ')}</div>}
                       </div>
                     )}
