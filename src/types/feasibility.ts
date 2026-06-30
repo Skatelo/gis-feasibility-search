@@ -131,7 +131,9 @@ export interface LandClearingEstimate {
   stumpGrindCost: number;          // treeCount × stumpGrindUnit
   total: number;                   // treeRemovalCost + stumpGrindCost
   bulkClearingCost: number;        // per-acre machine clearing (comparison)
+  bulkRealTime: boolean;           // bulk rate from live local pricing vs baseline
   satelliteUrl: string;            // top-down image used for the count
+  streetViewUrl?: string;          // ground-level street view used for tree size
   locality: string;
   pricingSources: string[];        // real-time pricing sources
   realTimePricing: boolean;        // true = grounded local rates; false = fallback

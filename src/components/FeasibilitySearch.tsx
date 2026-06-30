@@ -3423,9 +3423,16 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                   ) : landClearing ? (
                     <>
                       <div className="clearing-hero">
-                        <a href={`https://www.google.com/maps/@${data.coordinates.lat},${data.coordinates.lng},18z/data=!3m1!1e3`} target="_blank" rel="noreferrer" title="Open in Google Maps satellite">
-                          <img className="clearing-sat" src={landClearing.satelliteUrl} alt="Parcel satellite view" loading="lazy" />
-                        </a>
+                        <div className="clearing-imgs">
+                          <a href={`https://www.google.com/maps/@${data.coordinates.lat},${data.coordinates.lng},18z/data=!3m1!1e3`} target="_blank" rel="noreferrer" title="Open in Google Maps satellite">
+                            <img className="clearing-sat" src={landClearing.satelliteUrl} alt="Parcel satellite view" loading="lazy" />
+                          </a>
+                          {landClearing.streetViewUrl && (
+                            <a href={`https://www.google.com/maps?layer=c&cbll=${data.coordinates.lat},${data.coordinates.lng}`} target="_blank" rel="noreferrer" title="Open Street View">
+                              <img className="clearing-sat" src={landClearing.streetViewUrl} alt="Street view" loading="lazy" />
+                            </a>
+                          )}
+                        </div>
                         <div className="clearing-hero-meta">
                           <span className="clearing-treecount">~{landClearing.treeCount.toLocaleString()} trees to remove</span>
                           {landClearing.canopyCoverPct != null && <span className="clearing-canopy">~{landClearing.canopyCoverPct}% tree canopy · {landClearing.density}</span>}
@@ -3453,7 +3460,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                           <span className="clearing-amt">${landClearing.total.toLocaleString()}</span>
                         </div>
                         <div className="clearing-row clearing-bulk">
-                          <span>Or bulk machine clearing ({landClearing.acres.toLocaleString()} ac, {landClearing.density})</span>
+                          <span>Or bulk machine clearing ({landClearing.acres.toLocaleString()} ac, {landClearing.density}{landClearing.bulkRealTime ? ', live rate' : ''})</span>
                           <span className="clearing-amt">${landClearing.bulkClearingCost.toLocaleString()}</span>
                         </div>
                       </div>

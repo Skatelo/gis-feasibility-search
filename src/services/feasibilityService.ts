@@ -238,6 +238,35 @@ function formatOwnerName(raw?: string): string {
   return toTitleCase(name);
 }
 
+/** Shoelace polygon area (sum of signed rings, so holes subtract) for rings of
+ *  [x,y] coordinates in a planar unit. Returns the absolute area in that unit². */
+function ringAreaPlanar(rings: number[][][]): number {
+  if (!rings || !rings.length) return 0;
+  let total = 0;
+  for (const ring of rings) {
+    if (!ring || ring.length < 4) continue;
+    let a = 0;
+    for (let i = 0; i < ring.length - 1; i++) a += ring[i][0] * ring[i + 1][1] - ring[i + 1][0] * ring[i][1];
+    total += a / 2;
+  }
+  return Math.abs(total);
+}
+
+/** Parcel acreage computed from its polygon — State Plane feet preferred, else a
+ *  local-projection of the WGS84 ring. Reliable when a county's recorded gisacres
+ *  is missing/garbage (e.g. Cumberland stores a near-zero value). */
+function acresFromGeometry(statePlaneRings: number[][][], wgs84Rings: number[][][], lat: number): number {
+  const sp = ringAreaPlanar(statePlaneRings) / 43560; // State Plane is in feet
+  if (sp > 0.0005) return sp;
+  if (wgs84Rings && wgs84Rings.length) {
+    const ftPerDegLat = 364320; // ~ft per degree latitude
+    const ftPerDegLng = ftPerDegLat * Math.cos((lat * Math.PI) / 180);
+    const ringsFt = wgs84Rings.map((r) => r.map((p) => [p[0] * ftPerDegLng, p[1] * ftPerDegLat]));
+    return ringAreaPlanar(ringsFt) / 43560;
+  }
+  return 0;
+}
+
 /**
  * Minimum-area oriented bounding box of a polygon ring given in NC State Plane
  * feet. Returns the lot's true width (shorter side) and depth (longer side) by
@@ -838,7 +867,16 @@ export async function executeLandAnalysis(
     }
   }
 
-  const gisAcres = info.gisacres ? parseFloat(info.gisacres) : 0;
+  let gisAcres = info.gisacres ? parseFloat(info.gisacres) : 0;
+  // Some counties (e.g. Cumberland) store a missing/garbage gisacres value, so
+  // compute the area from the parcel polygon and use it when the recorded value
+  // is absent or implausibly off (> 5x difference) from the geometry.
+  if (!isSimulated) {
+    const computedAcres = acresFromGeometry(statePlaneRings, boundaryRings, lat);
+    if (computedAcres > 0.0005 && (!(gisAcres > 0.005) || gisAcres / computedAcres > 5 || computedAcres / gisAcres > 5)) {
+      gisAcres = computedAcres;
+    }
+  }
   const grossSf = Math.round(gisAcres * 43560);
 
   // Compute the lot's true width & depth from the actual parcel polygon using a
@@ -4431,26 +4469,41 @@ function landZoomForAcres(acres: number): number {
   return 13;
 }
 
-/** Gemini Vision: count trees by size + canopy/density from a top-down satellite crop. */
-async function countTreesFromSatellite(satelliteUrl: string, acres: number, geminiKey: string): Promise<{ small: number; medium: number; large: number; canopyPct: number | null; density: 'light' | 'medium' | 'heavy' } | null> {
-  const img = await imageUrlToInline(satelliteUrl);
-  if (!img) return null;
-  const prompt = `Analyze this top-down SATELLITE image of a ~${acres.toFixed(2)}-acre raw land parcel for TREE REMOVAL / site clearing.
-Estimate how many TREES would need to be removed to develop/build on it, broken down by canopy size:
+/** Returns a Street View Static URL for the point when imagery exists there. */
+async function streetViewUrlIfAvailable(lat: number, lng: number, key: string): Promise<string | null> {
+  try {
+    const meta = await fetchWithTimeout(`https://maps.googleapis.com/maps/api/streetview/metadata?location=${lat},${lng}&key=${key}`, 6000);
+    if (!meta.ok) return null;
+    const j = await meta.json();
+    if (j && j.status === 'OK') {
+      return `https://maps.googleapis.com/maps/api/streetview?size=640x640&location=${lat},${lng}&fov=80&pitch=8&key=${key}`;
+    }
+  } catch { /* ignore */ }
+  return null;
+}
+
+/** Gemini Vision: count trees by size + canopy/density from a top-down satellite
+ *  crop PLUS (when available) a ground-level street-view to gauge tree size. */
+async function countTreesFromSatellite(imageUrls: string[], acres: number, geminiKey: string): Promise<{ small: number; medium: number; large: number; canopyPct: number | null; density: 'light' | 'medium' | 'heavy' } | null> {
+  const imgs = (await Promise.all(imageUrls.map((u) => imageUrlToInline(u)))).filter((x): x is { mimeType: string; data: string } => !!x);
+  if (!imgs.length) return null;
+  const multi = imgs.length > 1;
+  const prompt = `You are estimating TREE REMOVAL for a ~${acres.toFixed(2)}-acre raw land parcel.
+${multi ? 'The FIRST image is a top-down SATELLITE view — use it to COUNT the trees and read canopy. The SECOND image is a ground-level STREET VIEW — use it to gauge tree SIZE/maturity and species.' : 'This is a top-down SATELLITE view of the parcel — count the trees and read canopy.'}
+Estimate how many TREES would need removal to develop/build on it, by canopy size:
 - "small": young/small trees, canopy under ~25 ft wide
 - "medium": mature trees, canopy ~25-45 ft
 - "large": big mature trees, canopy over ~45 ft
-For dense continuous forest, ESTIMATE the counts from typical tree spacing (~80-150 trees/acre) — do NOT return 0 when there is clearly tree canopy. Also give total tree-canopy cover % and overall density.
+For dense continuous forest, ESTIMATE counts from typical spacing (~80-150 trees/acre) — do NOT return 0 when there is clearly tree canopy. Also give total tree-canopy cover % and overall density.
 Return ONLY JSON: {"small":<int>,"medium":<int>,"large":<int>,"canopyCoverPct":<0-100>,"density":"light|medium|heavy"}`;
   try {
+    const parts: any[] = [{ text: prompt }];
+    imgs.forEach((img) => parts.push({ inline_data: { mime_type: img.mimeType, data: img.data } }));
     const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=${geminiKey}`;
-    const res = await fetchWithTimeout(url, 35000, {
+    const res = await fetchWithTimeout(url, 40000, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contents: [{ role: 'user', parts: [{ text: prompt }, { inline_data: { mime_type: img.mimeType, data: img.data } }] }],
-        generationConfig: { temperature: 0, responseMimeType: 'application/json', maxOutputTokens: 800 },
-      }),
+      body: JSON.stringify({ contents: [{ role: 'user', parts }], generationConfig: { temperature: 0, responseMimeType: 'application/json', maxOutputTokens: 800 } }),
     });
     if (!res.ok) return null;
     const data = await res.json();
@@ -4466,29 +4519,36 @@ Return ONLY JSON: {"small":<int>,"medium":<int>,"large":<int>,"canopyCoverPct":<
   } catch { return null; }
 }
 
-/** Grounded Google Search for CURRENT LOCAL per-tree removal + stump-grind rates. */
-async function fetchTreeRemovalRates(county: string, zip: string, geminiKey: string): Promise<{ small: number; medium: number; large: number; stumpGrind: number; sources: string[] } | null> {
+interface TreeRates { small: number; medium: number; large: number; stumpGrind: number; bulkLight: number; bulkMedium: number; bulkHeavy: number; gradingPerAcre: number; sources: string[]; }
+
+/** Grounded Google Search for CURRENT LOCAL per-tree removal rates AND per-acre
+ *  bulk land-clearing + grading rates. */
+async function fetchTreeRemovalRates(county: string, zip: string, geminiKey: string): Promise<TreeRates | null> {
   const locality = zip ? `ZIP ${zip} (${county} County, NC)` : `${county} County, NC`;
-  const prompt = `Find the CURRENT LOCAL tree-removal cost near ${locality} (${new Date().getFullYear()}). Give the typical price to remove ONE tree by size, plus stump grinding per stump.
+  const prompt = `Find CURRENT LOCAL land-clearing prices near ${locality} (${new Date().getFullYear()}): the cost to remove ONE tree by size, stump grinding per stump, AND per-ACRE bulk land clearing by density plus rough grading per acre.
 Return ONLY a JSON object in a \`\`\`json code block:
 \`\`\`json
-{ "small": 0, "medium": 0, "large": 0, "stumpGrind": 0, "sources": ["https://..."] }
+{ "small": 0, "medium": 0, "large": 0, "stumpGrind": 0, "bulkLight": 0, "bulkMedium": 0, "bulkHeavy": 0, "gradingPerAcre": 0, "sources": ["https://..."] }
 \`\`\`
-small = small tree under ~30 ft; medium = 30–60 ft; large = 60–80+ ft; stumpGrind = grind one stump. Use CURRENT LOCAL prices for that area from credible tree-service sources; cite them; never invent a price.`;
-  const text = await groundedGeminiText(geminiKey, prompt, 'You are a tree-service pricing assistant. Use Google Search for current local per-tree removal costs. Return only the JSON; cite sources; never invent prices.', 90000);
+small/medium/large = remove one tree (<30ft / 30-60ft / 60-80+ft); stumpGrind = grind one stump; bulkLight/bulkMedium/bulkHeavy = per-ACRE machine clearing for light/medium/heavy vegetation; gradingPerAcre = rough site grading per acre. Use CURRENT LOCAL prices from credible tree-service / excavation / land-clearing sources; cite them; never invent a price (set unknown values to 0).`;
+  const text = await groundedGeminiText(geminiKey, prompt, 'You are a land-clearing / tree-service pricing assistant. Use Google Search for current local prices. Return only the JSON; cite sources; never invent prices.', 90000);
   if (!text) return null;
   const m = text.match(/```json\s*([\s\S]*?)\s*```/) || text.match(/\{[\s\S]*\}/);
   if (!m) return null;
   try {
     const o = JSON.parse((m[1] || m[0]).replace(/,\s*([}\]])/g, '$1'));
     const num = (v: any) => { const n = Number(v); return Number.isFinite(n) && n > 0 ? Math.round(n) : 0; };
-    const small = num(o.small), medium = num(o.medium), large = num(o.large), stumpGrind = num(o.stumpGrind);
+    const small = num(o.small), medium = num(o.medium), large = num(o.large);
     if (!small && !medium && !large) return null;
     return {
       small: small || TREE_RATE_FALLBACK.small,
       medium: medium || TREE_RATE_FALLBACK.medium,
       large: large || TREE_RATE_FALLBACK.large,
-      stumpGrind: stumpGrind || TREE_RATE_FALLBACK.stumpGrind,
+      stumpGrind: num(o.stumpGrind) || TREE_RATE_FALLBACK.stumpGrind,
+      bulkLight: num(o.bulkLight),
+      bulkMedium: num(o.bulkMedium),
+      bulkHeavy: num(o.bulkHeavy),
+      gradingPerAcre: num(o.gradingPerAcre),
       sources: Array.isArray(o.sources) ? o.sources.map((s: any) => String(s)).filter((s: string) => /^https?:\/\//.test(s)).slice(0, 6) : [],
     };
   } catch { return null; }
@@ -4513,13 +4573,17 @@ export async function fetchLandClearingEstimate(reportData: SiteFeasibilityData)
   const zip = (String(reportData.inputAddress || '').match(/\b(\d{5})(?:-\d{4})?\b/) || [])[1] || '';
   const locality = zip ? `ZIP ${zip} · ${reportData.countyName} County, NC` : `${reportData.countyName} County, NC`;
 
+  // Add a ground-level street view (when available) so the AI can judge tree size.
+  const streetViewUrl = await streetViewUrlIfAvailable(lat, lng, keys.googleMaps);
+  const imageUrls = streetViewUrl ? [satelliteUrl, streetViewUrl] : [satelliteUrl];
+
   const [vision, rates] = await Promise.all([
-    countTreesFromSatellite(satelliteUrl, acres, keys.gemini).catch(() => null),
+    countTreesFromSatellite(imageUrls, acres, keys.gemini).catch(() => null),
     fetchTreeRemovalRates(reportData.countyName, zip, keys.gemini).catch(() => null),
   ]);
   if (!vision) return null;
 
-  const r = rates || { ...TREE_RATE_FALLBACK, sources: [] as string[] };
+  const r = rates || { ...TREE_RATE_FALLBACK, bulkLight: 0, bulkMedium: 0, bulkHeavy: 0, gradingPerAcre: 0, sources: [] as string[] };
   const sizes = ['small', 'medium', 'large'] as const;
   const trees: TreeRemovalLine[] = sizes
     .map((size) => ({ size, count: vision[size], unitCost: r[size], cost: Math.round(vision[size] * r[size]) }))
@@ -4528,9 +4592,13 @@ export async function fetchLandClearingEstimate(reportData: SiteFeasibilityData)
   const treeRemovalCost = trees.reduce((s, t) => s + t.cost, 0);
   const stumpGrindCost = Math.round(treeCount * r.stumpGrind);
 
-  // Per-acre bulk machine clearing (cheaper for large forested tracts) — comparison.
-  const bulkRate = LAND_CLEARING_RATES[vision.density];
-  const bulkClearingCost = Math.round(acres * bulkRate + acres * 2500);
+  // Per-acre bulk machine clearing — prefer the LIVE local per-acre rate by
+  // density; fall back to the regional baseline. Add live (or baseline) grading.
+  const liveBulk = { light: r.bulkLight, medium: r.bulkMedium, heavy: r.bulkHeavy }[vision.density];
+  const bulkRealTime = !!liveBulk;
+  const bulkRate = liveBulk || LAND_CLEARING_RATES[vision.density];
+  const gradingPerAcre = r.gradingPerAcre || 2500;
+  const bulkClearingCost = Math.round(acres * bulkRate + acres * gradingPerAcre);
 
   return {
     acres: Math.round(acres * 100) / 100,
@@ -4543,7 +4611,9 @@ export async function fetchLandClearingEstimate(reportData: SiteFeasibilityData)
     stumpGrindCost,
     total: treeRemovalCost + stumpGrindCost,
     bulkClearingCost,
+    bulkRealTime,
     satelliteUrl,
+    streetViewUrl: streetViewUrl || undefined,
     locality,
     pricingSources: r.sources,
     realTimePricing: !!rates,

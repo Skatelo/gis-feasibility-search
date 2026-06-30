@@ -3799,3 +3799,7 @@ img, svg, video, canvas, table, pre { max-width: 100%; }
 .clearing-tree-size { color: var(--text-primary); font-weight: 600; text-transform: capitalize; }
 .clearing-bulk { border-bottom: none; font-size: 0.74rem; color: var(--text-muted); }
 .clearing-bulk .clearing-amt { color: var(--text-secondary); font-weight: 600; }
+
+/* Land clearing — satellite + street view thumbnails */
+.clearing-imgs { display: flex; flex-direction: column; gap: 6px; flex-shrink: 0; }
+.clearing-imgs .clearing-sat { width: 110px; height: 84px; }
