@@ -1,12 +1,12 @@
 import { useState, useEffect, useRef } from 'react';
 import type { FormEvent, KeyboardEvent, FC } from 'react';
 import { createRoot } from 'react-dom/client';
-import { executeLandAnalysis, chatWithGemini, getUserKeys, detectNcCounty, lookupParcelById, fetchConstructionCostEstimate, fetchMaterialTakeoff, fetchGoogleDistanceMatrixComps, getCompPrefs, getReportAutoGenerate, enformionConfigured, enformionContactEnrich, enformionPersonSearch, enformionBusinessSearch, looksLikeBusiness, enformionDiagMessage, getLastEnformionShape, getLastEnformionDetail } from '../services/feasibilityService';
+import { executeLandAnalysis, chatWithGemini, getUserKeys, detectNcCounty, lookupParcelById, fetchConstructionCostEstimate, fetchMaterialTakeoff, fetchLandClearingEstimate, fetchGoogleDistanceMatrixComps, getCompPrefs, getReportAutoGenerate, enformionConfigured, enformionContactEnrich, enformionPersonSearch, enformionBusinessSearch, looksLikeBusiness, enformionDiagMessage, getLastEnformionShape, getLastEnformionDetail } from '../services/feasibilityService';
 import type { SkipTraceContact } from '../services/feasibilityService';
 import type { ChatMessage } from '../services/feasibilityService';
 import { saveReport, getReportEtaMs, recordReportDuration } from '../services/reportStore';
 import { ReportsDrawer } from './ReportsDrawer';
-import type { SiteFeasibilityData, ConstructionCostEstimate, CostLineItem, MaterialTakeoff } from '../types/feasibility';
+import type { SiteFeasibilityData, ConstructionCostEstimate, CostLineItem, MaterialTakeoff, LandClearingEstimate } from '../types/feasibility';
 
 /** Group cost line items by category, preserving first-seen order. (Avoids the
  *  global Map — lucide-react's `Map` icon is imported in this file.) */
@@ -61,6 +61,7 @@ import {
   ImageOff,
   Landmark,
   Hammer,
+  Trees,
   X
 } from 'lucide-react';
 
@@ -675,6 +676,8 @@ export const FeasibilitySearch: FC = () => {
   const [costLoading, setCostLoading] = useState(false);
   const [costError, setCostError] = useState(false);
   const [materialTakeoff, setMaterialTakeoff] = useState<MaterialTakeoff | null>(null);
+  const [landClearing, setLandClearing] = useState<LandClearingEstimate | null>(null);
+  const [landClearingLoading, setLandClearingLoading] = useState(false);
   // Manual report mode: report awaits the "Generate AI Report" button
   const [reportPending, setReportPending] = useState(false);
   // Owner skip trace (Enformion) — phones/emails for the parcel owner
@@ -764,6 +767,14 @@ export const FeasibilitySearch: FC = () => {
     setCostError(false);
     setCostEstimate(null);
     setMaterialTakeoff(null);
+    // Land-clearing / site-prep estimate (rule-based + satellite vision) — fires
+    // alongside, shows in its own card on the left.
+    setLandClearing(null);
+    setLandClearingLoading(true);
+    fetchLandClearingEstimate(reportData)
+      .then((lc) => { if (seq === searchSeqRef.current && lc) setLandClearing(lc); })
+      .catch(() => {})
+      .finally(() => { if (seq === searchSeqRef.current) setLandClearingLoading(false); });
     let pending = 2;
     let anySuccess = false;
     const settle = (ok: boolean) => {
@@ -2177,6 +2188,8 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
     setCostLoading(false);
     setCostError(false);
     setMaterialTakeoff(null);
+    setLandClearing(null);
+    setLandClearingLoading(false);
     setOwnerSkip(null);
     setOwnerSkipError('');
     setOwnerSkipLoading(false);
@@ -3394,6 +3407,50 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                       <div className="cost-disclaimer">Whole-house material list — quantities from standard takeoff factors × the building size, priced at current local unit costs. This is MATERIALS only; labor, permits, builder fee &amp; contingency are in the full estimate above.</div>
                     </div>
                   )}
+                </div>
+              )}
+
+              {/* Land Clearing & Site Prep — rule-based pricing engine (regional
+                  NC $/acre rates × satellite-classified vegetation density). */}
+              {(landClearing || landClearingLoading) && (
+                <div className="card registry-card clearing-card">
+                  <h3 className="registry-card-header" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <Trees size={16} style={{ color: 'var(--primary)' }} />
+                    <span>Land Clearing &amp; Site Prep Estimate</span>
+                  </h3>
+                  {landClearingLoading && !landClearing ? (
+                    <div className="cost-loading"><Loader2 size={15} className="spinner" /><span>Reading tree cover from satellite imagery…</span></div>
+                  ) : landClearing ? (
+                    <>
+                      <div className="clearing-hero">
+                        <a href={`https://www.google.com/maps/@${data.coordinates.lat},${data.coordinates.lng},18z/data=!3m1!1e3`} target="_blank" rel="noreferrer" title="Open in Google Maps satellite">
+                          <img className="clearing-sat" src={landClearing.satelliteUrl} alt="Parcel satellite view" loading="lazy" />
+                        </a>
+                        <div className="clearing-hero-meta">
+                          <span className={`clearing-density clearing-${landClearing.density}`}>{landClearing.density} vegetation</span>
+                          {landClearing.canopyCoverPct != null && <span className="clearing-canopy">~{landClearing.canopyCoverPct}% tree canopy</span>}
+                          <span className="clearing-acres">{landClearing.acres.toLocaleString()} acres</span>
+                        </div>
+                      </div>
+                      <div className="clearing-rows">
+                        <div className="clearing-row">
+                          <span>Clearing — {landClearing.density} ({landClearing.acres.toLocaleString()} ac × ${landClearing.baseRatePerAcre.toLocaleString()}/ac{landClearing.mobilizationApplied ? ', small-lot min' : ''})</span>
+                          <span className="clearing-amt">${landClearing.clearingCost.toLocaleString()}</span>
+                        </div>
+                        {landClearing.stumpCost > 0 && (
+                          <div className="clearing-row">
+                            <span>Stump extraction &amp; rough grading ({landClearing.acres.toLocaleString()} ac × $2,500/ac)</span>
+                            <span className="clearing-amt">${landClearing.stumpCost.toLocaleString()}</span>
+                          </div>
+                        )}
+                        <div className="clearing-row clearing-total">
+                          <span>Estimated site-prep total</span>
+                          <span className="clearing-amt">${landClearing.total.toLocaleString()}</span>
+                        </div>
+                      </div>
+                      <div className="cost-disclaimer">Rule-based estimate: regional Southeast/NC baseline rates (light $1,500 · medium $3,000 · heavy $5,500 per acre) × parcel size, with vegetation density read from satellite by AI. A ground assessment / contractor bid will refine it.</div>
+                    </>
+                  ) : null}
                 </div>
               )}
 

@@ -1,4 +1,4 @@
-import type { SiteFeasibilityData, SlopeProfile, CompProperty, FloodZoneInfo, WetlandsInfo, ConstructionCostEstimate, CostLineItem, MaterialTakeoff, MaterialTakeoffItem } from '../types/feasibility';
+import type { SiteFeasibilityData, SlopeProfile, CompProperty, FloodZoneInfo, WetlandsInfo, ConstructionCostEstimate, CostLineItem, MaterialTakeoff, MaterialTakeoffItem, LandClearingEstimate } from '../types/feasibility';
 import { fetchCountyZoningCode, hasCountyZoning, normalizeCountyKey } from '../data/ncZoning';
 import { getSupabase, isSupabaseConfigured } from './supabaseClient';
 
@@ -4406,6 +4406,102 @@ Use CURRENT LOCAL prices from credible sources; cite them; never invent a price 
     console.warn("Material takeoff failed:", e);
     return null;
   }
+}
+
+// ===========================================================================
+// Land-clearing / site-prep pricing engine (rule-based). Regional NC baseline
+// $/acre rates × parcel size, with vegetation density classified by Gemini Vision
+// from a top-down satellite crop of the parcel.
+// ===========================================================================
+
+const LAND_CLEARING_RATES = { light: 1500, medium: 3000, heavy: 5500 } as const; // $/acre, Southeast US
+const STUMP_GRADING_PER_ACRE = 2500;   // root-ball extraction + rough grading
+const MOBILIZATION_MIN = 1200;          // small-lot subcontractor minimum
+
+/** Static-map zoom that frames a parcel of the given acreage roughly full-bleed. */
+function landZoomForAcres(acres: number): number {
+  if (acres <= 0.3) return 19;
+  if (acres <= 0.75) return 18;
+  if (acres <= 2) return 18;
+  if (acres <= 6) return 17;
+  if (acres <= 15) return 16;
+  if (acres <= 45) return 15;
+  if (acres <= 120) return 14;
+  return 13;
+}
+
+/** Gemini Vision: classify a parcel's vegetation density + canopy cover from a
+ *  top-down satellite crop. Returns null when vision is unavailable. */
+async function classifyLandDensity(satelliteUrl: string, geminiKey: string): Promise<{ density: 'light' | 'medium' | 'heavy'; canopyPct: number | null } | null> {
+  const img = await imageUrlToInline(satelliteUrl);
+  if (!img) return null;
+  const prompt = `Analyze this top-down SATELLITE image of a raw land parcel for LAND CLEARING. Estimate the percentage of TREE CANOPY COVER (0-100) and classify the vegetation density as exactly one of:
+- "light": mostly grass/underbrush, vines, small saplings, few trees
+- "medium": a mix of brush and mature trees
+- "heavy": dense, thick timber / continuous tree canopy
+Return ONLY JSON: {"canopyCoverPct": <number 0-100>, "density": "light|medium|heavy"}`;
+  try {
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=${geminiKey}`;
+    const res = await fetchWithTimeout(url, 30000, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [{ role: 'user', parts: [{ text: prompt }, { inline_data: { mime_type: img.mimeType, data: img.data } }] }],
+        generationConfig: { temperature: 0, responseMimeType: 'application/json', maxOutputTokens: 800 },
+      }),
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    const t = data.candidates?.[0]?.content?.parts?.map((p: any) => p.text).filter(Boolean).join('') || '';
+    const m = t.match(/```json\s*([\s\S]*?)\s*```/) || t.match(/\{[\s\S]*\}/);
+    if (!m) return null;
+    const obj = JSON.parse((m[1] || m[0]).replace(/,\s*([}\]])/g, '$1'));
+    const d = String(obj.density || '').toLowerCase();
+    const density = (d === 'light' || d === 'heavy') ? d : 'medium';
+    const c = Number(obj.canopyCoverPct);
+    return { density, canopyPct: Number.isFinite(c) ? Math.max(0, Math.min(100, Math.round(c))) : null };
+  } catch { return null; }
+}
+
+/**
+ * Rule-based land-clearing / site-prep estimate: classify the parcel's vegetation
+ * density from satellite imagery (Gemini Vision), then apply the regional NC
+ * baseline $/acre matrix × acreage, with a small-lot mobilization minimum and a
+ * stump-extraction + grading factor. Returns null when keys/coords/acres missing.
+ */
+export async function fetchLandClearingEstimate(reportData: SiteFeasibilityData, includeStumps = true): Promise<LandClearingEstimate | null> {
+  const keys = getUserKeys();
+  if (!keys.googleMaps || !keys.gemini) return null;
+  const acres = Number(reportData.gisAcres);
+  const lat = reportData.coordinates?.lat, lng = reportData.coordinates?.lng;
+  if (!(acres > 0) || typeof lat !== 'number' || typeof lng !== 'number') return null;
+
+  const zoom = landZoomForAcres(acres);
+  const satelliteUrl = `https://maps.googleapis.com/maps/api/staticmap?center=${lat},${lng}&zoom=${zoom}&size=600x600&scale=2&maptype=satellite&key=${keys.googleMaps}`;
+
+  const cls = await classifyLandDensity(satelliteUrl, keys.gemini).catch(() => null);
+  const density = cls?.density || 'medium';
+  const baseRatePerAcre = LAND_CLEARING_RATES[density];
+
+  // Pricing engine (mirrors the rule-based logic): clearing = acres × rate, with a
+  // subcontractor mobilization minimum on small lots; stumps/grading = acres × factor.
+  let clearingCost = acres * baseRatePerAcre;
+  let mobilizationApplied = false;
+  if (acres < 0.5 && clearingCost < MOBILIZATION_MIN) { clearingCost = MOBILIZATION_MIN; mobilizationApplied = true; }
+  const stumpCost = includeStumps ? acres * STUMP_GRADING_PER_ACRE : 0;
+
+  return {
+    acres: Math.round(acres * 100) / 100,
+    canopyCoverPct: cls?.canopyPct ?? null,
+    density,
+    baseRatePerAcre,
+    clearingCost: Math.round(clearingCost),
+    stumpCost: Math.round(stumpCost),
+    total: Math.round(clearingCost + stumpCost),
+    mobilizationApplied,
+    satelliteUrl,
+    generatedAt: Date.now(),
+  };
 }
 
 export interface ChatSource {

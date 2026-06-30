@@ -109,6 +109,22 @@ export interface MaterialTakeoff {
   generatedAt: number;
 }
 
+/** Rule-based land-clearing / site-prep cost estimate (regional NC baseline rates
+ *  × parcel size, with AI-classified vegetation density from satellite imagery). */
+export interface LandClearingEstimate {
+  acres: number;
+  /** AI-estimated tree-canopy cover (0–100), or null if vision was unavailable. */
+  canopyCoverPct: number | null;
+  density: 'light' | 'medium' | 'heavy';
+  baseRatePerAcre: number;     // $/acre for the classified density
+  clearingCost: number;        // acres × baseRate (with mobilization minimum)
+  stumpCost: number;           // acres × stump/grading factor
+  total: number;               // clearingCost + stumpCost
+  mobilizationApplied: boolean; // small-lot subcontractor minimum kicked in
+  satelliteUrl: string;        // top-down image used for the density read
+  generatedAt: number;
+}
+
 export interface FloodZoneInfo {
   /** FEMA flood zone code, e.g. "AE", "VE", "A", "X", or "UNKNOWN". */
   zone: string;
