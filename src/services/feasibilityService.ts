@@ -1857,35 +1857,57 @@ export async function enformionBusinessSearch(name: string, address?: string, ma
   const phones = deep.phones;
   const emails = deep.emails;
 
-  // Dedupe officers across filings (same person appears multiple times, often with
-  // first/last flipped) by a token-sorted key.
-  const tokKey = (o: { first: string; last: string; raw: string }) =>
-    `${o.first} ${o.last} ${o.raw}`.toLowerCase().replace(/[^a-z\s]/g, '').split(/\s+/).filter(Boolean).sort().join(' ');
-  const uniq = new Map<string, typeof parsed.officers[number]>();
-  for (const o of parsed.officers) { const k = tokKey(o); if (k && !uniq.has(k)) uniq.set(k, o); }
-  const rank = (o: { title: string }) => (/REGISTERED AGENT/i.test(o.title) ? 3 : 0) + (/MEMBER|MANAGER|OWNER|PRESIDENT/i.test(o.title) ? 1 : 0);
-  const ranked = [...uniq.values()].filter((o) => o.first && o.last).sort((a, b) => rank(b) - rank(a));
+  // Enformion's officer first/last are unreliable (often surname-first, e.g.
+  // "CATCHPOLE TASHA"). Detect the shared family SURNAME — the token appearing
+  // across multiple officers — to recover the correct first/last + display order.
+  const stop = /^(jr|sr|ii|iii|iv|the|llc|inc|co|company|trust|and)$/i;
+  const tokCount: Record<string, number> = {};
+  for (const o of parsed.officers) for (const t of o.raw.split(/\s+/)) { const k = t.toLowerCase().replace(/[^a-z]/g, ''); if (k.length > 1 && !stop.test(k)) tokCount[k] = (tokCount[k] || 0) + 1; }
+  const top = Object.entries(tokCount).sort((a, b) => b[1] - a[1])[0];
+  const surname = top && top[1] >= 2 ? top[0] : '';
+  const cap = (s: string) => s.toLowerCase().replace(/\b[a-z]/g, (m) => m.toUpperCase());
+  const nameParts = (o: { first: string; last: string; raw: string }): { first: string; last: string } => {
+    const toks = o.raw.split(/\s+/).filter((t) => t.replace(/[^a-z]/gi, '').length > 1 && !stop.test(t));
+    if (surname && toks.length >= 2) {
+      const li = toks.findIndex((t) => t.toLowerCase().replace(/[^a-z]/g, '') === surname);
+      if (li >= 0) return { first: toks.filter((_, idx) => idx !== li).join(' '), last: toks[li] };
+    }
+    if (o.first && o.last) return { first: o.first, last: o.last };
+    return { first: toks[0] || '', last: toks[toks.length - 1] || '' };
+  };
 
-  // Enrich EACH officer (the top few) for their personal phone/email. Enformion
-  // sometimes flips first/last, so try both orders and keep the one that hits.
+  // Dedupe officers by the recovered first|last, then rank (registered agent first).
+  const rank = (o: { title: string }) => (/REGISTERED AGENT/i.test(o.title) ? 3 : 0) + (/MEMBER|MANAGER|OWNER|PRESIDENT/i.test(o.title) ? 1 : 0);
+  const uniq = new Map<string, { first: string; last: string; o: typeof parsed.officers[number] }>();
+  for (const o of parsed.officers) {
+    const { first, last } = nameParts(o);
+    if (!first || !last) continue;
+    const k = `${first} ${last}`.toLowerCase();
+    if (!uniq.has(k)) uniq.set(k, { first, last, o });
+  }
+  const ranked = [...uniq.values()].sort((a, b) => rank(b.o) - rank(a.o));
+
+  // Enrich each officer (top few). Try Person Search (broad) with the recovered
+  // order + address, then name-only, then the reversed order name-only.
   const officers: OfficerContact[] = [];
-  for (const o of ranked.slice(0, maxOfficers)) {
-    const orders = o.first.toLowerCase() === o.last.toLowerCase() ? [[o.first, o.last]] : [[o.first, o.last], [o.last, o.first]];
+  for (const { first, last, o } of ranked.slice(0, maxOfficers)) {
+    const attempts: [string, string, string | undefined][] = [
+      [first, last, o.address], [first, last, undefined], [last, first, undefined],
+    ];
     let hit: SkipTraceContact | null = null;
-    for (const [f, l] of orders) {
-      hit = await enformionContactEnrich(`${f} ${l}`, o.address).catch(() => null);
+    for (const [f, l, addr] of attempts) {
+      hit = await enformionPersonSearch(`${f} ${l}`, addr).catch(() => null);
       if (hit && (hit.phones.length || hit.emails.length)) break;
       hit = null;
     }
     officers.push({
-      name: hit?.fullName || o.raw,
+      name: hit?.fullName || cap(`${first} ${last}`),
       title: o.title || undefined,
       phones: hit ? hit.phones.map((p) => p.number) : [],
       emails: hit ? hit.emails : [],
     });
   }
-  // Also surface any unenriched officers (names only) so the full list shows.
-  for (const o of ranked.slice(maxOfficers)) officers.push({ name: o.raw, title: o.title || undefined, phones: [], emails: [] });
+  for (const { first, last, o } of ranked.slice(maxOfficers)) officers.push({ name: cap(`${first} ${last}`), title: o.title || undefined, phones: [], emails: [] });
 
   if (!phones.length && !emails.length && !officers.length) return null;
   return {
