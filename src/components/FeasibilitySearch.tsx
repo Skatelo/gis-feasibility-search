@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import type { FormEvent, KeyboardEvent, FC } from 'react';
 import { createRoot } from 'react-dom/client';
-import { executeLandAnalysis, chatWithGemini, getUserKeys, detectNcCounty, lookupParcelById, fetchConstructionCostEstimate, fetchMaterialTakeoff, fetchGoogleDistanceMatrixComps, getCompPrefs, enformionConfigured, enformionContactEnrich, enformionPersonSearch, enformionBusinessSearch, looksLikeBusiness, enformionDiagMessage, getLastEnformionShape, getLastEnformionDetail } from '../services/feasibilityService';
+import { executeLandAnalysis, chatWithGemini, getUserKeys, detectNcCounty, lookupParcelById, fetchConstructionCostEstimate, fetchMaterialTakeoff, fetchGoogleDistanceMatrixComps, getCompPrefs, getReportAutoGenerate, enformionConfigured, enformionContactEnrich, enformionPersonSearch, enformionBusinessSearch, looksLikeBusiness, enformionDiagMessage, getLastEnformionShape, getLastEnformionDetail } from '../services/feasibilityService';
 import type { SkipTraceContact } from '../services/feasibilityService';
 import type { ChatMessage } from '../services/feasibilityService';
 import { saveReport, getReportEtaMs, recordReportDuration } from '../services/reportStore';
@@ -675,6 +675,8 @@ export const FeasibilitySearch: FC = () => {
   const [costLoading, setCostLoading] = useState(false);
   const [costError, setCostError] = useState(false);
   const [materialTakeoff, setMaterialTakeoff] = useState<MaterialTakeoff | null>(null);
+  // Manual report mode: report awaits the "Generate AI Report" button
+  const [reportPending, setReportPending] = useState(false);
   // Owner skip trace (Enformion) — phones/emails for the parcel owner
   const [ownerSkip, setOwnerSkip] = useState<SkipTraceContact | null>(null);
   const [ownerSkipLoading, setOwnerSkipLoading] = useState(false);
@@ -860,6 +862,14 @@ export const FeasibilitySearch: FC = () => {
     } finally {
       setOwnerSkipLoading(false);
     }
+  };
+
+  // Manual mode: kick off the report on the user's click, passing the cost
+  // estimate (if it's finished) so Section 20 stays linked to the card.
+  const startReportManually = () => {
+    if (!data) return;
+    setReportPending(false);
+    generateInitialChatReport(data, costEstimate || undefined);
   };
 
   const generateInitialChatReport = async (reportData: SiteFeasibilityData, costEstimate?: ConstructionCostEstimate) => {
@@ -2170,6 +2180,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
     setOwnerSkip(null);
     setOwnerSkipError('');
     setOwnerSkipLoading(false);
+    setReportPending(false);
     setCompRadius(compPrefs.radiusMiles);
     setCompTypeFilter(compPrefs.propertyType);
     setCompsShowAll(false);
@@ -2217,21 +2228,26 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
       // report's Development Cost Considerations section can be built FROM it
       // (consistent, linked figures).
       const estPromise = generateCostEstimates(result, seq);
-      // Show the report card as "generating" immediately so it isn't idle during
-      // the brief wait for the estimate below.
-      setChatLoading(true);
-      setChatHistory([]);
-      // Give the estimate a brief head start so the report can cite it; if it
-      // isn't ready quickly, generate the report anyway (it estimates on its own
-      // and the card still fills in).
-      const est = await Promise.race([
-        estPromise,
-        new Promise<ConstructionCostEstimate | null>((r) => setTimeout(() => r(null), 45000)),
-      ]);
-      if (seq !== searchSeqRef.current) return;
-      // All site data is in — generate the AI feasibility report (the countdown
-      // timer in the chat panel tracks this phase).
-      generateInitialChatReport(result, est || undefined);
+      // Manual mode: don't auto-run the report — show a "Generate AI Report" button.
+      if (!getReportAutoGenerate()) {
+        setReportPending(true);
+      } else {
+        // Show the report card as "generating" immediately so it isn't idle during
+        // the brief wait for the estimate below.
+        setChatLoading(true);
+        setChatHistory([]);
+        // Give the estimate a brief head start so the report can cite it; if it
+        // isn't ready quickly, generate the report anyway (it estimates on its own
+        // and the card still fills in).
+        const est = await Promise.race([
+          estPromise,
+          new Promise<ConstructionCostEstimate | null>((r) => setTimeout(() => r(null), 45000)),
+        ]);
+        if (seq !== searchSeqRef.current) return;
+        // All site data is in — generate the AI feasibility report (the countdown
+        // timer in the chat panel tracks this phase).
+        generateInitialChatReport(result, est || undefined);
+      }
     } catch (err: any) {
       if (seq !== searchSeqRef.current) return;
       console.error(err);
@@ -3387,7 +3403,14 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                   <FileText size={16} style={{ color: 'var(--primary)' }} />
                   <span>AI Feasibility Report</span>
                 </h3>
-                {chatLoading && chatHistory.length === 0 ? (
+                {reportPending ? (
+                  <div className="report-manual">
+                    <p className="report-manual-text">The full AI Feasibility Report (25 sections — zoning, rezoning, comps, valuation, risk &amp; more) is ready to generate.</p>
+                    <button type="button" className="report-generate-btn" onClick={startReportManually}>
+                      <FileText size={16} /> Generate AI Report
+                    </button>
+                  </div>
+                ) : chatLoading && chatHistory.length === 0 ? (
                   <div style={{ padding: '8px 0' }}>
                     <div className="gemini-wave-loader-wrapper">
                       <div className="gemini-wave-loader">

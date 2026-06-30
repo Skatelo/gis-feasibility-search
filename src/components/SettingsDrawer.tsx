@@ -1,8 +1,8 @@
 import { useState, useEffect } from 'react';
-import { X, Key, User, ShieldAlert, LogOut, CheckCircle, Eye, EyeOff, Info, Cloud, Ruler, Home } from 'lucide-react';
+import { X, Key, User, ShieldAlert, LogOut, CheckCircle, Eye, EyeOff, Info, Cloud, Ruler, Home, FileText } from 'lucide-react';
 import { persistUserKeys } from '../services/authService';
 import { isSupabaseConfigured } from '../services/supabaseClient';
-import { getCompPrefs, setCompPrefs } from '../services/feasibilityService';
+import { getCompPrefs, setCompPrefs, getReportAutoGenerate, setReportAutoGenerate } from '../services/feasibilityService';
 
 const COMP_TYPE_OPTIONS = [
   { value: 'all', label: 'All types' },
@@ -39,6 +39,7 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
   // Comp-search preferences (max radius + property type to show)
   const [compRadiusPref, setCompRadiusPref] = useState(5);
   const [compTypePref, setCompTypePref] = useState('all');
+  const [reportAuto, setReportAuto] = useState(true);
 
   // Initialize the form ONLY when the drawer opens — not on every activeUser
   // re-render. Supabase refreshes the session when you switch browser tabs,
@@ -56,6 +57,7 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
       const prefs = getCompPrefs();
       setCompRadiusPref(prefs.radiusMiles);
       setCompTypePref(prefs.propertyType);
+      setReportAuto(getReportAutoGenerate());
       setValidationError(null);
       setSaveSuccess(false);
     }
@@ -90,6 +92,7 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
 
     // Comp-search preferences persist locally (applied to the next search).
     setCompPrefs({ radiusMiles: compRadiusPref, propertyType: compTypePref });
+    setReportAutoGenerate(reportAuto);
 
     try {
       // Persists to the Supabase profile when signed in with a cloud account
@@ -389,6 +392,18 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
                 </select>
               </div>
               <p className="field-help">Which property types to show in Verified Market Comps. You can still change the radius &amp; type per-result on the comps card.</p>
+            </div>
+
+            {/* AI report generation: automatic vs manual */}
+            <div className="settings-field-group">
+              <div className="field-label-row">
+                <label><FileText size={14} style={{ verticalAlign: '-2px', marginRight: '5px' }} />AI report generation</label>
+              </div>
+              <div className="comp-pref-pills">
+                <button type="button" className={`comp-pref-pill${reportAuto ? ' active' : ''}`} onClick={() => setReportAuto(true)}>Automatic</button>
+                <button type="button" className={`comp-pref-pill${!reportAuto ? ' active' : ''}`} onClick={() => setReportAuto(false)}>Manual</button>
+              </div>
+              <p className="field-help">Automatic generates the AI Feasibility Report right after a search. Manual waits for you to click <strong>Generate AI Report</strong> — useful to skip the report (and its API cost) when you only need the parcel, comps, or cost data.</p>
             </div>
           </div>
         </div>

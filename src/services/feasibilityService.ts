@@ -51,6 +51,16 @@ export function setCompPrefs(prefs: CompPrefs): void {
   try { localStorage.setItem(COMP_PREFS_KEY, JSON.stringify(prefs)); } catch { /* ignore */ }
 }
 
+/** AI report generation mode: auto (default) generates the report right after the
+ *  search; manual waits for the user to click "Generate AI Report". */
+const REPORT_MODE_KEY = 'gis_report_mode';
+export function getReportAutoGenerate(): boolean {
+  try { return localStorage.getItem(REPORT_MODE_KEY) !== 'manual'; } catch { return true; }
+}
+export function setReportAutoGenerate(auto: boolean): void {
+  try { localStorage.setItem(REPORT_MODE_KEY, auto ? 'auto' : 'manual'); } catch { /* ignore */ }
+}
+
 
 
 const NC_GEOCODER = "https://services.nconemap.gov/secure/rest/services/AddressNC/AddressNC_geocoder/GeocodeServer/findAddressCandidates";
