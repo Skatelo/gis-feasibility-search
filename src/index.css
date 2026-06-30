@@ -3790,3 +3790,12 @@ img, svg, video, canvas, table, pre { max-width: 100%; }
 .clearing-amt { font-weight: 700; color: var(--text-primary); white-space: nowrap; font-variant-numeric: tabular-nums; }
 .clearing-total { border-bottom: none; border-top: 2px solid var(--bg-card-border); margin-top: 4px; padding-top: 8px; font-weight: 800; font-size: 0.9rem; color: var(--text-primary); }
 .clearing-total .clearing-amt { color: var(--success); font-size: 1rem; }
+
+/* Land clearing — tree-count breakdown */
+.clearing-treecount { font-weight: 800; font-size: 0.92rem; color: var(--primary); }
+.clearing-tree, .clearing-row-head { display: grid; grid-template-columns: 1fr auto auto; gap: 10px; }
+.clearing-tree > span:not(:first-child), .clearing-row-head > span:not(:first-child) { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; min-width: 54px; }
+.clearing-row-head { font-size: 0.66rem; text-transform: uppercase; letter-spacing: 0.03em; color: var(--text-muted); font-weight: 700; padding-bottom: 3px; }
+.clearing-tree-size { color: var(--text-primary); font-weight: 600; text-transform: capitalize; }
+.clearing-bulk { border-bottom: none; font-size: 0.74rem; color: var(--text-muted); }
+.clearing-bulk .clearing-amt { color: var(--text-secondary); font-weight: 600; }

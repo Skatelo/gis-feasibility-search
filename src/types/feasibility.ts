@@ -109,19 +109,32 @@ export interface MaterialTakeoff {
   generatedAt: number;
 }
 
-/** Rule-based land-clearing / site-prep cost estimate (regional NC baseline rates
- *  × parcel size, with AI-classified vegetation density from satellite imagery). */
+/** One tree-size tier in the removal estimate. */
+export interface TreeRemovalLine {
+  size: 'small' | 'medium' | 'large';
+  count: number;       // trees of this size (AI-estimated from satellite)
+  unitCost: number;    // current LOCAL $/tree to remove
+  cost: number;        // count × unitCost
+}
+
+/** Land-clearing estimate by TREE COUNT × current local per-tree removal cost
+ *  (AI counts trees from satellite; rates are real-time/local). A per-acre bulk
+ *  figure is kept for comparison on large forested tracts. */
 export interface LandClearingEstimate {
   acres: number;
-  /** AI-estimated tree-canopy cover (0–100), or null if vision was unavailable. */
-  canopyCoverPct: number | null;
+  canopyCoverPct: number | null;   // AI tree-canopy cover (0–100)
   density: 'light' | 'medium' | 'heavy';
-  baseRatePerAcre: number;     // $/acre for the classified density
-  clearingCost: number;        // acres × baseRate (with mobilization minimum)
-  stumpCost: number;           // acres × stump/grading factor
-  total: number;               // clearingCost + stumpCost
-  mobilizationApplied: boolean; // small-lot subcontractor minimum kicked in
-  satelliteUrl: string;        // top-down image used for the density read
+  treeCount: number;               // total trees to remove
+  trees: TreeRemovalLine[];        // by size
+  treeRemovalCost: number;         // Σ trees[].cost
+  stumpGrindUnit: number;          // $/stump
+  stumpGrindCost: number;          // treeCount × stumpGrindUnit
+  total: number;                   // treeRemovalCost + stumpGrindCost
+  bulkClearingCost: number;        // per-acre machine clearing (comparison)
+  satelliteUrl: string;            // top-down image used for the count
+  locality: string;
+  pricingSources: string[];        // real-time pricing sources
+  realTimePricing: boolean;        // true = grounded local rates; false = fallback
   generatedAt: number;
 }
 

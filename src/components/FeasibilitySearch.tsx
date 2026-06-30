@@ -3427,28 +3427,47 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                           <img className="clearing-sat" src={landClearing.satelliteUrl} alt="Parcel satellite view" loading="lazy" />
                         </a>
                         <div className="clearing-hero-meta">
-                          <span className={`clearing-density clearing-${landClearing.density}`}>{landClearing.density} vegetation</span>
-                          {landClearing.canopyCoverPct != null && <span className="clearing-canopy">~{landClearing.canopyCoverPct}% tree canopy</span>}
-                          <span className="clearing-acres">{landClearing.acres.toLocaleString()} acres</span>
+                          <span className="clearing-treecount">~{landClearing.treeCount.toLocaleString()} trees to remove</span>
+                          {landClearing.canopyCoverPct != null && <span className="clearing-canopy">~{landClearing.canopyCoverPct}% tree canopy · {landClearing.density}</span>}
+                          <span className="clearing-acres">{landClearing.acres.toLocaleString()} acres · {landClearing.realTimePricing ? 'live local rates' : 'baseline rates'}</span>
                         </div>
                       </div>
                       <div className="clearing-rows">
-                        <div className="clearing-row">
-                          <span>Clearing — {landClearing.density} ({landClearing.acres.toLocaleString()} ac × ${landClearing.baseRatePerAcre.toLocaleString()}/ac{landClearing.mobilizationApplied ? ', small-lot min' : ''})</span>
-                          <span className="clearing-amt">${landClearing.clearingCost.toLocaleString()}</span>
-                        </div>
-                        {landClearing.stumpCost > 0 && (
-                          <div className="clearing-row">
-                            <span>Stump extraction &amp; rough grading ({landClearing.acres.toLocaleString()} ac × $2,500/ac)</span>
-                            <span className="clearing-amt">${landClearing.stumpCost.toLocaleString()}</span>
+                        <div className="clearing-row clearing-row-head"><span>Trees</span><span>Each</span><span>Cost</span></div>
+                        {landClearing.trees.map((t, i) => (
+                          <div key={i} className="clearing-row clearing-tree">
+                            <span className="clearing-tree-size">{t.count.toLocaleString()} {t.size}</span>
+                            <span>${t.unitCost.toLocaleString()}</span>
+                            <span className="clearing-amt">${t.cost.toLocaleString()}</span>
+                          </div>
+                        ))}
+                        {landClearing.stumpGrindCost > 0 && (
+                          <div className="clearing-row clearing-tree">
+                            <span className="clearing-tree-size">{landClearing.treeCount.toLocaleString()} stump grind</span>
+                            <span>${landClearing.stumpGrindUnit.toLocaleString()}</span>
+                            <span className="clearing-amt">${landClearing.stumpGrindCost.toLocaleString()}</span>
                           </div>
                         )}
                         <div className="clearing-row clearing-total">
-                          <span>Estimated site-prep total</span>
+                          <span>Tree removal total</span>
                           <span className="clearing-amt">${landClearing.total.toLocaleString()}</span>
                         </div>
+                        <div className="clearing-row clearing-bulk">
+                          <span>Or bulk machine clearing ({landClearing.acres.toLocaleString()} ac, {landClearing.density})</span>
+                          <span className="clearing-amt">${landClearing.bulkClearingCost.toLocaleString()}</span>
+                        </div>
                       </div>
-                      <div className="cost-disclaimer">Rule-based estimate: regional Southeast/NC baseline rates (light $1,500 · medium $3,000 · heavy $5,500 per acre) × parcel size, with vegetation density read from satellite by AI. A ground assessment / contractor bid will refine it.</div>
+                      {landClearing.pricingSources.length > 0 && (
+                        <div className="cost-sources">
+                          <span className="cost-sources-label">Tree-cost sources:</span>
+                          {landClearing.pricingSources.map((s, i) => (
+                            <a key={i} href={s} target="_blank" rel="noreferrer">
+                              {(() => { try { return new URL(s).hostname.replace(/^www\./, ''); } catch { return 'source'; } })()}
+                            </a>
+                          ))}
+                        </div>
+                      )}
+                      <div className="cost-disclaimer">Trees counted from satellite by AI (estimate) × {landClearing.realTimePricing ? 'current local per-tree removal prices' : 'regional baseline per-tree prices'}. Per-tree pricing fits scattered/lot trees; for large forested tracts the bulk machine-clearing figure is usually closer. A ground assessment / arborist bid will confirm.</div>
                     </>
                   ) : null}
                 </div>

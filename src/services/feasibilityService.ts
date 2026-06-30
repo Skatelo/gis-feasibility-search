@@ -1,4 +1,4 @@
-import type { SiteFeasibilityData, SlopeProfile, CompProperty, FloodZoneInfo, WetlandsInfo, ConstructionCostEstimate, CostLineItem, MaterialTakeoff, MaterialTakeoffItem, LandClearingEstimate } from '../types/feasibility';
+import type { SiteFeasibilityData, SlopeProfile, CompProperty, FloodZoneInfo, WetlandsInfo, ConstructionCostEstimate, CostLineItem, MaterialTakeoff, MaterialTakeoffItem, LandClearingEstimate, TreeRemovalLine } from '../types/feasibility';
 import { fetchCountyZoningCode, hasCountyZoning, normalizeCountyKey } from '../data/ncZoning';
 import { getSupabase, isSupabaseConfigured } from './supabaseClient';
 
@@ -4409,14 +4409,15 @@ Use CURRENT LOCAL prices from credible sources; cite them; never invent a price 
 }
 
 // ===========================================================================
-// Land-clearing / site-prep pricing engine (rule-based). Regional NC baseline
-// $/acre rates × parcel size, with vegetation density classified by Gemini Vision
-// from a top-down satellite crop of the parcel.
+// Land-clearing estimate by TREE COUNT × real-time per-tree removal cost. Gemini
+// Vision counts the trees (by size) on a top-down satellite crop; current LOCAL
+// per-tree rates come from a grounded Google Search. A per-acre bulk figure is
+// kept for comparison on large forested tracts.
 // ===========================================================================
 
-const LAND_CLEARING_RATES = { light: 1500, medium: 3000, heavy: 5500 } as const; // $/acre, Southeast US
-const STUMP_GRADING_PER_ACRE = 2500;   // root-ball extraction + rough grading
-const MOBILIZATION_MIN = 1200;          // small-lot subcontractor minimum
+const LAND_CLEARING_RATES = { light: 1500, medium: 3000, heavy: 5500 } as const; // $/acre bulk machine clearing
+// Fallback per-tree rates (Southeast US, used only if the live lookup fails).
+const TREE_RATE_FALLBACK = { small: 350, medium: 800, large: 1500, stumpGrind: 175 };
 
 /** Static-map zoom that frames a parcel of the given acreage roughly full-bleed. */
 function landZoomForAcres(acres: number): number {
@@ -4430,19 +4431,20 @@ function landZoomForAcres(acres: number): number {
   return 13;
 }
 
-/** Gemini Vision: classify a parcel's vegetation density + canopy cover from a
- *  top-down satellite crop. Returns null when vision is unavailable. */
-async function classifyLandDensity(satelliteUrl: string, geminiKey: string): Promise<{ density: 'light' | 'medium' | 'heavy'; canopyPct: number | null } | null> {
+/** Gemini Vision: count trees by size + canopy/density from a top-down satellite crop. */
+async function countTreesFromSatellite(satelliteUrl: string, acres: number, geminiKey: string): Promise<{ small: number; medium: number; large: number; canopyPct: number | null; density: 'light' | 'medium' | 'heavy' } | null> {
   const img = await imageUrlToInline(satelliteUrl);
   if (!img) return null;
-  const prompt = `Analyze this top-down SATELLITE image of a raw land parcel for LAND CLEARING. Estimate the percentage of TREE CANOPY COVER (0-100) and classify the vegetation density as exactly one of:
-- "light": mostly grass/underbrush, vines, small saplings, few trees
-- "medium": a mix of brush and mature trees
-- "heavy": dense, thick timber / continuous tree canopy
-Return ONLY JSON: {"canopyCoverPct": <number 0-100>, "density": "light|medium|heavy"}`;
+  const prompt = `Analyze this top-down SATELLITE image of a ~${acres.toFixed(2)}-acre raw land parcel for TREE REMOVAL / site clearing.
+Estimate how many TREES would need to be removed to develop/build on it, broken down by canopy size:
+- "small": young/small trees, canopy under ~25 ft wide
+- "medium": mature trees, canopy ~25-45 ft
+- "large": big mature trees, canopy over ~45 ft
+For dense continuous forest, ESTIMATE the counts from typical tree spacing (~80-150 trees/acre) — do NOT return 0 when there is clearly tree canopy. Also give total tree-canopy cover % and overall density.
+Return ONLY JSON: {"small":<int>,"medium":<int>,"large":<int>,"canopyCoverPct":<0-100>,"density":"light|medium|heavy"}`;
   try {
     const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=${geminiKey}`;
-    const res = await fetchWithTimeout(url, 30000, {
+    const res = await fetchWithTimeout(url, 35000, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -4455,21 +4457,51 @@ Return ONLY JSON: {"canopyCoverPct": <number 0-100>, "density": "light|medium|he
     const t = data.candidates?.[0]?.content?.parts?.map((p: any) => p.text).filter(Boolean).join('') || '';
     const m = t.match(/```json\s*([\s\S]*?)\s*```/) || t.match(/\{[\s\S]*\}/);
     if (!m) return null;
-    const obj = JSON.parse((m[1] || m[0]).replace(/,\s*([}\]])/g, '$1'));
-    const d = String(obj.density || '').toLowerCase();
+    const o = JSON.parse((m[1] || m[0]).replace(/,\s*([}\]])/g, '$1'));
+    const n = (v: any) => Math.max(0, Math.round(Number(v) || 0));
+    const d = String(o.density || '').toLowerCase();
     const density = (d === 'light' || d === 'heavy') ? d : 'medium';
-    const c = Number(obj.canopyCoverPct);
-    return { density, canopyPct: Number.isFinite(c) ? Math.max(0, Math.min(100, Math.round(c))) : null };
+    const c = Number(o.canopyCoverPct);
+    return { small: n(o.small), medium: n(o.medium), large: n(o.large), canopyPct: Number.isFinite(c) ? Math.max(0, Math.min(100, Math.round(c))) : null, density };
+  } catch { return null; }
+}
+
+/** Grounded Google Search for CURRENT LOCAL per-tree removal + stump-grind rates. */
+async function fetchTreeRemovalRates(county: string, zip: string, geminiKey: string): Promise<{ small: number; medium: number; large: number; stumpGrind: number; sources: string[] } | null> {
+  const locality = zip ? `ZIP ${zip} (${county} County, NC)` : `${county} County, NC`;
+  const prompt = `Find the CURRENT LOCAL tree-removal cost near ${locality} (${new Date().getFullYear()}). Give the typical price to remove ONE tree by size, plus stump grinding per stump.
+Return ONLY a JSON object in a \`\`\`json code block:
+\`\`\`json
+{ "small": 0, "medium": 0, "large": 0, "stumpGrind": 0, "sources": ["https://..."] }
+\`\`\`
+small = small tree under ~30 ft; medium = 30–60 ft; large = 60–80+ ft; stumpGrind = grind one stump. Use CURRENT LOCAL prices for that area from credible tree-service sources; cite them; never invent a price.`;
+  const text = await groundedGeminiText(geminiKey, prompt, 'You are a tree-service pricing assistant. Use Google Search for current local per-tree removal costs. Return only the JSON; cite sources; never invent prices.', 90000);
+  if (!text) return null;
+  const m = text.match(/```json\s*([\s\S]*?)\s*```/) || text.match(/\{[\s\S]*\}/);
+  if (!m) return null;
+  try {
+    const o = JSON.parse((m[1] || m[0]).replace(/,\s*([}\]])/g, '$1'));
+    const num = (v: any) => { const n = Number(v); return Number.isFinite(n) && n > 0 ? Math.round(n) : 0; };
+    const small = num(o.small), medium = num(o.medium), large = num(o.large), stumpGrind = num(o.stumpGrind);
+    if (!small && !medium && !large) return null;
+    return {
+      small: small || TREE_RATE_FALLBACK.small,
+      medium: medium || TREE_RATE_FALLBACK.medium,
+      large: large || TREE_RATE_FALLBACK.large,
+      stumpGrind: stumpGrind || TREE_RATE_FALLBACK.stumpGrind,
+      sources: Array.isArray(o.sources) ? o.sources.map((s: any) => String(s)).filter((s: string) => /^https?:\/\//.test(s)).slice(0, 6) : [],
+    };
   } catch { return null; }
 }
 
 /**
- * Rule-based land-clearing / site-prep estimate: classify the parcel's vegetation
- * density from satellite imagery (Gemini Vision), then apply the regional NC
- * baseline $/acre matrix × acreage, with a small-lot mobilization minimum and a
- * stump-extraction + grading factor. Returns null when keys/coords/acres missing.
+ * Land-clearing estimate by TREE COUNT × current local per-tree removal cost:
+ * Gemini Vision counts the trees (by size) on a satellite crop, rates are pulled
+ * live (grounded) for the parcel's county/ZIP, and the cost is count × rate +
+ * stump grinding. Also returns a per-acre bulk-clearing figure for comparison.
+ * Returns null when keys/coords/acres are missing or the count fails.
  */
-export async function fetchLandClearingEstimate(reportData: SiteFeasibilityData, includeStumps = true): Promise<LandClearingEstimate | null> {
+export async function fetchLandClearingEstimate(reportData: SiteFeasibilityData): Promise<LandClearingEstimate | null> {
   const keys = getUserKeys();
   if (!keys.googleMaps || !keys.gemini) return null;
   const acres = Number(reportData.gisAcres);
@@ -4478,28 +4510,43 @@ export async function fetchLandClearingEstimate(reportData: SiteFeasibilityData,
 
   const zoom = landZoomForAcres(acres);
   const satelliteUrl = `https://maps.googleapis.com/maps/api/staticmap?center=${lat},${lng}&zoom=${zoom}&size=600x600&scale=2&maptype=satellite&key=${keys.googleMaps}`;
+  const zip = (String(reportData.inputAddress || '').match(/\b(\d{5})(?:-\d{4})?\b/) || [])[1] || '';
+  const locality = zip ? `ZIP ${zip} · ${reportData.countyName} County, NC` : `${reportData.countyName} County, NC`;
 
-  const cls = await classifyLandDensity(satelliteUrl, keys.gemini).catch(() => null);
-  const density = cls?.density || 'medium';
-  const baseRatePerAcre = LAND_CLEARING_RATES[density];
+  const [vision, rates] = await Promise.all([
+    countTreesFromSatellite(satelliteUrl, acres, keys.gemini).catch(() => null),
+    fetchTreeRemovalRates(reportData.countyName, zip, keys.gemini).catch(() => null),
+  ]);
+  if (!vision) return null;
 
-  // Pricing engine (mirrors the rule-based logic): clearing = acres × rate, with a
-  // subcontractor mobilization minimum on small lots; stumps/grading = acres × factor.
-  let clearingCost = acres * baseRatePerAcre;
-  let mobilizationApplied = false;
-  if (acres < 0.5 && clearingCost < MOBILIZATION_MIN) { clearingCost = MOBILIZATION_MIN; mobilizationApplied = true; }
-  const stumpCost = includeStumps ? acres * STUMP_GRADING_PER_ACRE : 0;
+  const r = rates || { ...TREE_RATE_FALLBACK, sources: [] as string[] };
+  const sizes = ['small', 'medium', 'large'] as const;
+  const trees: TreeRemovalLine[] = sizes
+    .map((size) => ({ size, count: vision[size], unitCost: r[size], cost: Math.round(vision[size] * r[size]) }))
+    .filter((t) => t.count > 0);
+  const treeCount = vision.small + vision.medium + vision.large;
+  const treeRemovalCost = trees.reduce((s, t) => s + t.cost, 0);
+  const stumpGrindCost = Math.round(treeCount * r.stumpGrind);
+
+  // Per-acre bulk machine clearing (cheaper for large forested tracts) — comparison.
+  const bulkRate = LAND_CLEARING_RATES[vision.density];
+  const bulkClearingCost = Math.round(acres * bulkRate + acres * 2500);
 
   return {
     acres: Math.round(acres * 100) / 100,
-    canopyCoverPct: cls?.canopyPct ?? null,
-    density,
-    baseRatePerAcre,
-    clearingCost: Math.round(clearingCost),
-    stumpCost: Math.round(stumpCost),
-    total: Math.round(clearingCost + stumpCost),
-    mobilizationApplied,
+    canopyCoverPct: vision.canopyPct,
+    density: vision.density,
+    treeCount,
+    trees,
+    treeRemovalCost,
+    stumpGrindUnit: r.stumpGrind,
+    stumpGrindCost,
+    total: treeRemovalCost + stumpGrindCost,
+    bulkClearingCost,
     satelliteUrl,
+    locality,
+    pricingSources: r.sources,
+    realTimePricing: !!rates,
     generatedAt: Date.now(),
   };
 }
