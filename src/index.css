@@ -472,9 +472,47 @@ code {
   width: 100%;
 }
 
+/* 3-column layout when the docked Land Assistant is present */
+.dashboard-content-grid.with-assistant {
+  grid-template-columns: 440px minmax(0, 1fr) 380px;
+}
+
+@media (max-width: 1500px) {
+  .dashboard-content-grid.with-assistant {
+    grid-template-columns: 400px minmax(0, 1fr) 350px;
+  }
+}
+
 @media (max-width: 1200px) {
-  .dashboard-content-grid {
+  .dashboard-content-grid,
+  .dashboard-content-grid.with-assistant {
     grid-template-columns: 1fr;
+  }
+}
+
+/* Docked Land Assistant — full-height, sticky, right-side panel */
+.dashboard-assistant-column {
+  position: sticky;
+  top: 1.5rem;
+  height: calc(100vh - 3rem);
+  display: flex;
+  flex-direction: column;
+}
+
+.dashboard-assistant-column .gemini-chat-container {
+  height: 100% !important;
+  flex: 1;
+  min-height: 0;
+}
+
+.dashboard-assistant-column .borderless-chat-body {
+  min-height: 0;
+}
+
+@media (max-width: 1200px) {
+  .dashboard-assistant-column {
+    position: static;
+    height: 620px;
   }
 }
 
