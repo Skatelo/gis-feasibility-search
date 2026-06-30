@@ -5227,4 +5227,45 @@ ${reportData.comps && reportData.comps.length > 0
 
   return await streamResilient(baseBody);
 }
+
+/**
+ * FAST follow-up chat — a single grounded Gemini stream (NO fusion, no judge), so
+ * the assistant replies quickly. The full report is already in the conversation,
+ * so this answers the user's question directly with a concise prompt. Falls back
+ * to a non-streaming request (and finally without grounding) if the stream drops.
+ */
+export async function chatFollowUp(
+  messages: ChatMessage[],
+  reportData: SiteFeasibilityData,
+  onToken?: (chunk: string) => void,
+): Promise<{ text: string; sources?: ChatSource[] }> {
+  const apiKey = getUserKeys().gemini || "";
+  if (!apiKey) throw new Error("Gemini API key is required. Please configure it in Account Settings.");
+
+  const acres = reportData.gisAcres ? reportData.gisAcres.toFixed(2) : '?';
+  const system = `You are a sharp, concise land-development analyst answering FOLLOW-UP questions in a chat about ONE North Carolina parcel. The full AI feasibility report is already earlier in this conversation.
+RULES:
+- Answer the user's exact question DIRECTLY and BRIEFLY — a few sentences or a short bulleted list. Lead with the answer.
+- Use the report + the facts below; only use Google Search when the question needs CURRENT external facts (rates, prices, codes, market) you don't already have.
+- No preamble, no restating the question, no re-dumping the whole report. Plain markdown only — no code blocks; use × and ÷ for math, never the asterisk.
+PARCEL: ${reportData.inputAddress} · ${reportData.countyName} County, NC · ${acres} acres · zoning ${reportData.zoningCode}${reportData.ownerName ? ` · owner ${reportData.ownerName}` : ''}.`;
+
+  const contents = messages.map((m) => ({ role: m.role === 'user' ? 'user' : 'model', parts: [{ text: m.content }] }));
+  const GEN_BASE = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash`;
+  const body: any = { contents, systemInstruction: { parts: [{ text: system }] }, tools: [{ google_search: {} }] };
+
+  let emitted = false;
+  const guarded = onToken ? (c: string) => { emitted = true; onToken(c); } : onToken;
+  try {
+    return await streamGeminiSSE(`${GEN_BASE}:streamGenerateContent?alt=sse&key=${apiKey}`, body, guarded);
+  } catch (e) {
+    console.warn('Follow-up stream failed:', e);
+    if (emitted) throw e;
+    try { return await geminiGenerateWithSources(`${GEN_BASE}:generateContent?key=${apiKey}`, body); }
+    catch {
+      const { tools: _drop, ...noGrounding } = body;
+      return await geminiGenerateWithSources(`${GEN_BASE}:generateContent?key=${apiKey}`, noGrounding);
+    }
+  }
+}
 // EOF

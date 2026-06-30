@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import type { FormEvent, KeyboardEvent, FC } from 'react';
 import { createRoot } from 'react-dom/client';
-import { executeLandAnalysis, chatWithGemini, getUserKeys, detectNcCounty, lookupParcelById, fetchConstructionCostEstimate, fetchMaterialTakeoff, fetchLandClearingEstimate, fetchGoogleDistanceMatrixComps, getCompPrefs, getReportAutoGenerate, enformionConfigured, enformionContactEnrich, enformionPersonSearch, enformionBusinessSearch, looksLikeBusiness, enformionDiagMessage, getLastEnformionShape, getLastEnformionDetail } from '../services/feasibilityService';
+import { executeLandAnalysis, chatWithGemini, chatFollowUp, getUserKeys, detectNcCounty, lookupParcelById, fetchConstructionCostEstimate, fetchMaterialTakeoff, fetchLandClearingEstimate, fetchGoogleDistanceMatrixComps, getCompPrefs, getReportAutoGenerate, enformionConfigured, enformionContactEnrich, enformionPersonSearch, enformionBusinessSearch, looksLikeBusiness, enformionDiagMessage, getLastEnformionShape, getLastEnformionDetail } from '../services/feasibilityService';
 import type { SkipTraceContact } from '../services/feasibilityService';
 import type { ChatMessage } from '../services/feasibilityService';
 import { saveReport, getReportEtaMs, recordReportDuration } from '../services/reportStore';
@@ -1031,7 +1031,9 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
 
     try {
       let streamed = '';
-      const response = await chatWithGemini(updatedHistory, data, (chunk) => {
+      // Fast single-stream follow-up (no fusion) — the report is already in the
+      // conversation, so this replies quickly.
+      const response = await chatFollowUp(updatedHistory, data, (chunk) => {
         streamed += chunk;
         setChatHistory([...updatedHistory, { role: 'model', content: streamed }]);
       });
