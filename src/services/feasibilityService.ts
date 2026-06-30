@@ -1615,6 +1615,7 @@ async function enformionCall(path: string, searchType: string, body: any): Promi
     // PII-safe outcome values — system fields about the REQUEST, not a person.
     const detail = d ? JSON.stringify({
       requestType: d.requestType, message: d.message, isError: d.isError,
+      errorCode: d.error?.code, errorMessage: d.error?.message, technical: d.error?.technicalErrorMessage,
       totalResults: d.pagination?.totalResults,
       inputErrors: d.error?.inputErrors, warnings: d.error?.warnings,
     }) : undefined;
@@ -1799,13 +1800,26 @@ export async function enformionPersonSearch(name: string, address?: string): Pro
   return c;
 }
 
+// The galaxy-search-type for BusinessV2Search isn't documented; "Business" is
+// rejected as an unknown type (requestType "Base", HTTP 400). Try the likely
+// values and remember the first one that's accepted.
+const BUSINESS_SEARCH_TYPES = ['BusinessV2Search', 'BusinessSearch', 'DevAPIBusinessSearch', 'DevAPIBusinessV2Search'];
+let workingBusinessSearchType: string | null = null;
+
 /** Enformion Business Search — business contact + linked principals. */
 export async function enformionBusinessSearch(name: string, address?: string): Promise<SkipTraceContact | null> {
   if (!name.trim()) return null;
   const { addressLine1, addressLine2 } = splitAddress(address);
   const body: any = { Name: name.trim() };
   if (addressLine1 || addressLine2) body.Address = { addressLine1, addressLine2 };
-  const data = await enformionCall('/BusinessV2Search', 'Business', body);
+  let data: any = null;
+  const candidates = workingBusinessSearchType ? [workingBusinessSearchType] : BUSINESS_SEARCH_TYPES;
+  for (const st of candidates) {
+    // enformionCall returns null on a 400 (unrecognized search-type); a 200 means
+    // the search-type was accepted, so the first non-null result wins.
+    data = await enformionCall('/BusinessV2Search', st, body);
+    if (data) { workingBusinessSearchType = st; break; }
+  }
   if (!data) return null;
   const biz = (Array.isArray(data.businesses) && data.businesses[0]) || (Array.isArray(data.Businesses) && data.Businesses[0]) || data.business || data;
   const c = personToContact(biz, true);
