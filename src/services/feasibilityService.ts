@@ -1841,16 +1841,27 @@ function parseBusinessV2(data: any, queryName: string): { record: any; officers:
  *  (members / registered agent), and enriches the top officers for phones/emails.
  *  `maxOfficers` bounds the per-officer Contact Enrich calls (lower it for bulk). */
 export async function enformionBusinessSearch(name: string, address?: string, maxOfficers = 4): Promise<SkipTraceContact | null> {
-  if (!name.trim()) return null;
-  // BusinessV2 contract: BusinessName + top-level AddressLine2 (state/city,state,zip).
-  const { addressLine2 } = splitAddress(address);
-  const stateMatch = String(address || '').match(/\b([A-Z]{2})\b(?:\s+\d{5})?\s*$/);
-  const body: any = { BusinessName: name.trim(), Page: 1, ResultsPerPage: 10 };
-  body.AddressLine2 = (stateMatch && stateMatch[1]) || addressLine2 || 'NC';
-  const data = await enformionCall('/BusinessV2Search', 'BusinessV2', body);
-  if (!data) return null;
-  const parsed = parseBusinessV2(data, name);
-  if (!parsed) { console.warn('Enformion BusinessV2: no records. Shape:', JSON.stringify(describeShape(data))); return null; }
+  // BusinessName: the entity name (drop any "& second owner" the GIS appends).
+  const bizName = String(name || '').split('&')[0].trim();
+  if (!bizName) return null;
+  // BusinessV2 contract: BusinessName + top-level AddressLine2. Over-constraining
+  // the address returns 0, so try the PROPERTY state (NC — this is an NC tool),
+  // then NAME-ONLY (broadest), then the owner's mailing state. First hit wins.
+  const usStates = /\b(AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|MI|MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VT|VA|WA|WV|WI|WY)\b/g;
+  const states = (String(address || '').toUpperCase().match(usStates) || []);
+  const ownerState = states.length ? states[states.length - 1] : '';
+  const recs = (d: any) => (Array.isArray(d?.businessV2Records) ? d.businessV2Records : []);
+  const callBiz = async (line2?: string) => {
+    const body: any = { BusinessName: bizName, Page: 1, ResultsPerPage: 10 };
+    if (line2) body.AddressLine2 = line2;
+    return await enformionCall('/BusinessV2Search', 'BusinessV2', body);
+  };
+  let data = await callBiz('NC');
+  if (!recs(data).length) data = await callBiz(undefined);
+  if (!recs(data).length && ownerState && ownerState !== 'NC') data = await callBiz(ownerState);
+  if (!data || !recs(data).length) { console.warn('Enformion BusinessV2: 0 records for', bizName); return null; }
+  const parsed = parseBusinessV2(data, bizName);
+  if (!parsed) { console.warn('Enformion BusinessV2: no parseable record. Shape:', JSON.stringify(describeShape(data))); return null; }
 
   // Business-level phones/emails from the matched record.
   const deep = deepCollectContacts(parsed.record);
