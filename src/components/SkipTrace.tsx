@@ -158,6 +158,18 @@ export function SkipTrace() {
           ))}
         </div>
       )}
+      {c.officers && c.officers.length > 0 && (
+        <div className="st-contact-sub">
+          <div>Members / officers:</div>
+          {c.officers.map((o, i) => (
+            <div key={i} className="st-officer-line">
+              <strong>{o.name}</strong>{o.title ? ` — ${o.title}` : ''}
+              {o.phones.map((p, j) => <a key={`p${j}`} href={`tel:${p.replace(/[^0-9+]/g, '')}`} className="st-contact-chip">{p}</a>)}
+              {o.emails.map((e, j) => <a key={`e${j}`} href={`mailto:${e}`} className="st-contact-chip">{e}</a>)}
+            </div>
+          ))}
+        </div>
+      )}
       {c.relatives && c.relatives.length > 0 && <div className="st-contact-sub">Relatives: {c.relatives.slice(0, 6).join(', ')}</div>}
       {c.associates && c.associates.length > 0 && <div className="st-contact-sub">Associates: {c.associates.slice(0, 6).join(', ')}</div>}
     </div>

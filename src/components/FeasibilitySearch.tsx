@@ -846,7 +846,7 @@ export const FeasibilitySearch: FC = () => {
         if (!ok(c) && addr) c = await enformionPersonSearch(primary);
       }
       setOwnerSkip(c);
-      const gotSomething = !!(c && (c.phones.length || c.emails.length || (c.associates && c.associates.length)));
+      const gotSomething = !!(c && (c.phones.length || c.emails.length || (c.officers && c.officers.length)));
       if (!gotSomething) {
         const detail = getLastEnformionDetail();
         const shape = getLastEnformionShape();
@@ -2607,7 +2607,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                       {ownerSkipLoading ? <Loader2 size={14} className="spinner" /> : <Fingerprint size={14} />}
                       {ownerSkipLoading ? 'Skip tracing…' : 'Skip Trace Owner'}
                     </button>
-                    {ownerSkip && (ownerSkip.phones.length > 0 || ownerSkip.emails.length > 0 || (ownerSkip.associates && ownerSkip.associates.length > 0) || (ownerSkip.relatives && ownerSkip.relatives.length > 0)) && (
+                    {ownerSkip && (ownerSkip.phones.length > 0 || ownerSkip.emails.length > 0 || (ownerSkip.officers && ownerSkip.officers.length > 0) || (ownerSkip.relatives && ownerSkip.relatives.length > 0)) && (
                       <div className="owner-skip-result">
                         {ownerSkip.phones.length > 0 && (
                           <div className="owner-skip-row"><Phone size={13} />
@@ -2623,7 +2623,23 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                             ))}
                           </div>
                         )}
-                        {ownerSkip.associates && ownerSkip.associates.length > 0 && <div className="owner-skip-sub">{ownerSkip.isBusiness ? 'Members / officers' : 'Associates'}: {ownerSkip.associates.slice(0, 8).join('; ')}</div>}
+                        {/* Members / officers behind the LLC, each with their own phones/emails */}
+                        {ownerSkip.officers && ownerSkip.officers.length > 0 && (
+                          <div className="owner-skip-officers">
+                            <div className="owner-skip-sub">Members / officers:</div>
+                            {ownerSkip.officers.map((o, i) => (
+                              <div key={i} className="owner-skip-officer">
+                                <span className="owner-skip-officer-name">{o.name}{o.title ? <em> — {o.title}</em> : null}</span>
+                                {(o.phones.length > 0 || o.emails.length > 0) ? (
+                                  <span className="owner-skip-officer-contacts">
+                                    {o.phones.map((p, j) => <a key={`p${j}`} href={`tel:${p.replace(/[^0-9+]/g, '')}`} className="owner-skip-chip">{p}</a>)}
+                                    {o.emails.map((e, j) => <a key={`e${j}`} href={`mailto:${e}`} className="owner-skip-chip">{e}</a>)}
+                                  </span>
+                                ) : <span className="owner-skip-officer-none">no contact match</span>}
+                              </div>
+                            ))}
+                          </div>
+                        )}
                         {ownerSkip.relatives && ownerSkip.relatives.length > 0 && <div className="owner-skip-sub">Relatives: {ownerSkip.relatives.slice(0, 5).join(', ')}</div>}
                       </div>
                     )}

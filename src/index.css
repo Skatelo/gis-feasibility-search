@@ -3754,3 +3754,14 @@ img, svg, video, canvas, table, pre { max-width: 100%; }
 /* Owner skip-trace error wraps the PII-safe response shape readably */
 .owner-skip-err { align-items: flex-start; white-space: pre-wrap; word-break: break-word; line-height: 1.45; }
 .owner-skip-err svg { flex-shrink: 0; margin-top: 2px; }
+
+/* Owner skip-trace: per-officer (LLC members) contacts */
+.owner-skip-officers { margin-top: 6px; display: flex; flex-direction: column; gap: 5px; }
+.owner-skip-officer { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; font-size: 0.78rem; padding: 4px 0; border-top: 1px dashed var(--bg-card-border); }
+.owner-skip-officer-name { font-weight: 600; color: var(--text-primary); }
+.owner-skip-officer-name em { color: var(--text-muted); font-style: normal; font-size: 0.68rem; font-weight: 400; }
+.owner-skip-officer-contacts { display: inline-flex; flex-wrap: wrap; gap: 5px; }
+.owner-skip-officer-none { color: var(--text-muted); font-size: 0.7rem; font-style: italic; }
+
+/* Skip Trace tab: officer line with inline contacts */
+.st-officer-line { display: flex; flex-wrap: wrap; align-items: baseline; gap: 5px; margin: 3px 0; }

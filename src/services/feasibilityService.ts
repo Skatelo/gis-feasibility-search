@@ -1555,6 +1555,7 @@ export async function skipTraceLLC(query: string, state = 'NC'): Promise<LlcSkip
 // ===========================================================================
 
 export interface SkipPhone { number: string; type?: string }
+export interface OfficerContact { name: string; title?: string; phones: string[]; emails: string[] }
 export interface SkipTraceContact {
   fullName?: string | null;
   age?: number | null;
@@ -1563,6 +1564,9 @@ export interface SkipTraceContact {
   addresses: string[];
   relatives?: string[];
   associates?: string[];
+  /** Business mode: the members/officers behind an entity, each with their own
+   *  skip-traced phones/emails. */
+  officers?: OfficerContact[];
   isBusiness?: boolean;
   source: 'enformion';
 }
@@ -1834,8 +1838,9 @@ function parseBusinessV2(data: any, queryName: string): { record: any; officers:
 }
 
 /** Enformion Business Search (BusinessV2) — finds the entity, its officers
- *  (members / registered agent), and enriches the best officer for phones/emails. */
-export async function enformionBusinessSearch(name: string, address?: string): Promise<SkipTraceContact | null> {
+ *  (members / registered agent), and enriches the top officers for phones/emails.
+ *  `maxOfficers` bounds the per-officer Contact Enrich calls (lower it for bulk). */
+export async function enformionBusinessSearch(name: string, address?: string, maxOfficers = 4): Promise<SkipTraceContact | null> {
   if (!name.trim()) return null;
   // BusinessV2 contract: BusinessName + top-level AddressLine2 (state/city,state,zip).
   const { addressLine2 } = splitAddress(address);
@@ -1849,21 +1854,38 @@ export async function enformionBusinessSearch(name: string, address?: string): P
 
   // Business-level phones/emails from the matched record.
   const deep = deepCollectContacts(parsed.record);
-  let phones = deep.phones;
-  let emails = deep.emails;
-  const officers = parsed.officers;
+  const phones = deep.phones;
+  const emails = deep.emails;
 
-  // Enrich the best officers (registered agent / members) for a real personal
-  // phone/email of the human behind the LLC. Try the top 2 — Enformion's officer
-  // first/last is sometimes flipped, so a couple of tries gets a clean hit.
-  if (!phones.length) {
-    const rank = (o: { title: string }) => (/REGISTERED AGENT/i.test(o.title) ? 3 : 0) + (/MEMBER|MANAGER|OWNER|PRESIDENT/i.test(o.title) ? 1 : 0);
-    const ranked = officers.filter((o) => o.first && o.last).sort((a, b) => rank(b) - rank(a));
-    for (const o of ranked.slice(0, 2)) {
-      const oc = await enformionContactEnrich(`${o.first} ${o.last}`, o.address).catch(() => null);
-      if (oc && (oc.phones.length || oc.emails.length)) { phones = oc.phones; if (!emails.length) emails = oc.emails; break; }
+  // Dedupe officers across filings (same person appears multiple times, often with
+  // first/last flipped) by a token-sorted key.
+  const tokKey = (o: { first: string; last: string; raw: string }) =>
+    `${o.first} ${o.last} ${o.raw}`.toLowerCase().replace(/[^a-z\s]/g, '').split(/\s+/).filter(Boolean).sort().join(' ');
+  const uniq = new Map<string, typeof parsed.officers[number]>();
+  for (const o of parsed.officers) { const k = tokKey(o); if (k && !uniq.has(k)) uniq.set(k, o); }
+  const rank = (o: { title: string }) => (/REGISTERED AGENT/i.test(o.title) ? 3 : 0) + (/MEMBER|MANAGER|OWNER|PRESIDENT/i.test(o.title) ? 1 : 0);
+  const ranked = [...uniq.values()].filter((o) => o.first && o.last).sort((a, b) => rank(b) - rank(a));
+
+  // Enrich EACH officer (the top few) for their personal phone/email. Enformion
+  // sometimes flips first/last, so try both orders and keep the one that hits.
+  const officers: OfficerContact[] = [];
+  for (const o of ranked.slice(0, maxOfficers)) {
+    const orders = o.first.toLowerCase() === o.last.toLowerCase() ? [[o.first, o.last]] : [[o.first, o.last], [o.last, o.first]];
+    let hit: SkipTraceContact | null = null;
+    for (const [f, l] of orders) {
+      hit = await enformionContactEnrich(`${f} ${l}`, o.address).catch(() => null);
+      if (hit && (hit.phones.length || hit.emails.length)) break;
+      hit = null;
     }
+    officers.push({
+      name: hit?.fullName || o.raw,
+      title: o.title || undefined,
+      phones: hit ? hit.phones.map((p) => p.number) : [],
+      emails: hit ? hit.emails : [],
+    });
   }
+  // Also surface any unenriched officers (names only) so the full list shows.
+  for (const o of ranked.slice(maxOfficers)) officers.push({ name: o.raw, title: o.title || undefined, phones: [], emails: [] });
 
   if (!phones.length && !emails.length && !officers.length) return null;
   return {
@@ -1872,7 +1894,7 @@ export async function enformionBusinessSearch(name: string, address?: string): P
     phones,
     emails,
     addresses: [],
-    associates: officers.map((o) => `${o.raw}${o.title ? ` — ${o.title}` : ''}`).slice(0, 10),
+    officers,
     isBusiness: true,
     source: 'enformion',
   };
@@ -1912,11 +1934,14 @@ export async function enformionSkipTraceOwners(
         if (personName && (o.firstName || !looksLikeBusiness(personName))) {
           c = await enformionContactEnrich(personName, o.address);
         } else if (o.ownerName) {
-          c = await enformionBusinessSearch(o.ownerName, o.address);
+          c = await enformionBusinessSearch(o.ownerName, o.address, 2); // bulk: enrich top 2 officers
         }
       } catch { /* skip this owner */ }
-      if (c && (c.phones.length || c.emails.length)) {
-        out[o.id] = { phones: c.phones.map((p) => p.number), emails: c.emails };
+      if (c) {
+        // Aggregate business officers' phones/emails into the owner row.
+        const phones = [...c.phones.map((p) => p.number), ...((c.officers || []).flatMap((of) => of.phones))];
+        const emails = [...c.emails, ...((c.officers || []).flatMap((of) => of.emails))];
+        if (phones.length || emails.length) out[o.id] = { phones: [...new Set(phones)], emails: [...new Set(emails)] };
       }
       onProgress?.(++done, total);
     }
