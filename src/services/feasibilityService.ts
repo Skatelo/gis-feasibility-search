@@ -556,6 +556,28 @@ async function ncCountyAtPoint(lat: number, lng: number): Promise<string | null>
   } catch { return null; }
 }
 
+/**
+ * The incorporated municipality (city/town) whose limits contain a coordinate,
+ * via the U.S. Census TIGERweb "Incorporated Places" layer (point-in-polygon).
+ * Returns the place name (e.g. "Concord") or null when the point is in
+ * UNINCORPORATED county land — the strongest address-specific signal for whether
+ * public water/sewer are likely available vs. well/septic territory.
+ */
+async function incorporatedPlaceAtPoint(lat: number, lng: number): Promise<string | null> {
+  try {
+    const url = `https://tigerweb.geo.census.gov/arcgis/rest/services/TIGERweb/Places_CouSub_ConCity_SubMCD/MapServer/4/query` +
+      `?geometry=${lng},${lat}&geometryType=esriGeometryPoint&inSR=4326&spatialRel=esriSpatialRelIntersects` +
+      `&outFields=BASENAME,NAME&returnGeometry=false&f=json`;
+    const res = await fetchWithTimeout(url, 9000);
+    if (!res.ok) return null;
+    const data = await res.json();
+    const a = data?.features?.[0]?.attributes;
+    if (!a) return null;
+    const name = String(a.BASENAME || a.NAME || '').replace(/\s+(city|town|village)$/i, '').trim();
+    return name || null;
+  } catch { return null; }
+}
+
 export async function detectNcCounty(address: string, googleKey: string): Promise<string | null> {
   if (!googleKey || !address.trim()) return null;
   try {
@@ -4695,7 +4717,20 @@ export async function fetchUtilitiesEstimate(reportData: SiteFeasibilityData): P
   const zip = (String(reportData.inputAddress || '').match(/\b(\d{5})(?:-\d{4})?\b/) || [])[1] || '';
   const locality = zip ? `${reportData.inputAddress} (ZIP ${zip}, ${county} County, NC)` : `${reportData.inputAddress} (${county} County, NC)`;
 
+  // Look up the ACTUAL jurisdiction at the searched parcel's coordinates — the
+  // strongest address-specific signal for public-utility availability.
+  const lat = reportData.coordinates?.lat, lng = reportData.coordinates?.lng;
+  const place = (typeof lat === 'number' && typeof lng === 'number') ? await incorporatedPlaceAtPoint(lat, lng) : null;
+  const incorporated = !!place;
+  const jurisdiction = incorporated
+    ? `Inside the incorporated limits of ${place}, NC`
+    : `Unincorporated ${county} County, NC (no municipal limits at this location)`;
+
   const prompt = `For the property at ${locality}, determine UTILITIES availability and CURRENT LOCAL connection costs for building a home (${new Date().getFullYear()}).
+JURISDICTION AT THIS EXACT PARCEL (from the U.S. Census place boundaries): ${jurisdiction}.
+${incorporated
+    ? `Because this parcel is INSIDE ${place}'s municipal limits, public water & sewer are typically available — find ${place}'s (or the county authority's) water and sewer tap/connection/impact fees.`
+    : `Because this parcel is in UNINCORPORATED county land, public sewer is usually NOT available and often no public water either — price a private well and a septic system unless you find evidence a public/community system actually reaches this specific area.`}
 1) Is PUBLIC/municipal WATER available to this parcel/area, and what is the water tap / connection / impact fee?
 2) Is PUBLIC/municipal SEWER available, and what is the sewer tap / connection / impact fee?
 3) If public water is NOT available, the CURRENT LOCAL cost to drill a private WELL (drilling + pump + connection).
@@ -4720,8 +4755,14 @@ Use CURRENT LOCAL figures from the utility authority / credible well & septic co
     if (s.includes('not') || s === 'no' || s === 'false' || s === 'unavailable') return 'not-available';
     return 'unknown';
   };
-  const publicWater = norm(o.publicWater);
-  const publicSewer = norm(o.publicSewer);
+  // The AI's read, but when it's UNKNOWN fall back to the parcel's jurisdiction:
+  // inside a municipality → assume public service; unincorporated → well/septic.
+  const resolve = (v: any): 'available' | 'not-available' | 'unknown' => {
+    const s = norm(v);
+    return s !== 'unknown' ? s : (incorporated ? 'available' : 'not-available');
+  };
+  const publicWater = resolve(o.publicWater);
+  const publicSewer = resolve(o.publicSewer);
   let real = false;
 
   const lines: UtilityLine[] = [];
@@ -4759,6 +4800,7 @@ Use CURRENT LOCAL figures from the utility authority / credible well & septic co
   const sources = Array.isArray(o.sources) ? o.sources.map((s: any) => String(s)).filter((s: string) => /^https?:\/\//.test(s)).slice(0, 6) : [];
   return {
     locality: zip ? `ZIP ${zip} · ${county} County, NC` : `${county} County, NC`,
+    jurisdiction, incorporated,
     publicWater, publicSewer, lines, totalLow, totalHigh, summary,
     provider: o.provider ? String(o.provider).slice(0, 120) : undefined,
     sources, realTime: real, generatedAt: Date.now(),

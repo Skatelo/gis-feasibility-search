@@ -3933,3 +3933,8 @@ img, svg, video, canvas, table, pre { max-width: 100%; }
   border-radius: 0; padding: 10px 2px 2px; font-weight: 800; color: var(--text-primary); font-size: 0.86rem;
 }
 .util-total .util-cost { margin-top: 0; }
+
+/* Utilities: jurisdiction line (from the parcel's Census place lookup) */
+.util-jurisdiction { display: flex; align-items: center; gap: 5px; font-size: 0.72rem; font-weight: 700; }
+.util-jurisdiction.incorporated { color: #166534; }
+.util-jurisdiction.unincorporated { color: #92400e; }

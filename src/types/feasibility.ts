@@ -168,6 +168,10 @@ export interface UtilityLine {
  *  when service is available, otherwise real-time local well + septic costs. */
 export interface UtilitiesEstimate {
   locality: string;
+  /** Incorporated municipality at the parcel point (from Census TIGERweb), or a
+   *  note that it's unincorporated county land — drives the availability call. */
+  jurisdiction: string;
+  incorporated: boolean;
   publicWater: 'available' | 'not-available' | 'unknown';
   publicSewer: 'available' | 'not-available' | 'unknown';
   lines: UtilityLine[];

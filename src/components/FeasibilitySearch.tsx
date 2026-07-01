@@ -3542,6 +3542,9 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                   ) : utilities ? (
                     <>
                       <div className="util-summary">
+                        <span className={`util-jurisdiction ${utilities.incorporated ? 'incorporated' : 'unincorporated'}`}>
+                          <MapPin size={12} /> {utilities.jurisdiction}
+                        </span>
                         <span className="util-summary-text">{utilities.summary}</span>
                         {utilities.provider && <span className="util-provider">Authority: {utilities.provider}</span>}
                       </div>
