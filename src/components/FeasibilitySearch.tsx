@@ -1,8 +1,8 @@
 import { useState, useEffect, useRef } from 'react';
 import type { FormEvent, KeyboardEvent, FC } from 'react';
 import { createRoot } from 'react-dom/client';
-import { executeLandAnalysis, chatWithGemini, chatFollowUp, getUserKeys, detectNcCounty, lookupParcelById, fetchConstructionCostEstimate, fetchMaterialTakeoff, fetchLandClearingEstimate, fetchUtilitiesEstimate, fetchGoogleDistanceMatrixComps, getCompPrefs, getReportAutoGenerate, enformionConfigured, enformionContactEnrich, enformionPersonSearch, enformionBusinessSearch, looksLikeBusiness, enformionDiagMessage, getLastEnformionShape, getLastEnformionDetail } from '../services/feasibilityService';
-import type { SkipTraceContact } from '../services/feasibilityService';
+import { executeLandAnalysis, chatWithGemini, chatFollowUp, getUserKeys, detectNcCounty, lookupParcelById, fetchConstructionCostEstimate, fetchMaterialTakeoff, fetchLandClearingEstimate, fetchUtilitiesEstimate, fetchGoogleDistanceMatrixComps, getCompPrefs, getReportAutoGenerate, enformionConfigured, enformionContactEnrich, enformionPersonSearch, enformionBusinessSearch, looksLikeBusiness, enformionDiagMessage, getLastEnformionShape, getLastEnformionDetail, enformionPropertySearch, enformionDebtSearch, enformionEvictionSearch } from '../services/feasibilityService';
+import type { SkipTraceContact, EnformionPropertyRecord, EnfDebtResult, EnfEvictionRecord } from '../services/feasibilityService';
 import type { ChatMessage, ChatAttachment } from '../services/feasibilityService';
 import { saveReport, getReportEtaMs, recordReportDuration } from '../services/reportStore';
 import { listConversations, saveConversation, deleteConversation as deleteConvo, newConversationId, deriveTitle } from '../services/chatStore';
@@ -63,6 +63,8 @@ import {
   TrendingUp,
   ImageOff,
   Landmark,
+  Scale,
+  Home,
   Hammer,
   Trees,
   Droplets,
@@ -686,6 +688,13 @@ export const FeasibilitySearch: FC = () => {
   const [landClearingLoading, setLandClearingLoading] = useState(false);
   const [utilities, setUtilities] = useState<UtilitiesEstimate | null>(null);
   const [utilitiesLoading, setUtilitiesLoading] = useState(false);
+  // Enformion property-records suite for the searched address — Property Search
+  // V2 (mortgages & transactions), Debt Search V2, and Eviction/tenant history.
+  const [enfProperty, setEnfProperty] = useState<EnformionPropertyRecord | null>(null);
+  const [enfDebt, setEnfDebt] = useState<EnfDebtResult | null>(null);
+  const [enfEvictions, setEnfEvictions] = useState<EnfEvictionRecord[] | null>(null);
+  const [enfLoading, setEnfLoading] = useState(false);
+  const [enfErrors, setEnfErrors] = useState<{ property?: string; debt?: string; eviction?: string }>({});
   // Manual report mode: report awaits the "Generate AI Report" button
   const [reportPending, setReportPending] = useState(false);
   // Owner skip trace (Enformion) — phones/emails for the parcel owner
@@ -855,8 +864,6 @@ export const FeasibilitySearch: FC = () => {
 
   // Gemini UI helper states
   const [likedMessages, setLikedMessages] = useState<Record<number, 'like' | 'dislike' | undefined>>({});
-  const [activeDrafts, setActiveDrafts] = useState<Record<number, number>>({});
-  const [expandedDrafts, setExpandedDrafts] = useState<Record<number, boolean>>({});
   const [copiedMessageIndex, setCopiedMessageIndex] = useState<number | null>(null);
   const [showCheckOverlay, setShowCheckOverlay] = useState<Record<number, boolean>>({});
 
@@ -874,6 +881,98 @@ export const FeasibilitySearch: FC = () => {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [chatHistory]);
+
+  // Enformion records for the searched address — three real API searches:
+  //   1. Property Search V2  → deed, current owners, MORTGAGES & TRANSACTIONS
+  //   2. Debt Search V2      → owner's bankruptcies / liens / judgments (PRO)
+  //   3. Eviction Search     → TENANT HISTORY at the address (PRO)
+  // Property runs first (it can supply the owner name when the GIS has none);
+  // debt + eviction then run in parallel. Each section reports its own outcome.
+  const fetchEnformionRecords = (reportData: SiteFeasibilityData, seq: number) => {
+    setEnfProperty(null);
+    setEnfDebt(null);
+    setEnfEvictions(null);
+    setEnfErrors({});
+    setEnfLoading(false);
+    const addr = (reportData.inputAddress || '').trim();
+    if (!enformionConfigured() || !addr) return;
+    setEnfLoading(true);
+
+    // Parse "123 Main St, Town, NC 28027" pieces for the eviction search
+    // (State is REQUIRED with StreetAddress per the Enformion spec).
+    const parts = addr.replace(/,?\s*USA$/i, '').split(',').map((s) => s.trim()).filter(Boolean);
+    const street = parts[0] || '';
+    const city = parts.length >= 2 ? parts[1] : '';
+    const zip = (addr.match(/\b(\d{5})(?:-\d{4})?\b/) || [])[1] || '';
+    const stateMatch = addr.match(/\b([A-Z]{2})\b\s*\d{5}/) || addr.match(/,\s*([A-Z]{2})\b/);
+    const state = (stateMatch && stateMatch[1]) || 'NC';
+
+    // Owner name for the debt search — authoritative GIS first/last when
+    // present; otherwise the formatted owner name (first-last order).
+    const gisFirst = (reportData.ownerFirst || '').trim();
+    const gisLast = (reportData.ownerLast || '').trim();
+    const ownerName = (reportData.ownerName || '').trim();
+
+    const done = { property: false, debt: false, eviction: false };
+    const settle = (k: keyof typeof done) => {
+      done[k] = true;
+      if (done.property && done.debt && done.eviction && seq === searchSeqRef.current) setEnfLoading(false);
+    };
+
+    const runDebt = (first: string, last: string) => {
+      if (!first || !last) {
+        if (seq === searchSeqRef.current) setEnfErrors((p) => ({ ...p, debt: 'No individual owner name available to search (LLC/business owners: search the members via Skip Trace first).' }));
+        settle('debt');
+        return;
+      }
+      enformionDebtSearch(first, last, `${city ? city + ', ' : ''}${state}`)
+        .then((d) => {
+          if (seq !== searchSeqRef.current) return;
+          if (d) setEnfDebt(d);
+          else setEnfErrors((p) => ({ ...p, debt: enformionDiagMessage() }));
+        })
+        .catch(() => { if (seq === searchSeqRef.current) setEnfErrors((p) => ({ ...p, debt: 'Debt search failed — please try again.' })); })
+        .finally(() => settle('debt'));
+    };
+
+    // Eviction / tenant history — by ADDRESS (state required).
+    enformionEvictionSearch(street, city, state, zip)
+      .then((ev) => {
+        if (seq !== searchSeqRef.current) return;
+        if (ev) setEnfEvictions(ev);
+        else setEnfErrors((p) => ({ ...p, eviction: enformionDiagMessage() }));
+      })
+      .catch(() => { if (seq === searchSeqRef.current) setEnfErrors((p) => ({ ...p, eviction: 'Eviction search failed — please try again.' })); })
+      .finally(() => settle('eviction'));
+
+    // Property record first, then the debt search with the best owner name.
+    enformionPropertySearch(addr)
+      .then((rec) => {
+        if (seq !== searchSeqRef.current) return;
+        if (rec) setEnfProperty(rec);
+        else setEnfErrors((p) => ({ ...p, property: enformionDiagMessage() }));
+
+        let first = gisFirst, last = gisLast;
+        if ((!first || !last) && ownerName && !looksLikeBusiness(ownerName)) {
+          const t = ownerName.split(/\s+/).filter(Boolean);
+          if (t.length >= 2) { first = t[0]; last = t[t.length - 1]; }
+        }
+        if ((!first || !last) && rec) {
+          // Fall back to the deed's first individual current owner.
+          const person = rec.currentOwners.find((n) => n && !looksLikeBusiness(n));
+          if (person) {
+            const t = person.split(/\s+/).filter(Boolean);
+            if (t.length >= 2) { first = t[0]; last = t[t.length - 1]; }
+          }
+        }
+        runDebt(first, last);
+      })
+      .catch(() => {
+        if (seq === searchSeqRef.current) setEnfErrors((p) => ({ ...p, property: 'Property record search failed — please try again.' }));
+        runDebt(gisFirst, gisLast);
+      })
+      .finally(() => settle('property'));
+  };
 
   // Build the cost estimate + material takeoff (each shows as it arrives). If
   // BOTH fail (e.g. a transient Gemini rate limit), the card stays and offers a
@@ -898,6 +997,9 @@ export const FeasibilitySearch: FC = () => {
       .then((u) => { if (seq === searchSeqRef.current && u) setUtilities(u); })
       .catch(() => {})
       .finally(() => { if (seq === searchSeqRef.current) setUtilitiesLoading(false); });
+    // Enformion records (property/mortgage/transactions, debt, tenant history)
+    // fire alongside — they render in their own card as each search resolves.
+    fetchEnformionRecords(reportData, seq);
     let pending = 2;
     let anySuccess = false;
     const settle = (ok: boolean) => {
@@ -1137,8 +1239,6 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
     setChatInput('');
     setChatHistory([]);
     setLikedMessages({});
-    setActiveDrafts({});
-    setExpandedDrafts({});
     setCopiedMessageIndex(null);
     setShowCheckOverlay({});
     setReportSaved(false);
@@ -2309,6 +2409,11 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
     setLandClearingLoading(false);
     setUtilities(null);
     setUtilitiesLoading(false);
+    setEnfProperty(null);
+    setEnfDebt(null);
+    setEnfEvictions(null);
+    setEnfErrors({});
+    setEnfLoading(false);
     setOwnerSkip(null);
     setOwnerSkipError('');
     setOwnerSkipLoading(false);
@@ -2795,6 +2900,150 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                   </div>
                 </div>
               </div>
+
+              {/* Enformion records: mortgage & transactions (Property Search V2),
+                  debt (Debt Search V2), and tenant history (Eviction Search). */}
+              {enformionConfigured() && (enfLoading || enfProperty || enfDebt || enfEvictions || enfErrors.property || enfErrors.debt || enfErrors.eviction) && (
+                <div className="card registry-card enf-records-card">
+                  <h3 className="registry-card-header" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <FileText size={16} style={{ color: 'var(--primary)' }} />
+                    <span>Property Records — Enformion</span>
+                  </h3>
+                  {enfLoading && (
+                    <div className="enf-loading"><Loader2 size={14} className="spinner" /><span>Pulling mortgage, transaction, debt &amp; tenant records…</span></div>
+                  )}
+
+                  {/* 1. Mortgage & Transactions (Property Search V2) */}
+                  <div className="enf-section">
+                    <div className="enf-section-head">
+                      <Landmark size={14} />
+                      <span>Mortgage &amp; Transactions</span>
+                      {enfProperty && (
+                        <span className="enf-count-pill">{enfProperty.mortgages.length + enfProperty.transactions.length} record{enfProperty.mortgages.length + enfProperty.transactions.length === 1 ? '' : 's'}</span>
+                      )}
+                    </div>
+                    {enfProperty ? (
+                      <>
+                        {enfProperty.currentOwners.length > 0 && (
+                          <div className="enf-kv"><span className="k">Deed owner{enfProperty.currentOwners.length > 1 ? 's' : ''}</span><span className="v">{enfProperty.currentOwners.join(' & ')}</span></div>
+                        )}
+                        {enfProperty.apn && <div className="enf-kv"><span className="k">APN</span><span className="v">{enfProperty.apn}</span></div>}
+                        {(enfProperty.purchasePrice > 0 || enfProperty.purchaseDate) && (
+                          <div className="enf-kv"><span className="k">Last purchase</span><span className="v">{enfProperty.purchasePrice > 0 ? `$${enfProperty.purchasePrice.toLocaleString()}` : '—'}{enfProperty.purchaseDate ? ` · ${enfProperty.purchaseDate}` : ''}</span></div>
+                        )}
+                        {enfProperty.assessedValue > 0 && (
+                          <div className="enf-kv"><span className="k">Assessed value{enfProperty.assessedYear ? ` (${enfProperty.assessedYear})` : ''}</span><span className="v">${enfProperty.assessedValue.toLocaleString()}</span></div>
+                        )}
+                        {enfProperty.taxAmount > 0 && (
+                          <div className="enf-kv"><span className="k">Property tax{enfProperty.taxYear ? ` (${enfProperty.taxYear})` : ''}</span><span className="v">${enfProperty.taxAmount.toLocaleString()}</span></div>
+                        )}
+                        {enfProperty.openLienCount > 0 && (
+                          <div className="enf-kv"><span className="k">Open liens on record</span><span className="v">{enfProperty.openLienCount}</span></div>
+                        )}
+                        {enfProperty.mortgages.map((m, i) => (
+                          <div key={`m${i}`} className="enf-row">
+                            <div className="enf-row-top">
+                              <span className="enf-row-title">Mortgage{m.date ? ` · ${m.date}` : ''}</span>
+                              {m.amount > 0 && <span className="enf-row-amt">${m.amount.toLocaleString()}</span>}
+                            </div>
+                            <span className="enf-row-sub">
+                              {[m.lender && `Lender: ${m.lender}`, m.loanType && `Type: ${m.loanType}`, m.rateType && `Rate: ${m.rateType}`, m.docNumber && `Doc #${m.docNumber}`].filter(Boolean).join(' · ') || 'Recorded mortgage'}
+                            </span>
+                          </div>
+                        ))}
+                        {enfProperty.transactions.map((t, i) => (
+                          <div key={`t${i}`} className="enf-row">
+                            <div className="enf-row-top">
+                              <span className="enf-row-title">{t.type || 'Sale'}{t.date ? ` · ${t.date}` : ''}</span>
+                              {t.amount > 0 && <span className="enf-row-amt">${t.amount.toLocaleString()}</span>}
+                            </div>
+                            <span className="enf-row-sub">
+                              {[t.buyers.length > 0 && `Buyer: ${t.buyers.join(' & ')}`, t.sellers.length > 0 && `Seller: ${t.sellers.join(' & ')}`, t.docNumber && `Doc #${t.docNumber}`].filter(Boolean).join(' · ') || 'Recorded transaction'}
+                            </span>
+                          </div>
+                        ))}
+                        {enfProperty.mortgages.length === 0 && enfProperty.transactions.length === 0 && (
+                          <div className="enf-empty">Deed record found, but no recorded mortgages or sale transactions are on file for this parcel.</div>
+                        )}
+                      </>
+                    ) : enfErrors.property ? (
+                      <div className="enf-err"><AlertCircle size={12} /> {enfErrors.property}</div>
+                    ) : !enfLoading ? (
+                      <div className="enf-empty">No property record matched this address in Enformion.</div>
+                    ) : null}
+                  </div>
+
+                  {/* 2. Debt Search V2 — bankruptcies / liens / judgments (PRO) */}
+                  <div className="enf-section">
+                    <div className="enf-section-head">
+                      <Scale size={14} />
+                      <span>Owner Debt Search</span>
+                      {enfDebt && (
+                        enfDebt.total > 0
+                          ? <span className="enf-count-pill warn">{enfDebt.bankruptcies} BK · {enfDebt.liens} lien{enfDebt.liens === 1 ? '' : 's'} · {enfDebt.judgments} judgment{enfDebt.judgments === 1 ? '' : 's'}</span>
+                          : <span className="enf-count-pill clean">Clean — 0 records</span>
+                      )}
+                    </div>
+                    {enfDebt ? (
+                      enfDebt.records.length > 0 ? (
+                        enfDebt.records.map((d, i) => (
+                          <div key={i} className="enf-row">
+                            <div className="enf-row-top">
+                              <span className="enf-row-title">{d.debtType || d.description || 'Debt record'}{d.filingDate ? ` · filed ${d.filingDate}` : ''}</span>
+                              {d.amount > 0 && <span className="enf-row-amt">${d.amount.toLocaleString()}</span>}
+                            </div>
+                            <span className="enf-row-sub">
+                              {[d.description && d.description !== d.debtType && d.description, d.debtors.length > 0 && `Debtor: ${d.debtors.join(', ')}`, d.creditors.length > 0 && `Creditor: ${d.creditors.join(', ')}`, d.caseNumber && `Case ${d.caseNumber}`, d.state].filter(Boolean).join(' · ')}
+                            </span>
+                          </div>
+                        ))
+                      ) : (
+                        <div className="enf-empty">No bankruptcies, liens, or judgments found for this owner.</div>
+                      )
+                    ) : enfErrors.debt ? (
+                      <div className="enf-err"><AlertCircle size={12} /> {enfErrors.debt}{/\bHTTP 40[13]\b|credentials/.test(enfErrors.debt) ? '' : ' Note: Debt Search V2 requires an Enformion PRO account.'}</div>
+                    ) : !enfLoading ? (
+                      <div className="enf-empty">Debt search did not run.</div>
+                    ) : null}
+                  </div>
+
+                  {/* 3. Eviction Search — tenant history at the address (PRO) */}
+                  <div className="enf-section">
+                    <div className="enf-section-head">
+                      <Home size={14} />
+                      <span>Tenant History (Evictions)</span>
+                      {enfEvictions && (
+                        enfEvictions.length > 0
+                          ? <span className="enf-count-pill warn">{enfEvictions.length} record{enfEvictions.length === 1 ? '' : 's'}</span>
+                          : <span className="enf-count-pill clean">Clean — 0 records</span>
+                      )}
+                    </div>
+                    {enfEvictions ? (
+                      enfEvictions.length > 0 ? (
+                        enfEvictions.map((ev, i) => (
+                          <div key={i} className="enf-row">
+                            <div className="enf-row-top">
+                              <span className="enf-row-title">{ev.unlawfulDetainer ? 'Eviction (unlawful detainer)' : 'Eviction filing'}{ev.fileDate ? ` · ${ev.fileDate}` : ''}</span>
+                              {ev.amount > 0 && <span className="enf-row-amt">${ev.amount.toLocaleString()}</span>}
+                            </div>
+                            <span className="enf-row-sub">
+                              {[ev.defendants.length > 0 && `Tenant: ${ev.defendants.join(', ')}`, ev.plaintiffs.length > 0 && `Filed by: ${ev.plaintiffs.join(', ')}`, ev.caseNumber && `Case ${ev.caseNumber}`, ev.state].filter(Boolean).join(' · ')}
+                            </span>
+                          </div>
+                        ))
+                      ) : (
+                        <div className="enf-empty">No eviction filings found for this address — clean tenant history.</div>
+                      )
+                    ) : enfErrors.eviction ? (
+                      <div className="enf-err"><AlertCircle size={12} /> {enfErrors.eviction}{/\bHTTP 40[13]\b|credentials/.test(enfErrors.eviction) ? '' : ' Note: Eviction Search requires an Enformion PRO account.'}</div>
+                    ) : !enfLoading ? (
+                      <div className="enf-empty">Eviction search did not run.</div>
+                    ) : null}
+                  </div>
+
+                  <div className="enf-foot">Live from the Enformion API (Property Search V2, Debt Search V2, Eviction Search) using your credentials. Debt &amp; eviction searches require an Enformion PRO plan; public-record coverage varies by county.</div>
+                </div>
+              )}
 
               {/* Card 2: Land Information */}
               <div className="card registry-card">
@@ -3558,13 +3807,19 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                               </span>
                             </div>
                             {ln.note && <div className="util-note">{ln.note}</div>}
-                            <div className="util-cost">${ln.low.toLocaleString()} – ${ln.high.toLocaleString()}</div>
+                            {ln.verified ? (
+                              <div className="util-cost">{ln.low === ln.high ? `$${ln.low.toLocaleString()}` : `$${ln.low.toLocaleString()} – $${ln.high.toLocaleString()}`} <span className="util-verified-tag">verified local price</span></div>
+                            ) : (
+                              <div className="util-cost util-unpriced">No verified local price found — confirm with {utilities.provider || 'the local provider/contractor'}</div>
+                            )}
                           </div>
                         ))}
-                        <div className="util-row util-total">
-                          <span>Estimated total to connect</span>
-                          <span className="util-cost">${utilities.totalLow.toLocaleString()} – ${utilities.totalHigh.toLocaleString()}</span>
-                        </div>
+                        {(utilities.totalLow > 0 || utilities.totalHigh > 0) && (
+                          <div className="util-row util-total">
+                            <span>Total to connect (verified items only)</span>
+                            <span className="util-cost">${utilities.totalLow.toLocaleString()} – ${utilities.totalHigh.toLocaleString()}</span>
+                          </div>
+                        )}
                       </div>
                       {utilities.sources.length > 0 && (
                         <div className="cost-sources">
@@ -3576,7 +3831,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                           ))}
                         </div>
                       )}
-                      <div className="cost-disclaimer">Water/sewer availability is AI-checked against local utility data and {utilities.realTime ? 'priced at current local figures' : 'shown at regional baseline figures'}. Tap/impact fees + well/septic costs vary by lot, depth, and soil — confirm with the utility authority and a local well/septic contractor (a septic perc test is required before building).</div>
+                      <div className="cost-disclaimer">{utilities.realTime ? 'Every dollar figure above was found live in the cited local sources (current fee schedules / local contractor pricing) — no estimates or regional averages are ever shown.' : 'No verifiable current local prices were found online for this location, so no figures are shown — nothing is estimated or guessed.'} Tap/impact fees + well/septic costs vary by lot, depth, and soil — confirm with the utility authority and a local well/septic contractor (a septic perc test is required before building).</div>
                     </>
                   ) : null}
                 </div>
@@ -4024,9 +4279,6 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                         </svg>
                       </div>
                       <div className="model-message-wrapper" style={{ flex: 1 }}>
-                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' }}>
-                          <span className="model-name">Antigravity AI</span>
-                        </div>
                         <div className="message-content model-text">
                           Search for a North Carolina address to load the parcel details and automatically generate a custom, investor-style land feasibility report.
                         </div>
@@ -4072,38 +4324,6 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                               </svg>
                             </div>
                             <div className="model-message-wrapper" style={{ flex: 1 }}>
-                              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px' }}>
-                                <span className="model-name">Antigravity AI</span>
-                                
-                                {/* Draft Selector Mockup */}
-                                <div className="draft-selector-container">
-                                  <button 
-                                    type="button"
-                                    className="draft-selector-btn"
-                                    onClick={() => setExpandedDrafts(prev => ({ ...prev, [idx]: !prev[idx] }))}
-                                  >
-                                    <span>Show drafts</span>
-                                    <span className={`draft-arrow ${expandedDrafts[idx] ? 'open' : ''}`}>▼</span>
-                                  </button>
-                                  {expandedDrafts[idx] && (
-                                    <div className="drafts-dropdown-list">
-                                      <button type="button" className={`draft-option ${activeDrafts[idx] === 0 || activeDrafts[idx] === undefined ? 'active' : ''}`} onClick={() => { setActiveDrafts(prev => ({ ...prev, [idx]: 0 })); setExpandedDrafts(prev => ({ ...prev, [idx]: false })); }}>
-                                        <span>Draft 1 (Active)</span>
-                                        {(activeDrafts[idx] === 0 || activeDrafts[idx] === undefined) && <span className="draft-selected-check">✓</span>}
-                                      </button>
-                                      <button type="button" className={`draft-option ${activeDrafts[idx] === 1 ? 'active' : ''}`} onClick={() => { setActiveDrafts(prev => ({ ...prev, [idx]: 1 })); setExpandedDrafts(prev => ({ ...prev, [idx]: false })); }}>
-                                        <span>Draft 2</span>
-                                        {activeDrafts[idx] === 1 && <span className="draft-selected-check">✓</span>}
-                                      </button>
-                                      <button type="button" className={`draft-option ${activeDrafts[idx] === 2 ? 'active' : ''}`} onClick={() => { setActiveDrafts(prev => ({ ...prev, [idx]: 2 })); setExpandedDrafts(prev => ({ ...prev, [idx]: false })); }}>
-                                        <span>Draft 3</span>
-                                        {activeDrafts[idx] === 2 && <span className="draft-selected-check">✓</span>}
-                                      </button>
-                                    </div>
-                                  )}
-                                </div>
-                              </div>
-                              
                               <div className="message-content model-text">
                                 {parseMarkdown(msg.content)}
                               </div>
@@ -4219,7 +4439,6 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                         </svg>
                       </div>
                       <div className="model-message-wrapper" style={{ flex: 1 }}>
-                        <span className="model-name">Antigravity AI</span>
                         <div className="gemini-wave-loader-wrapper">
                           <div className="gemini-wave-loader">
                             <div className="wave-bar bar-1"></div>

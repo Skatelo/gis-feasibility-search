@@ -159,9 +159,12 @@ export interface UtilityLine {
   kind: 'water' | 'sewer';
   isPublic: boolean;   // true = public hookup (tap fee); false = private (well/septic)
   status: 'available' | 'not-available' | 'unknown';
-  low: number;         // cost range low ($)
-  high: number;        // cost range high ($)
+  low: number;         // cost range low ($) — 0 when no verified local figure was found
+  high: number;        // cost range high ($) — 0 when no verified local figure was found
   note?: string;       // e.g. "tap/impact fee", "drill + pump", "perc test + install"
+  /** true only when the figure came from a live, cited local source. Unverified
+   *  lines carry NO dollar figure (never a regional baseline / guess). */
+  verified: boolean;
 }
 
 /** Utilities + connection-cost estimate for a parcel: public water/sewer tap fees

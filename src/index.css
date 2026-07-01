@@ -1738,87 +1738,6 @@ code {
   100% { transform: scale(0.9); opacity: 0.6; }
 }
 
-/* Draft Selector */
-.draft-selector-container {
-  position: relative;
-  font-size: 0.72rem;
-}
-
-.draft-selector-btn {
-  background: transparent;
-  border: none;
-  color: var(--text-muted);
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  font-size: 0.72rem;
-  font-weight: 500;
-  padding: 2px 6px;
-  border-radius: 4px;
-  transition: var(--transition);
-}
-
-.draft-selector-btn:hover {
-  background: #f1f5f9;
-  color: var(--text-primary);
-}
-
-.draft-arrow {
-  font-size: 0.6rem;
-  transition: transform 0.2s;
-}
-
-.draft-arrow.open {
-  transform: rotate(180deg);
-}
-
-.drafts-dropdown-list {
-  position: absolute;
-  right: 0;
-  top: 100%;
-  background: #ffffff;
-  border: 1px solid var(--bg-card-border);
-  border-radius: var(--radius-sm);
-  box-shadow: var(--shadow-md);
-  z-index: 100;
-  min-width: 140px;
-  padding: 4px 0;
-  display: flex;
-  flex-direction: column;
-}
-
-.draft-option {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 8px 12px;
-  background: transparent;
-  border: none;
-  width: 100%;
-  text-align: left;
-  font-size: 0.72rem;
-  color: var(--text-secondary);
-  cursor: pointer;
-  transition: var(--transition);
-}
-
-.draft-option:hover {
-  background: #f1f5f9;
-  color: var(--text-primary);
-}
-
-.draft-option.active {
-  font-weight: 600;
-  color: var(--primary);
-  background: var(--primary-glow);
-}
-
-.draft-selected-check {
-  color: var(--primary);
-  font-weight: bold;
-}
-
 /* Action Bar */
 .gemini-action-bar {
   display: flex;
@@ -3938,3 +3857,141 @@ img, svg, video, canvas, table, pre { max-width: 100%; }
 .util-jurisdiction { display: flex; align-items: center; gap: 5px; font-size: 0.72rem; font-weight: 700; }
 .util-jurisdiction.incorporated { color: #166534; }
 .util-jurisdiction.unincorporated { color: #92400e; }
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  
+/* ==========================================================================
+   Utilities — real-price-only presentation
+   ========================================================================== */
+.util-verified-tag {
+  font-size: 0.6rem; font-weight: 800; text-transform: uppercase; letter-spacing: 0.04em;
+  color: #166534; background: #dcfce7; border-radius: 999px; padding: 2px 7px;
+  margin-left: 6px; vertical-align: middle; white-space: nowrap;
+}
+.util-cost.util-unpriced {
+  color: var(--text-muted); font-weight: 600; font-size: 0.78rem; white-space: normal; font-style: italic;
+}
+
+/* ==========================================================================
+   Enformion property records card (mortgage & transactions, debt, tenant history)
+   ========================================================================== */
+.enf-records-card .enf-section { margin-top: 14px; }
+.enf-records-card .enf-section:first-of-type { margin-top: 6px; }
+.enf-section-head {
+  display: flex; align-items: center; gap: 7px;
+  font-family: var(--font-heading); font-weight: 800; font-size: 0.82rem; color: var(--text-primary);
+  padding-bottom: 6px; border-bottom: 1px solid var(--bg-card-border); margin-bottom: 8px;
+}
+.enf-section-head svg { color: var(--primary); flex-shrink: 0; }
+.enf-count-pill {
+  font-size: 0.62rem; font-weight: 800; padding: 1px 8px; border-radius: 999px;
+  background: #eef2ff; color: var(--primary); margin-left: auto;
+}
+.enf-count-pill.warn { background: #fee2e2; color: #b91c1c; }
+.enf-count-pill.clean { background: #dcfce7; color: #166534; }
+.enf-row {
+  display: flex; flex-direction: column; gap: 2px;
+  padding: 7px 2px; border-bottom: 1px dashed var(--bg-card-border);
+  font-size: 0.8rem; color: var(--text-secondary); line-height: 1.45;
+}
+.enf-row:last-child { border-bottom: none; }
+.enf-row-top { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; }
+.enf-row-title { font-weight: 700; color: var(--text-primary); }
+.enf-row-amt { font-weight: 800; color: var(--success); white-space: nowrap; }
+.enf-row-sub { font-size: 0.72rem; color: var(--text-muted); }
+.enf-kv { display: flex; justify-content: space-between; gap: 10px; padding: 4px 2px; font-size: 0.8rem; }
+.enf-kv .k { color: var(--text-secondary); }
+.enf-kv .v { font-weight: 700; color: var(--text-primary); text-align: right; }
+.enf-empty { font-size: 0.76rem; color: var(--text-muted); padding: 4px 2px; }
+.enf-err {
+  display: flex; align-items: flex-start; gap: 6px; font-size: 0.74rem; color: #b45309;
+  background: #fffbeb; border: 1px solid #fde68a; border-radius: 8px; padding: 7px 10px; margin-top: 4px;
+  white-space: pre-line;
+}
+.enf-loading { display: flex; align-items: center; gap: 8px; font-size: 0.78rem; color: var(--text-muted); padding: 6px 2px; }
+.enf-foot { font-size: 0.68rem; color: var(--text-muted); margin-top: 10px; line-height: 1.4; }
+
+/* ==========================================================================
+   Land Assistant — ChatGPT / Gemini-style restyle (clean, minimal, airy)
+   ========================================================================== */
+
+/* Panel: bigger, softer, cleaner */
+.chat-fab-panel {
+  width: min(460px, calc(100vw - 32px));
+  border-radius: 24px;
+  border: 1px solid #e5e7eb;
+  box-shadow: 0 20px 50px rgba(15, 23, 42, 0.18), 0 2px 10px rgba(15, 23, 42, 0.08);
+}
+
+/* Header: minimal hairline bar — no card shadow, no heavy chrome */
+.chat-fab-panel .gemini-chat-header {
+  padding: 12px 16px;
+  border-bottom: 1px solid #f1f3f4;
+  box-shadow: none;
+  background: #ffffff;
+}
+.gemini-title { font-size: 0.95rem; font-weight: 600; }
+.gemini-model-badge {
+  background: #f1f3f4; color: #5f6368;
+  font-weight: 600; text-transform: none; border-radius: 999px; padding: 1px 8px;
+}
+.gemini-subtitle { display: none; } /* ChatGPT/Gemini keep the header to one clean line */
+.chat-header-btn { border-radius: 999px; }
+
+/* Message area: airy spacing, pure white */
+.chat-fab-panel .borderless-chat-body {
+  padding: 20px 18px;
+  gap: 24px;
+  border-left: none;
+  border-right: none;
+  background: #ffffff;
+}
+
+/* User message: right-aligned rounded pill, like ChatGPT's composer echo */
+.user-bubble {
+  background: #f1f3f4;
+  color: #1f1f1f;
+  border-radius: 20px;
+  padding: 10px 16px;
+  font-size: 0.9rem;
+  max-width: 85%;
+  box-shadow: none;
+}
+
+/* Assistant message: plain flowing text, small sparkle avatar (Gemini-style) */
+.model-avatar { width: 26px; height: 26px; background: transparent; }
+.model-text { font-size: 0.9rem; line-height: 1.65; }
+
+/* Action bar: hidden until you hover the message (ChatGPT behavior) */
+.gemini-action-bar { opacity: 0; transition: opacity 0.15s ease; }
+.chat-message:hover .gemini-action-bar,
+.chat-message:focus-within .gemini-action-bar { opacity: 1; }
+@media (hover: none) { .gemini-action-bar { opacity: 1; } } /* always visible on touch */
+
+/* Sources: light pill row, no boxed card */
+.message-sources-footer { background: #fafafa; border-color: #f1f3f4; border-radius: 12px; }
+.source-pill-link { border-radius: 999px; }
+
+/* Composer: single rounded capsule with a hairline border + soft shadow */
+.chat-fab-panel .gemini-input-form {
+  padding: 10px 14px 14px;
+  border: none;
+  box-shadow: none;
+  background: #ffffff;
+}
+.gemini-input-capsule {
+  background: #ffffff;
+  border: 1px solid #e0e3e7;
+  border-radius: 26px;
+  box-shadow: 0 2px 10px rgba(15, 23, 42, 0.06);
+  padding: 6px 8px 6px 14px;
+}
+.gemini-input-capsule:focus-within {
+  border-color: #c6c9ce;
+  background: #ffffff;
+  box-shadow: 0 4px 16px rgba(15, 23, 42, 0.1);
+}
+.gemini-prompt-input { font-size: 0.9rem; }
+
+/* Send button: dark circle when active (ChatGPT style) */
+.gemini-send-btn { background: #f1f3f4; color: #9aa0a6; }
+.gemini-send-btn.active { background: #1f1f1f; color: #ffffff; box-shadow: none; }
+.gemini-send-btn.active:hover { background: #000000; }

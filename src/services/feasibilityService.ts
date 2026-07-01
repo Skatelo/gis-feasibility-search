@@ -2016,6 +2016,222 @@ export async function skipTraceContact(ownerName: string, address?: string): Pro
   return await enformionContactEnrich(ownerName, address).catch(() => null) || viaSearch;
 }
 
+// ===========================================================================
+// Enformion property-records suite — Property Search V2 (deeds, transactions,
+// mortgages, open liens), Debt Search V2 (bankruptcies/liens/judgments), and
+// Eviction Search (tenant history). All verified against the official
+// EnformionGO API reference (enformiongo.readme.io):
+//   POST /PropertyV2Search  galaxy-search-type: PropertyV2
+//   POST /DebtSearch/V2     galaxy-search-type: DebtV2      (PRO account)
+//   POST /EvictionSearch    galaxy-search-type: Eviction    (PRO account)
+// ===========================================================================
+
+/** Case-insensitive property read — Enformion mixes PascalCase and camelCase
+ *  across endpoints/hosts, so accept either. */
+function ci(o: any, key: string): any {
+  if (o == null || typeof o !== 'object') return undefined;
+  if (key in o) return o[key];
+  const lower = key.toLowerCase();
+  for (const k of Object.keys(o)) if (k.toLowerCase() === lower) return o[k];
+  return undefined;
+}
+const ciStr = (o: any, key: string): string => { const v = ci(o, key); return v == null ? '' : String(v).trim(); };
+const ciNum = (o: any, key: string): number => { const n = Number(String(ci(o, key) ?? '').replace(/[^0-9.-]/g, '')); return Number.isFinite(n) ? n : 0; };
+const ciArr = (o: any, key: string): any[] => { const v = ci(o, key); return Array.isArray(v) ? v : []; };
+
+/** "04/17/2000", "4/17/2000", "20050928", or "2019" → display date (best-effort). */
+function fmtEnfDate(raw: any): string {
+  const s = String(raw ?? '').trim();
+  if (!s) return '';
+  if (/^\d{8}$/.test(s)) return `${s.slice(4, 6)}/${s.slice(6, 8)}/${s.slice(0, 4)}`; // eviction yyyymmdd
+  return s;
+}
+
+/** Eviction liabilityAmount comes zero-padded ("000002126" = $2,126). */
+function fmtEnfAmount(raw: any): number {
+  const n = Number(String(raw ?? '').replace(/[^0-9.]/g, ''));
+  return Number.isFinite(n) ? n : 0;
+}
+
+export interface EnfPropertyTransaction {
+  date: string; recordingDate: string; amount: number;
+  buyers: string[]; sellers: string[]; docNumber: string; type: string;
+}
+export interface EnfMortgage {
+  amount: number; date: string; lender: string; loanType: string; rateType: string; docNumber: string;
+}
+export interface EnformionPropertyRecord {
+  apn: string;
+  currentOwners: string[];
+  purchasePrice: number; purchaseDate: string;
+  assessedValue: number; assessedYear: string;
+  taxAmount: number; taxYear: string;
+  landUse: string; legalDescription: string;
+  transactions: EnfPropertyTransaction[];
+  mortgages: EnfMortgage[];
+  openLienCount: number;
+}
+export interface EnfDebtRecord {
+  debtType: string; filingDate: string; description: string; amount: number;
+  caseNumber: string; state: string; debtors: string[]; creditors: string[];
+}
+export interface EnfDebtResult {
+  records: EnfDebtRecord[];
+  bankruptcies: number; liens: number; judgments: number; total: number;
+}
+export interface EnfEvictionRecord {
+  defendants: string[]; plaintiffs: string[]; address: string;
+  fileDate: string; caseNumber: string; amount: number; state: string; unlawfulDetainer: boolean;
+}
+
+function enfName(n: any): string {
+  const nm = ci(n, 'Name') ?? n;
+  return ciStr(nm, 'FullName') || ciStr(nm, 'CompanyName') || ciStr(nm, 'BusinessName')
+    || [ciStr(nm, 'FirstName'), ciStr(nm, 'MiddleName'), ciStr(nm, 'LastName')].filter(Boolean).join(' ');
+}
+
+/** Enformion Property Search V2 — deed/assessor/recorder record for ONE address:
+ *  current owners, purchase price, assessed value & taxes, the recorded sale
+ *  TRANSACTIONS with buyers/sellers, and every recorded MORTGAGE (amount,
+ *  lender, loan type). Returns null when nothing matched (see diag for why). */
+export async function enformionPropertySearch(address: string): Promise<EnformionPropertyRecord | null> {
+  const { addressLine1, addressLine2 } = splitAddress(address);
+  if (!addressLine1 || !addressLine2) return null;
+  const data = await enformionCall('/PropertyV2Search', 'PropertyV2', {
+    AddressLine1: addressLine1, AddressLine2: addressLine2, Page: 1, ResultsPerPage: 3,
+  });
+  if (!data) return null;
+  const rec = ciArr(data, 'PropertyV2Records')[0];
+  if (!rec) return null;
+
+  const summary = ci(ci(rec, 'Property'), 'Summary') || {};
+  const assessor = ciArr(rec, 'AssessorRecords')[0] || {};
+  const recorder = ciArr(rec, 'RecorderRecords');
+
+  const purchase = ci(summary, 'PurchasePrice') || {};
+  const assessed = ci(summary, 'AssessedValue') || {};
+  const tax = ci(assessor, 'Tax') || {};
+  const propId = ci(assessor, 'PropertyIdentification') || {};
+  const legal = ci(assessor, 'PropertyLegal') || {};
+
+  const transactions: EnfPropertyTransaction[] = [];
+  const mortgages: EnfMortgage[] = [];
+  for (const rr of recorder) {
+    const ts = ci(rr, 'TransactionSummary') || {};
+    const det = ci(ts, 'TransactioDetails') || ci(ts, 'TransactionDetails') || {};
+    const buyers = ciArr(ts, 'Buyers').map(enfName).filter(Boolean);
+    const sellers = ciArr(ts, 'Sellers').map(enfName).filter(Boolean);
+    const saleAmount = ciNum(det, 'SaleAmount');
+    const saleDate = fmtEnfDate(ciStr(det, 'SaleDate'));
+    if (buyers.length || sellers.length || saleAmount || saleDate) {
+      transactions.push({
+        date: saleDate, recordingDate: fmtEnfDate(ciStr(det, 'SaleRecordningDate') || ciStr(det, 'SaleRecordingDate')),
+        amount: saleAmount, buyers, sellers,
+        docNumber: ciStr(det, 'RecordedSaleDocumentNumber'),
+        type: ciStr(det, 'DeedCategoryTypeDescription') || ciStr(det, 'TransactionTypeDescription') || ciStr(det, 'SaleDocumentTypeDescription'),
+      });
+    }
+    const md = ci(rr, 'MortgageDetails');
+    if (md && (ciNum(md, 'MortgageAmount') || ciStr(md, 'MortgageDate'))) {
+      mortgages.push({
+        amount: ciNum(md, 'MortgageAmount'),
+        date: fmtEnfDate(ciStr(md, 'MortgageDate') || ciStr(md, 'MortgageRecordingDate')),
+        lender: ciArr(md, 'Lenders').map(enfName).filter(Boolean).join(', '),
+        loanType: ciStr(md, 'MortgageLoanTypeCode'),
+        rateType: ciStr(md, 'MortgageInterestRateType'),
+        docNumber: ciStr(md, 'MortgageRecordedDocumentNumber'),
+      });
+    }
+  }
+  // The assessor's purchase transaction is often the authoritative last sale —
+  // include it when the recorder set didn't already capture it.
+  const pt = ci(assessor, 'PurchaseTransaction') || {};
+  const ptDate = fmtEnfDate(ciStr(pt, 'SaleDate'));
+  const ptAmount = ciNum(pt, 'SaleAmount');
+  if ((ptDate || ptAmount) && !transactions.some((t) => t.date === ptDate && t.amount === ptAmount)) {
+    transactions.push({
+      date: ptDate, recordingDate: fmtEnfDate(ciStr(pt, 'SaleRecordingDate')), amount: ptAmount,
+      buyers: [], sellers: ciArr(pt, 'SellerNames').map(enfName).filter(Boolean),
+      docNumber: ciStr(pt, 'SaleRecordedDocumentNumber'), type: ciStr(pt, 'SaleDocumentTypeDescription') || 'Recorded sale',
+    });
+  }
+
+  return {
+    apn: ciStr(summary, 'Apn') || ciStr(propId, 'ApnUnformatted'),
+    currentOwners: ciArr(summary, 'CurrentOwners').map(enfName).filter(Boolean),
+    purchasePrice: ciNum(purchase, 'Price'),
+    purchaseDate: fmtEnfDate(ciStr(purchase, 'Date')),
+    assessedValue: ciNum(assessed, 'Price') || ciNum(tax, 'AssessedTotalValue'),
+    assessedYear: ciStr(assessed, 'Date') || ciStr(tax, 'AssessedYear'),
+    taxAmount: ciNum(tax, 'TaxAmount'),
+    taxYear: ciStr(tax, 'TaxYear'),
+    landUse: ciStr(propId, 'CountyUseDescr') || ciStr(propId, 'LandUseCodeDescription'),
+    legalDescription: ciStr(legal, 'LegalDescription'),
+    transactions: transactions.slice(0, 8),
+    mortgages: mortgages.slice(0, 6),
+    openLienCount: ciArr(rec, 'OpenLienRecords').length,
+  };
+}
+
+/** Enformion Debt Search V2 (PRO) — nationwide bankruptcies, liens & judgments
+ *  for a person. DebtType "0" = all. Returns null on error / no access;
+ *  a result with 0 records means Enformion answered "clean". */
+export async function enformionDebtSearch(firstName: string, lastName: string, cityState?: string): Promise<EnfDebtResult | null> {
+  if (!firstName.trim() || !lastName.trim()) return null;
+  const body: any = { FirstName: cap(firstName.trim()), LastName: cap(lastName.trim()), DebtType: '0', Page: 1, ResultsPerPage: 10 };
+  if (cityState) body.AddressLine2 = cityState;
+  const data = await enformionCall('/DebtSearch/V2', 'DebtV2', body);
+  if (!data) return null;
+  const records: EnfDebtRecord[] = ciArr(data, 'debtRecords').map((r: any) => {
+    const names = ciArr(r, 'names');
+    const cases = ciArr(r, 'caseDetails');
+    const c0 = cases[0] || {};
+    return {
+      debtType: ciStr(r, 'debtType'),
+      filingDate: fmtEnfDate(ciStr(r, 'filingDate') || ciStr(c0, 'filingDate')),
+      description: ciStr(c0, 'filingTypeDescription') || ciStr(c0, 'actionTypeDescription'),
+      amount: ciNum(c0, 'liability') || ciNum(c0, 'liabilityAmount') || ciNum(c0, 'amountOrLiability'),
+      caseNumber: ciStr(c0, 'caseNumber'),
+      state: ciStr(c0, 'fileState') || ciStr(c0, 'courtState'),
+      debtors: names.filter((n: any) => /debtor/i.test(ciStr(n, 'type'))).map(enfName).filter(Boolean),
+      creditors: names.filter((n: any) => /creditor/i.test(ciStr(n, 'type'))).map(enfName).filter(Boolean),
+    };
+  });
+  return {
+    records: records.slice(0, 10),
+    bankruptcies: ciNum(data, 'bankruptcyRecordCounts'),
+    liens: ciNum(data, 'lienRecordCounts'),
+    judgments: ciNum(data, 'judgmentRecordCounts'),
+    total: ciNum(data, 'debtRecordCounts') || records.length,
+  };
+}
+
+/** Enformion Eviction Search (PRO) — tenant history at the ADDRESS (eviction
+ *  filings + possession/money judgments). State is REQUIRED with StreetAddress
+ *  per the API spec. Returns null on error / no access; [] means "no records". */
+export async function enformionEvictionSearch(streetAddress: string, city: string, state: string, zip?: string): Promise<EnfEvictionRecord[] | null> {
+  if (!streetAddress.trim() || !state.trim()) return null;
+  const body: any = { StreetAddress: streetAddress.trim(), State: state.trim().toUpperCase(), Page: 1, ResultsPerPage: 10 };
+  if (city.trim()) body.City = city.trim();
+  if (zip && zip.trim()) body.ZipCode = zip.trim();
+  const data = await enformionCall('/EvictionSearch', 'Eviction', body);
+  if (!data) return null;
+  return ciArr(data, 'evictionRecords').map((r: any) => {
+    const det = ciArr(r, 'evictionDetails')[0] || {};
+    const addr = ciArr(r, 'addresses')[0] || {};
+    return {
+      defendants: ciArr(r, 'defendantNames').map(enfName).filter(Boolean),
+      plaintiffs: ciArr(r, 'plaintiffNames').map(enfName).filter(Boolean),
+      address: ciStr(addr, 'fullAddress'),
+      fileDate: fmtEnfDate(ciStr(det, 'fileDate')),
+      caseNumber: ciStr(det, 'caseNumber'),
+      amount: fmtEnfAmount(ci(det, 'liabilityAmount')),
+      state: ciStr(det, 'state'),
+      unlawfulDetainer: /^y/i.test(ciStr(det, 'unlawfulDetainer')),
+    };
+  }).slice(0, 10);
+}
+
 /** Bulk skip trace for the finder's owner list — phones/emails for each owner
  *  (person via Contact Enrich, business via Business Search), concurrency-limited
  *  with progress. Keyed by the caller's row id. Skips rows with no usable name. */
@@ -4701,14 +4917,13 @@ export async function fetchLandClearingEstimate(reportData: SiteFeasibilityData)
   };
 }
 
-// Fallback ranges (Southeast US) when the live lookup can't price a line.
-const UTIL_FALLBACK = { waterTapLow: 2000, waterTapHigh: 6000, sewerTapLow: 3000, sewerTapHigh: 9000, wellLow: 8000, wellHigh: 18000, septicLow: 8000, septicHigh: 25000 };
-
 /**
  * Utilities + connection-cost estimate: whether PUBLIC water/sewer serve the
  * parcel and their tap/impact fees, otherwise the real-time LOCAL cost of the
- * private alternative (well / septic). Grounded on Google Search. Returns null
- * only when keys/address are missing.
+ * private alternative (well / septic). Grounded on Google Search. REAL PRICES
+ * ONLY: a line gets a dollar figure only when the live search found it in a
+ * citable local source — there are NO baseline/fallback numbers and no guesses.
+ * Returns null only when keys/address are missing.
  */
 export async function fetchUtilitiesEstimate(reportData: SiteFeasibilityData): Promise<UtilitiesEstimate | null> {
   const keys = getUserKeys();
@@ -4740,8 +4955,11 @@ Return ONLY a JSON object in a \`\`\`json code block:
 \`\`\`json
 { "publicWater": "available|not-available|unknown", "waterTapLow": 0, "waterTapHigh": 0, "publicSewer": "available|not-available|unknown", "sewerTapLow": 0, "sewerTapHigh": 0, "wellLow": 0, "wellHigh": 0, "septicLow": 0, "septicHigh": 0, "provider": "", "sources": ["https://..."] }
 \`\`\`
-Use CURRENT LOCAL figures from the utility authority / credible well & septic contractors; cite them; never invent a figure (leave unknown numbers 0).`;
-  const text = await groundedGeminiText(keys.gemini, prompt, 'You are a site-development utilities analyst for North Carolina. Use Google Search for the local water/sewer provider, tap fees, and current well & septic install costs. Return only the JSON; cite sources; never invent figures.', 90000);
+STRICT PRICING RULES — REAL FIGURES ONLY:
+- Every dollar figure MUST come from a page you actually found with Google Search: the utility authority's CURRENT published fee schedule / rate ordinance for tap-connection-impact fees, or named LOCAL well-drilling & septic contractors' current pricing for this county.
+- List in "sources" the exact URLs the figures came from. A figure without a source URL is not allowed.
+- If you cannot find a verifiable current local figure for a line, you MUST leave it 0. NEVER estimate, NEVER use national/regional averages, NEVER guess.`;
+  const text = await groundedGeminiText(keys.gemini, prompt, 'You are a site-development utilities analyst for North Carolina. Use Google Search to find the local water/sewer provider, its CURRENT published tap/connection/impact fee schedule, and current local well & septic contractor pricing. Return only the JSON. Every number must be traceable to a cited source URL; leave any unverifiable number 0 — never estimate or use regional averages.', 90000);
   if (!text) return null;
   const m = text.match(/```json\s*([\s\S]*?)\s*```/) || text.match(/\{[\s\S]*\}/);
   if (!m) return null;
@@ -4763,32 +4981,39 @@ Use CURRENT LOCAL figures from the utility authority / credible well & septic co
   };
   const publicWater = resolve(o.publicWater);
   const publicSewer = resolve(o.publicSewer);
-  let real = false;
+
+  // REAL PRICES ONLY: a line is "verified" only when the grounded search
+  // returned an actual figure. Unverified lines carry NO dollar amount — no
+  // baseline ranges, no regional averages, no guesses.
+  const range = (lowRaw: any, highRaw: any): { low: number; high: number; verified: boolean } => {
+    const low = num(lowRaw), high = num(highRaw);
+    if (!low && !high) return { low: 0, high: 0, verified: false };
+    const lo = low || high, hi = Math.max(low, high);
+    return { low: lo, high: hi, verified: true };
+  };
 
   const lines: UtilityLine[] = [];
   // WATER: public tap fee when served, else private well.
   if (publicWater === 'available') {
-    const low = num(o.waterTapLow), high = num(o.waterTapHigh);
-    if (low || high) real = true;
-    lines.push({ name: 'Public water tap fee', kind: 'water', isPublic: true, status: 'available', low: low || UTIL_FALLBACK.waterTapLow, high: high || Math.max(high, low, UTIL_FALLBACK.waterTapHigh), note: 'municipal water tap / connection / impact fee' });
+    const r = range(o.waterTapLow, o.waterTapHigh);
+    lines.push({ name: 'Public water tap fee', kind: 'water', isPublic: true, status: 'available', ...r, note: 'municipal water tap / connection / impact fee' });
   } else {
-    const low = num(o.wellLow), high = num(o.wellHigh);
-    if (low || high) real = true;
-    lines.push({ name: 'Private well', kind: 'water', isPublic: false, status: publicWater, low: low || UTIL_FALLBACK.wellLow, high: high || Math.max(high, low, UTIL_FALLBACK.wellHigh), note: 'drill + pump + connection (no public water)' });
+    const r = range(o.wellLow, o.wellHigh);
+    lines.push({ name: 'Private well', kind: 'water', isPublic: false, status: publicWater, ...r, note: 'drill + pump + connection (no public water)' });
   }
   // SEWER: public tap fee when served, else septic.
   if (publicSewer === 'available') {
-    const low = num(o.sewerTapLow), high = num(o.sewerTapHigh);
-    if (low || high) real = true;
-    lines.push({ name: 'Public sewer tap fee', kind: 'sewer', isPublic: true, status: 'available', low: low || UTIL_FALLBACK.sewerTapLow, high: high || Math.max(high, low, UTIL_FALLBACK.sewerTapHigh), note: 'municipal sewer tap / connection / impact fee' });
+    const r = range(o.sewerTapLow, o.sewerTapHigh);
+    lines.push({ name: 'Public sewer tap fee', kind: 'sewer', isPublic: true, status: 'available', ...r, note: 'municipal sewer tap / connection / impact fee' });
   } else {
-    const low = num(o.septicLow), high = num(o.septicHigh);
-    if (low || high) real = true;
-    lines.push({ name: 'Septic system', kind: 'sewer', isPublic: false, status: publicSewer, low: low || UTIL_FALLBACK.septicLow, high: high || Math.max(high, low, UTIL_FALLBACK.septicHigh), note: 'perc/soil test + conventional system install (no public sewer)' });
+    const r = range(o.septicLow, o.septicHigh);
+    lines.push({ name: 'Septic system', kind: 'sewer', isPublic: false, status: publicSewer, ...r, note: 'perc/soil test + conventional system install (no public sewer)' });
   }
 
-  const totalLow = lines.reduce((s, l) => s + l.low, 0);
-  const totalHigh = lines.reduce((s, l) => s + l.high, 0);
+  const real = lines.some((l) => l.verified);
+  // Totals sum ONLY verified lines (0 when nothing was verifiable).
+  const totalLow = lines.reduce((s, l) => s + (l.verified ? l.low : 0), 0);
+  const totalHigh = lines.reduce((s, l) => s + (l.verified ? l.high : 0), 0);
   const bothPublic = publicWater === 'available' && publicSewer === 'available';
   const neitherPublic = publicWater !== 'available' && publicSewer !== 'available';
   const summary = bothPublic
