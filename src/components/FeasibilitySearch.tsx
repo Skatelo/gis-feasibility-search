@@ -61,7 +61,8 @@ import {
   ImageOff,
   Landmark,
   Hammer,
-  Trees
+  Trees,
+  X
 } from 'lucide-react';
 
 
@@ -696,6 +697,8 @@ export const FeasibilitySearch: FC = () => {
   const [reportSaved, setReportSaved] = useState(false);
 
   // Floating AI chat bubble
+  const [chatOpen, setChatOpen] = useState(false);
+  const [chatUnread, setChatUnread] = useState(false);
 
   // Report-generation countdown ({ startedAt, etaMs } while the AI report runs)
   const [reportTimer, setReportTimer] = useState<{ startedAt: number; etaMs: number } | null>(null);
@@ -747,6 +750,14 @@ export const FeasibilitySearch: FC = () => {
       chatEndRef.current.scrollIntoView({ behavior: 'smooth' });
     }
   }, [chatHistory, chatLoading]);
+
+  // Unread indicator on the chat bubble when an answer arrives while it's closed
+  useEffect(() => {
+    if (!chatOpen && chatHistory.length > 1 && chatHistory[chatHistory.length - 1].role === 'model') {
+      setChatUnread(true);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chatHistory]);
 
   // Build the cost estimate + material takeoff (each shows as it arrives). If
   // BOTH fail (e.g. a transient Gemini rate limit), the card stays and offers a
@@ -2485,7 +2496,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
       </div>
 
       {/* Main Dashboard Split Grid */}
-      <div className={`dashboard-content-grid${data ? ' with-assistant' : ''}`}>
+      <div className="dashboard-content-grid">
         {/* Left Column: Result Details / Stats */}
         <div className="dashboard-sidebar-column">
           {data ? (
@@ -3758,10 +3769,10 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
             </div>
           )}
         </div>
+      </div>
 
-        {/* Docked Land Assistant — full-height right-side panel */}
-        {data && (
-        <div className="dashboard-assistant-column">
+      {/* Floating AI assistant — always available while you scroll */}
+      <div className={chatOpen ? 'chat-fab-panel open' : 'chat-fab-panel'}>
               <div className="card registry-card chatbot-card gemini-chat-container">
                 <div className="gemini-chat-header">
                   <div className="gemini-logo-wrapper">
@@ -4027,9 +4038,17 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                   </div>
                 </form>
               </div>
-        </div>
-        )}
       </div>
+      <button
+        type="button"
+        className="chat-fab"
+        onClick={() => { const next = !chatOpen; setChatOpen(next); if (next) setChatUnread(false); }}
+        title={chatOpen ? 'Close the AI assistant' : 'Chat with the AI about this property'}
+        aria-label="AI assistant chat"
+      >
+        {chatOpen ? <X size={24} /> : <MessageCircle size={24} />}
+        {!chatOpen && (chatUnread || chatLoading) && <span className={chatLoading ? 'chat-fab-dot pulsing' : 'chat-fab-dot'} />}
+      </button>
 
       {/* Saved Reports drawer */}
       <ReportsDrawer
