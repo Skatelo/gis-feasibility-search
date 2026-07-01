@@ -7,6 +7,7 @@ import type { ChatMessage, ChatAttachment } from '../services/feasibilityService
 import { saveReport, getReportEtaMs, recordReportDuration } from '../services/reportStore';
 import { listConversations, saveConversation, deleteConversation as deleteConvo, newConversationId, deriveTitle } from '../services/chatStore';
 import type { ChatConversation } from '../services/chatStore';
+import { getSearchHistory, addSearchHistory } from '../services/searchHistoryStore';
 import { ReportsDrawer } from './ReportsDrawer';
 import type { SiteFeasibilityData, ConstructionCostEstimate, CostLineItem, MaterialTakeoff, LandClearingEstimate } from '../types/feasibility';
 
@@ -1525,16 +1526,9 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
   const osmDataLayerRef = useRef<any>(null);
   const osmCacheRef = useRef<{ key: string; fc: any } | null>(null);
 
-  // Load history on mount
+  // Load search history on mount (merges cloud-synced history when signed in).
   useEffect(() => {
-    try {
-      const stored = localStorage.getItem('gis_search_history');
-      if (stored) {
-        setHistory(JSON.parse(stored));
-      }
-    } catch (e) {
-      console.error("Failed to load search history:", e);
-    }
+    getSearchHistory().then(setHistory).catch((e) => console.error('Failed to load search history:', e));
   }, []);
 
   // Open the Reports drawer from the app header ("My Reports" button)
@@ -2276,20 +2270,11 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
     }
   };
 
-  // Save history helper (associates county and address string)
+  // Save history helper (associates county and address string) — syncs across devices.
   const addToHistory = (address: string, county: string) => {
-    try {
-      const filtered = history.filter(item => {
-        const itemAddress = typeof item === 'string' ? item : item.address;
-        return itemAddress.toLowerCase() !== address.toLowerCase();
-      });
-      const newItem = { address, county };
-      const updated = [newItem, ...filtered].slice(0, 5); // Keep last 5
-      setHistory(updated);
-      localStorage.setItem('gis_search_history', JSON.stringify(updated));
-    } catch (e) {
-      console.error("Failed to update search history:", e);
-    }
+    addSearchHistory(address, county)
+      .then(setHistory)
+      .catch((e) => console.error('Failed to update search history:', e));
   };
 
   const handleSearch = async (addressToSearch: string, countyOverride?: string) => {

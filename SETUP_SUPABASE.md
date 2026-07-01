@@ -110,10 +110,32 @@ create policy "Users manage their own comp listings"
 
 create index if not exists comp_runs_user_run_at
   on public.comp_runs (user_id, run_at desc);
+
+-- Cross-device sync for Land Assistant chat history + GIS search history.
+-- A generic per-user key/value store (one row per key, e.g. 'chat_conversations',
+-- 'search_history'); the whole blob is written on each change.
+create table if not exists public.user_sync (
+  user_id uuid not null references auth.users(id) on delete cascade,
+  key text not null,
+  value jsonb,
+  updated_at timestamptz not null default now(),
+  primary key (user_id, key)
+);
+
+alter table public.user_sync enable row level security;
+
+create policy "Users manage their own sync data"
+  on public.user_sync for all
+  using (auth.uid() = user_id)
+  with check (auth.uid() = user_id);
 ```
 
 Row Level Security means each signed-in user can only ever see their own
 profile, keys, and reports — even though the app uses the public anon key.
+
+> **Already ran the earlier setup?** Just paste and run the **`user_sync`** block
+> above (it's `create table if not exists`, so re-running the rest is harmless) to
+> turn on cross-device sync of your Land Assistant chats and GIS search history.
 
 ## 3. Enable REAL Google Sign-In
 
