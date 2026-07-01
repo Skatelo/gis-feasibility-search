@@ -3,8 +3,10 @@ import type { FormEvent, KeyboardEvent, FC } from 'react';
 import { createRoot } from 'react-dom/client';
 import { executeLandAnalysis, chatWithGemini, chatFollowUp, getUserKeys, detectNcCounty, lookupParcelById, fetchConstructionCostEstimate, fetchMaterialTakeoff, fetchLandClearingEstimate, fetchGoogleDistanceMatrixComps, getCompPrefs, getReportAutoGenerate, enformionConfigured, enformionContactEnrich, enformionPersonSearch, enformionBusinessSearch, looksLikeBusiness, enformionDiagMessage, getLastEnformionShape, getLastEnformionDetail } from '../services/feasibilityService';
 import type { SkipTraceContact } from '../services/feasibilityService';
-import type { ChatMessage } from '../services/feasibilityService';
+import type { ChatMessage, ChatAttachment } from '../services/feasibilityService';
 import { saveReport, getReportEtaMs, recordReportDuration } from '../services/reportStore';
+import { listConversations, saveConversation, deleteConversation as deleteConvo, newConversationId, deriveTitle } from '../services/chatStore';
+import type { ChatConversation } from '../services/chatStore';
 import { ReportsDrawer } from './ReportsDrawer';
 import type { SiteFeasibilityData, ConstructionCostEstimate, CostLineItem, MaterialTakeoff, LandClearingEstimate } from '../types/feasibility';
 
@@ -62,6 +64,8 @@ import {
   Landmark,
   Hammer,
   Trees,
+  Plus,
+  Trash2,
   X
 } from 'lucide-react';
 
@@ -712,6 +716,106 @@ export const FeasibilitySearch: FC = () => {
   const [chatLoading, setChatLoading] = useState(false);
   const chatEndRef = useRef<HTMLDivElement>(null);
   const chatInputRef = useRef<HTMLTextAreaElement>(null);
+
+  // Attachments pending on the next message (images / PDFs / text docs)
+  const [pendingAttachments, setPendingAttachments] = useState<ChatAttachment[]>([]);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Chat history (persisted conversations)
+  const [conversations, setConversations] = useState<ChatConversation[]>([]);
+  const [activeConvoId, setActiveConvoId] = useState<string>(() => newConversationId());
+  const [showHistory, setShowHistory] = useState(false);
+  const activeConvoIdRef = useRef<string>('');
+  activeConvoIdRef.current = activeConvoId;
+
+  const refreshConversations = () => { listConversations().then(setConversations).catch(() => {}); };
+  useEffect(() => { refreshConversations(); }, []);
+
+  // Auto-save the active conversation when messages settle (skips while streaming).
+  useEffect(() => {
+    if (chatHistory.length === 0 || chatLoading) return;
+    const now = Date.now();
+    saveConversation({
+      id: activeConvoIdRef.current,
+      title: deriveTitle(chatHistory, data?.inputAddress),
+      address: data?.inputAddress,
+      messages: chatHistory,
+      createdAt: now,
+      updatedAt: now,
+    }).then(refreshConversations).catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chatHistory, chatLoading]);
+
+  // Downscale an image to a small JPEG data-URL for previews/history thumbnails.
+  const downscaleImage = (dataUrl: string, max = 320): Promise<string> => new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      const scale = Math.min(1, max / Math.max(img.width, img.height));
+      const w = Math.round(img.width * scale), h = Math.round(img.height * scale);
+      const canvas = document.createElement('canvas');
+      canvas.width = w; canvas.height = h;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) { resolve(dataUrl); return; }
+      ctx.drawImage(img, 0, 0, w, h);
+      try { resolve(canvas.toDataURL('image/jpeg', 0.8)); } catch { resolve(dataUrl); }
+    };
+    img.onerror = () => resolve(dataUrl);
+    img.src = dataUrl;
+  });
+
+  const readFileAsAttachment = (file: File): Promise<ChatAttachment | null> => new Promise((resolve) => {
+    const isImage = file.type.startsWith('image/');
+    const isPdf = file.type === 'application/pdf' || /\.pdf$/i.test(file.name);
+    const isText = file.type.startsWith('text/') || /\.(txt|csv|md|json|log)$/i.test(file.name);
+    if (file.size > 18 * 1024 * 1024) { alert(`"${file.name}" is too large (max 18 MB).`); resolve(null); return; }
+    const reader = new FileReader();
+    if (isImage || isPdf) {
+      reader.onload = async () => {
+        const result = String(reader.result || '');
+        const base64 = result.split(',')[1] || '';
+        const previewUrl = isImage ? await downscaleImage(result) : undefined;
+        resolve({ name: file.name, mimeType: file.type || (isPdf ? 'application/pdf' : 'image/png'), kind: isImage ? 'image' : 'pdf', data: base64, previewUrl });
+      };
+      reader.onerror = () => resolve(null);
+      reader.readAsDataURL(file);
+    } else if (isText) {
+      reader.onload = () => resolve({ name: file.name, mimeType: 'text/plain', kind: 'text', data: String(reader.result || '').slice(0, 200000) });
+      reader.onerror = () => resolve(null);
+      reader.readAsText(file);
+    } else {
+      alert(`"${file.name}" isn't a supported type. Attach images, PDFs, or text documents.`);
+      resolve(null);
+    }
+  });
+
+  const handleFilesSelected = async (files: FileList | null) => {
+    if (!files || !files.length) return;
+    const read = await Promise.all(Array.from(files).map(readFileAsAttachment));
+    const ok = read.filter((a): a is ChatAttachment => !!a);
+    if (ok.length) setPendingAttachments((prev) => [...prev, ...ok]);
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  };
+
+  const startNewChat = () => {
+    resetChatUiState();
+    setPendingAttachments([]);
+    setActiveConvoId(newConversationId());
+    setShowHistory(false);
+    setChatInput('');
+  };
+
+  const loadConversation = (convo: ChatConversation) => {
+    setChatHistory(convo.messages);
+    setActiveConvoId(convo.id);
+    setPendingAttachments([]);
+    setShowHistory(false);
+  };
+
+  const removeConversation = async (id: string) => {
+    await deleteConvo(id).catch(() => {});
+    refreshConversations();
+    if (id === activeConvoIdRef.current) startNewChat();
+  };
   // Grow the chat textarea to fit what's typed (wraps to multiple lines) so the
   // full question is always visible; caps out then scrolls.
   const autoGrowChat = (el: HTMLTextAreaElement | null) => {
@@ -892,6 +996,8 @@ export const FeasibilitySearch: FC = () => {
   };
 
   const generateInitialChatReport = async (reportData: SiteFeasibilityData, costEstimate?: ConstructionCostEstimate) => {
+    setActiveConvoId(newConversationId()); // a new parcel report = a new conversation
+    setPendingAttachments([]);
     setChatLoading(true);
     setChatHistory([]);
     setReportSaved(false);
@@ -1029,12 +1135,17 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
 
   const handleChatSubmit = async (e?: FormEvent) => {
     e?.preventDefault();
-    if (!chatInput.trim() || !data || chatLoading) return;
+    if ((!chatInput.trim() && pendingAttachments.length === 0) || !data || chatLoading) return;
 
-    const userMessage: ChatMessage = { role: 'user', content: chatInput.trim() };
+    const userMessage: ChatMessage = {
+      role: 'user',
+      content: chatInput.trim(),
+      ...(pendingAttachments.length ? { attachments: pendingAttachments } : {}),
+    };
     const updatedHistory = [...chatHistory, userMessage];
     setChatHistory(updatedHistory);
     setChatInput('');
+    setPendingAttachments([]);
     if (chatInputRef.current) chatInputRef.current.style.height = 'auto'; // reset after send
     setChatLoading(true);
 
@@ -3803,7 +3914,49 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                     </div>
                     <span className="gemini-subtitle">Gemini 3.5 Flash — Google Search grounded</span>
                   </div>
+                  <div className="chat-header-actions">
+                    <button type="button" className="chat-header-btn" title="New chat" onClick={startNewChat}>
+                      <Plus size={16} />
+                    </button>
+                    <button type="button" className={`chat-header-btn ${showHistory ? 'active' : ''}`} title="Chat history" onClick={() => setShowHistory((s) => !s)}>
+                      <History size={16} />
+                    </button>
+                  </div>
                 </div>
+
+                {showHistory && (
+                  <div className="chat-history-panel">
+                    <div className="chat-history-head">
+                      <span>Chat history</span>
+                      <button type="button" className="chat-history-new" onClick={startNewChat}><Plus size={13} /> New chat</button>
+                    </div>
+                    {conversations.length === 0 ? (
+                      <div className="chat-history-empty">No saved chats yet.</div>
+                    ) : (
+                      <div className="chat-history-list">
+                        {conversations.map((c) => (
+                          <div key={c.id} className={`chat-history-item ${c.id === activeConvoId ? 'active' : ''}`} onClick={() => loadConversation(c)}>
+                            <div className="chat-history-item-main">
+                              <MessageCircle size={13} className="chat-history-item-icon" />
+                              <div className="chat-history-item-text">
+                                <span className="chat-history-item-title">{c.title || 'New chat'}</span>
+                                {c.address && <span className="chat-history-item-sub">{c.address}</span>}
+                              </div>
+                            </div>
+                            <button
+                              type="button"
+                              className="chat-history-del"
+                              title="Delete chat"
+                              onClick={(e) => { e.stopPropagation(); removeConversation(c.id); }}
+                            >
+                              <Trash2 size={13} />
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
 
                 <div className="chat-messages-container borderless-chat-body">
                   {chatHistory.length === 0 && !chatLoading ? (
@@ -3833,10 +3986,26 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                     chatHistory.map((msg, idx) => (
                       <div key={idx} className={`chat-message ${msg.role}`}>
                         {msg.role === 'user' ? (
-                          <div className="message-content-wrapper" style={{ display: 'flex', justifyContent: 'flex-end', width: '100%' }}>
-                            <div className="message-bubble user-bubble">
-                              {msg.content}
-                            </div>
+                          <div className="message-content-wrapper" style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', width: '100%' }}>
+                            {msg.attachments && msg.attachments.length > 0 && (
+                              <div className="msg-attachments">
+                                {msg.attachments.map((att, aIdx) => (
+                                  att.kind === 'image' && att.previewUrl ? (
+                                    <img key={aIdx} src={att.previewUrl} alt={att.name} className="msg-attachment-img" />
+                                  ) : (
+                                    <div key={aIdx} className="msg-attachment-file">
+                                      <FileText size={13} />
+                                      <span>{att.name}</span>
+                                    </div>
+                                  )
+                                ))}
+                              </div>
+                            )}
+                            {msg.content && (
+                              <div className="message-bubble user-bubble">
+                                {msg.content}
+                              </div>
+                            )}
                           </div>
                         ) : (
                           <>
@@ -4021,14 +4190,37 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                 </div>
 
                 <form onSubmit={handleChatSubmit} className="gemini-input-form">
+                  {pendingAttachments.length > 0 && (
+                    <div className="pending-attachments">
+                      {pendingAttachments.map((att, i) => (
+                        <div key={i} className={`pending-chip ${att.kind === 'image' ? 'has-thumb' : ''}`}>
+                          {att.kind === 'image' && att.previewUrl
+                            ? <img src={att.previewUrl} alt={att.name} className="pending-thumb" />
+                            : <FileText size={14} />}
+                          <span className="pending-name">{att.name}</span>
+                          <button type="button" className="pending-remove" title="Remove" onClick={() => setPendingAttachments((prev) => prev.filter((_, j) => j !== i))}>
+                            <X size={12} />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    multiple
+                    accept="image/*,application/pdf,.pdf,.txt,.csv,.md,.json,.log"
+                    style={{ display: 'none' }}
+                    onChange={(e) => handleFilesSelected(e.target.files)}
+                  />
                   <div className="gemini-input-capsule">
-                    <button type="button" className="input-attachment-btn" title="Add files or images">
+                    <button type="button" className="input-attachment-btn" title="Attach images or documents" onClick={() => fileInputRef.current?.click()}>
                       <Paperclip size={16} />
                     </button>
                     <textarea
                       ref={chatInputRef}
                       rows={1}
-                      placeholder="Ask about setbacks, ADUs, slope grading costs..."
+                      placeholder="Ask anything, or attach an image/document..."
                       value={chatInput}
                       onChange={(e) => { setChatInput(e.target.value); autoGrowChat(e.target); }}
                       onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleChatSubmit(); } }}
@@ -4038,10 +4230,10 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                     <button type="button" className="input-mic-btn" title="Use microphone">
                       <Mic size={16} />
                     </button>
-                    <button 
-                      type="submit" 
-                      disabled={chatLoading || !chatInput.trim()} 
-                      className={`gemini-send-btn ${chatInput.trim() ? 'active' : ''}`}
+                    <button
+                      type="submit"
+                      disabled={chatLoading || (!chatInput.trim() && pendingAttachments.length === 0)}
+                      className={`gemini-send-btn ${(chatInput.trim() || pendingAttachments.length > 0) ? 'active' : ''}`}
                       title="Send prompt"
                     >
                       <Send size={14} />

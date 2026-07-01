@@ -4684,10 +4684,23 @@ export interface ChatSource {
   uri: string;
 }
 
+/** A file the user attached to a chat message (image, PDF, or text document). */
+export interface ChatAttachment {
+  name: string;
+  mimeType: string;
+  kind: 'image' | 'pdf' | 'text';
+  /** base64 (no data: prefix) for image/pdf; the extracted text for kind 'text'.
+   *  Omitted on messages loaded from history (only the preview is kept there). */
+  data?: string;
+  /** Small data-URL thumbnail for re-display (images only). */
+  previewUrl?: string;
+}
+
 export interface ChatMessage {
   role: 'user' | 'model';
   content: string;
   sources?: ChatSource[];
+  attachments?: ChatAttachment[];
 }
 
 // ---------------------------------------------------------------------------
@@ -5248,9 +5261,22 @@ RULES:
 - Answer the user's exact question DIRECTLY and BRIEFLY — a few sentences or a short bulleted list. Lead with the answer.
 - Use the report + the facts below; only use Google Search when the question needs CURRENT external facts (rates, prices, codes, market) you don't already have.
 - No preamble, no restating the question, no re-dumping the whole report. Plain markdown only — no code blocks; use × and ÷ for math, never the asterisk.
+- If the user attaches images or documents (site plans, surveys, photos, listings, PDFs), ANALYZE them directly and tie your findings to this parcel and its development.
 PARCEL: ${reportData.inputAddress} · ${reportData.countyName} County, NC · ${acres} acres · zoning ${reportData.zoningCode}${reportData.ownerName ? ` · owner ${reportData.ownerName}` : ''}.`;
 
-  const contents = messages.map((m) => ({ role: m.role === 'user' ? 'user' : 'model', parts: [{ text: m.content }] }));
+  const contents = messages.map((m) => {
+    const parts: any[] = [];
+    let textPrefix = '';
+    for (const att of m.attachments || []) {
+      if ((att.kind === 'image' || att.kind === 'pdf') && att.data) {
+        parts.push({ inline_data: { mime_type: att.mimeType, data: att.data } });
+      } else if (att.kind === 'text' && att.data) {
+        textPrefix += `\n\n[Attached document: ${att.name}]\n${att.data}\n`;
+      }
+    }
+    parts.push({ text: `${textPrefix}${m.content}`.trim() || '(see attached files)' });
+    return { role: m.role === 'user' ? 'user' : 'model', parts };
+  });
   const GEN_BASE = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash`;
   const body: any = { contents, systemInstruction: { parts: [{ text: system }] }, tools: [{ google_search: {} }] };
 
