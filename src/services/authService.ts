@@ -17,6 +17,21 @@ export interface SessionUser {
   provider: string;
   /** Supabase auth user id (absent in local fallback mode). */
   userId?: string;
+  /** Display first name (from OAuth profile metadata, else derived from email). */
+  firstName?: string;
+}
+
+/** Best-effort first name: OAuth profile metadata first, then the email local part. */
+export function deriveFirstName(meta: Record<string, any> | undefined | null, email: string): string {
+  const m = meta || {};
+  const raw =
+    m.given_name || m.first_name ||
+    (typeof m.full_name === 'string' ? m.full_name.trim().split(/\s+/)[0] : '') ||
+    (typeof m.name === 'string' ? m.name.trim().split(/\s+/)[0] : '') ||
+    (email ? email.split('@')[0].replace(/[._-]+/g, ' ').replace(/\d+/g, '').trim().split(/\s+/)[0] : '');
+  const clean = String(raw || '').trim();
+  if (!clean) return 'Account';
+  return clean.charAt(0).toUpperCase() + clean.slice(1);
 }
 
 const MIRROR_KEY = 'gis_active_user';
@@ -65,6 +80,7 @@ export async function buildSessionUser(authUser: User): Promise<SessionUser> {
     keys,
     provider,
     userId: authUser.id,
+    firstName: deriveFirstName(authUser.user_metadata, authUser.email || ''),
   };
   writeSessionMirror(user);
   return user;

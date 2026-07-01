@@ -7,7 +7,7 @@ import { AuthPortal } from './components/AuthPortal';
 import { SettingsDrawer } from './components/SettingsDrawer';
 import { Database, FileJson, FolderOpen, Globe, Settings, Map as MapIcon, Sparkles, Fingerprint } from 'lucide-react';
 import { getSupabase, isSupabaseConfigured } from './services/supabaseClient';
-import { buildSessionUser, signOutEverywhere, writeSessionMirror } from './services/authService';
+import { buildSessionUser, signOutEverywhere, writeSessionMirror, deriveFirstName } from './services/authService';
 
 
 function App() {
@@ -188,13 +188,13 @@ function App() {
           <button
             type="button"
             onClick={() => setIsSettingsOpen(true)}
-            className={`header-settings-btn ${!keysConfigured ? 'keys-alert' : ''}`}
+            className={`header-settings-btn account-btn ${!keysConfigured ? 'keys-alert' : ''}`}
             title="Account & API Settings"
           >
             <Settings size={18} />
-            <div className="user-initial">
-              {activeUser.email.substring(0, 2).toUpperCase()}
-            </div>
+            <span className="account-first-name">
+              {activeUser.firstName || deriveFirstName(null, activeUser.email || '')}
+            </span>
           </button>
         </div>
       </header>
