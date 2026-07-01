@@ -1668,39 +1668,62 @@ export function enformionDiagMessage(): string {
   return `Enformion returned HTTP ${d.status}.`;
 }
 
-async function enformionCall(path: string, searchType: string, body: any): Promise<any | null> {
+/** Human-readable Enformion error text (validation messages, input errors) —
+ *  PII-safe: these are system fields about the REQUEST, not a person. */
+function humanEnfError(d: any): string | undefined {
+  if (!d || typeof d !== 'object') return undefined;
+  const parts: string[] = [];
+  const push = (v: any) => { const s = String(v ?? '').trim(); if (s && !parts.includes(s)) parts.push(s); };
+  if (d.error && typeof d.error === 'object') {
+    push(d.error.message); push(d.error.technicalErrorMessage);
+    if (Array.isArray(d.error.inputErrors)) d.error.inputErrors.forEach(push);
+    if (Array.isArray(d.error.warnings)) d.error.warnings.forEach(push);
+  }
+  push(d.title); // ASP.NET validation-problem shape
+  if (d.errors && typeof d.errors === 'object') {
+    for (const [k, v] of Object.entries(d.errors)) push(`${k}: ${Array.isArray(v) ? v.join('; ') : String(v)}`);
+  }
+  if (typeof d.message === 'string') push(d.message);
+  return parts.length ? parts.join(' · ').slice(0, 300) : undefined;
+}
+
+/** Remembered working Enformion host — accounts are provisioned on either the
+ *  production or the dev/sandbox host; once one answers, stick with it. */
+let enfGoodHost: 'prod' | 'dev' | null = null;
+
+async function enformionCall(path: string, searchType: string, body: any, timeoutMs = 45000): Promise<any | null> {
   const k = getUserKeys();
   if (!k.enformionApName || !k.enformionApPassword) { lastEnformionDiag = { status: 0, reason: 'not configured' }; return null; }
-  try {
-    const res = await fetchWithTimeout('/.netlify/functions/enformion', 30000, {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        'x-enformion-name': k.enformionApName,
-        'x-enformion-password': k.enformionApPassword,
-        'x-enformion-search-type': searchType,
-        'x-enformion-path': path,
-      },
-      body: JSON.stringify(body),
-    });
-    if (!res.ok) { lastEnformionDiag = { status: 0, reason: 'proxy error' }; return null; }
-    const env = await res.json(); // { ok, status, host, data, error }
-    const d = env?.data;
-    // PII-safe outcome values — system fields about the REQUEST, not a person.
-    const detail = d ? JSON.stringify({
-      requestType: d.requestType, message: d.message, isError: d.isError,
-      errorCode: d.error?.code, errorMessage: d.error?.message, technical: d.error?.technicalErrorMessage,
-      totalResults: d.pagination?.totalResults,
-      inputErrors: d.error?.inputErrors, warnings: d.error?.warnings,
-    }) : undefined;
-    lastEnformionDiag = { status: Number(env?.status) || 0, host: env?.host, reason: env?.error, shape: d != null ? describeShape(d) : undefined, detail };
-    if (!env?.ok) {
-      if (env?.status === 401 || env?.status === 403) console.warn(`Enformion ${path}: auth failed (HTTP ${env.status}) — check the AP Name / AP Password in Settings.`);
-      else console.warn(`Enformion ${path}: HTTP ${env?.status} via ${env?.host || '?'}.`, env?.error || '');
-      return null;
-    }
-    return env.data;
-  } catch { lastEnformionDiag = { status: 0, reason: 'network' }; return null; }
+  // Client-side host failover: one upstream call per proxy invocation (so the
+  // serverless function never hits its 10s limit), trying the KNOWN-GOOD host
+  // first and the other one on ANY failure — including 400s, since some search
+  // types only exist on one host.
+  const hosts: ('prod' | 'dev')[] = enfGoodHost === 'dev' ? ['dev', 'prod'] : ['prod', 'dev'];
+  for (const host of hosts) {
+    try {
+      const res = await fetchWithTimeout('/.netlify/functions/enformion', timeoutMs, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-enformion-name': k.enformionApName,
+          'x-enformion-password': k.enformionApPassword,
+          'x-enformion-search-type': searchType,
+          'x-enformion-path': path,
+          'x-enformion-host': host,
+        },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) { lastEnformionDiag = { status: 0, reason: `proxy error (HTTP ${res.status})` }; continue; }
+      const env = await res.json(); // { ok, status, host, data, error }
+      const d = env?.data;
+      const detail = humanEnfError(d) || (typeof env?.error === 'string' ? env.error : undefined);
+      lastEnformionDiag = { status: Number(env?.status) || 0, host: env?.host, reason: env?.error, shape: d != null ? describeShape(d) : undefined, detail };
+      if (env?.ok) { enfGoodHost = host; return env.data; }
+      if (env?.status === 401 || env?.status === 403) console.warn(`Enformion ${path} via ${host}: auth failed (HTTP ${env.status}) — check the AP Name / AP Password in Settings.`);
+      else console.warn(`Enformion ${path} via ${host}: HTTP ${env?.status}.`, detail || env?.error || '');
+    } catch { lastEnformionDiag = { status: 0, reason: 'network' }; }
+  }
+  return null;
 }
 
 const cap = (s: string) => (s ? s.charAt(0).toUpperCase() + s.slice(1).toLowerCase() : s);
@@ -2176,11 +2199,19 @@ export async function enformionPropertySearch(address: string): Promise<Enformio
 /** Enformion Debt Search V2 (PRO) — nationwide bankruptcies, liens & judgments
  *  for a person. DebtType "0" = all. Returns null on error / no access;
  *  a result with 0 records means Enformion answered "clean". */
-export async function enformionDebtSearch(firstName: string, lastName: string, cityState?: string): Promise<EnfDebtResult | null> {
+export async function enformionDebtSearch(firstName: string, lastName: string, state?: string): Promise<EnfDebtResult | null> {
   if (!firstName.trim() || !lastName.trim()) return null;
+  // Per the official example, AddressLine2 takes the two-letter STATE (e.g. "NC").
+  const st = (state || '').trim().toUpperCase().match(/[A-Z]{2}$/)?.[0] || '';
   const body: any = { FirstName: cap(firstName.trim()), LastName: cap(lastName.trim()), DebtType: '0', Page: 1, ResultsPerPage: 10 };
-  if (cityState) body.AddressLine2 = cityState;
-  const data = await enformionCall('/DebtSearch/V2', 'DebtV2', body);
+  if (st) body.AddressLine2 = st;
+  let data = await enformionCall('/DebtSearch/V2', 'DebtV2', body);
+  // Validation 400 → retry once with the minimal name-only body.
+  if (!data && lastEnformionDiag.status === 400 && body.AddressLine2) {
+    const slim = { ...body };
+    delete slim.AddressLine2;
+    data = await enformionCall('/DebtSearch/V2', 'DebtV2', slim);
+  }
   if (!data) return null;
   const records: EnfDebtRecord[] = ciArr(data, 'debtRecords').map((r: any) => {
     const names = ciArr(r, 'names');
@@ -2214,7 +2245,12 @@ export async function enformionEvictionSearch(streetAddress: string, city: strin
   const body: any = { StreetAddress: streetAddress.trim(), State: state.trim().toUpperCase(), Page: 1, ResultsPerPage: 10 };
   if (city.trim()) body.City = city.trim();
   if (zip && zip.trim()) body.ZipCode = zip.trim();
-  const data = await enformionCall('/EvictionSearch', 'Eviction', body);
+  let data = await enformionCall('/EvictionSearch', 'Eviction', body);
+  // Validation 400 (the City/Zip combination rules vary) → retry with the
+  // minimal spec-guaranteed body: StreetAddress + State only.
+  if (!data && lastEnformionDiag.status === 400 && (body.City || body.ZipCode)) {
+    data = await enformionCall('/EvictionSearch', 'Eviction', { StreetAddress: body.StreetAddress, State: body.State, Page: 1, ResultsPerPage: 10 });
+  }
   if (!data) return null;
   return ciArr(data, 'evictionRecords').map((r: any) => {
     const det = ciArr(r, 'evictionDetails')[0] || {};

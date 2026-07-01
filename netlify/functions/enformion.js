@@ -1,20 +1,23 @@
-// Enformion Go proxy — skip tracing (individuals & businesses). Enformion's API
-// doesn't send browser CORS headers, so the SPA can't call it directly; this
-// serverless function forwards the request with the user's own Enformion
-// credentials (passed per-call via headers, never stored server-side).
+// Enformion Go proxy — skip tracing, property records, debt & eviction search.
+// Enformion's API doesn't send browser CORS headers, so the SPA can't call it
+// directly; this serverless function forwards the request with the user's own
+// Enformion credentials (passed per-call via headers, never stored server-side).
 //
-// It tries the PRODUCTION host first, then the dev/sandbox host, so it works
-// regardless of which the account is provisioned on, and ALWAYS returns HTTP 200
-// with an envelope { ok, status, host, data } so the client can show the real
-// upstream status (auth vs. not-found vs. no-match) instead of a blind failure.
+// The client tells us WHICH host to use via x-enformion-host ('prod' | 'dev')
+// and handles failover itself — keeping each function invocation to ONE
+// upstream call so it never exceeds the serverless 10s execution limit.
+// Without the header we try prod then dev (legacy behavior), retrying on ANY
+// failure (400s included — some search types only exist on one host).
+// Every response is HTTP 200 with an envelope { ok, status, host, data, error }
+// so the client can show the real upstream status instead of a blind failure.
 //
 // ESM syntax because the project's package.json is "type": "module".
 
-const HOSTS = ['https://api.enformion.com', 'https://devapi.enformion.com'];
+const HOSTS = { prod: 'https://api.enformion.com', dev: 'https://devapi.enformion.com' };
 
 const CORS = {
   'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Headers': 'content-type, x-enformion-name, x-enformion-password, x-enformion-search-type, x-enformion-path',
+  'Access-Control-Allow-Headers': 'content-type, x-enformion-name, x-enformion-password, x-enformion-search-type, x-enformion-path, x-enformion-host',
   'Access-Control-Allow-Methods': 'POST, OPTIONS',
 };
 
@@ -29,15 +32,29 @@ const ALLOWED_PATHS = new Set([
 
 const json = (obj) => ({ statusCode: 200, headers: { ...CORS, 'content-type': 'application/json' }, body: JSON.stringify(obj) });
 
+/** Fetch with a hard per-request timeout so one slow host can't consume the
+ *  whole serverless execution window. */
+async function fetchWithAbort(url, init, ms) {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), ms);
+  try {
+    return await fetch(url, { ...init, signal: ctrl.signal });
+  } finally {
+    clearTimeout(t);
+  }
+}
+
 export const handler = async (event) => {
   if (event.httpMethod === 'OPTIONS') return { statusCode: 204, headers: CORS, body: '' };
   if (event.httpMethod !== 'POST') return json({ ok: false, status: 405, error: 'POST only' });
 
   const h = event.headers || {};
-  const apName = h['x-enformion-name'] || h['X-Enformion-Name'] || '';
-  const apPassword = h['x-enformion-password'] || h['X-Enformion-Password'] || '';
-  const searchType = h['x-enformion-search-type'] || h['X-Enformion-Search-Type'] || '';
-  const path = h['x-enformion-path'] || h['X-Enformion-Path'] || '';
+  const hv = (name) => h[name] || h[name.toLowerCase()] || h[name.toUpperCase()] || '';
+  const apName = hv('x-enformion-name');
+  const apPassword = hv('x-enformion-password');
+  const searchType = hv('x-enformion-search-type');
+  const path = hv('x-enformion-path');
+  const hostPref = String(hv('x-enformion-host')).toLowerCase();
 
   if (!apName || !apPassword || !searchType || !ALLOWED_PATHS.has(path)) {
     return json({ ok: false, status: 400, error: 'Missing Enformion credentials / search-type, or unsupported path.' });
@@ -51,17 +68,22 @@ export const handler = async (event) => {
     'galaxy-search-type': searchType,
   };
 
+  const order = hostPref === 'dev' ? ['dev'] : hostPref === 'prod' ? ['prod'] : ['prod', 'dev'];
+  // One host → generous window; two hosts → split so both fit under ~10s.
+  const perCallMs = order.length === 1 ? 9000 : 4300;
+
   let last = { status: 0, host: '', text: '' };
-  for (const host of HOSTS) {
+  for (const key of order) {
+    const host = HOSTS[key];
     try {
-      const res = await fetch(`${host}${path}`, { method: 'POST', headers, body: event.body || '{}' });
+      const res = await fetchWithAbort(`${host}${path}`, { method: 'POST', headers, body: event.body || '{}' }, perCallMs);
       const text = await res.text();
       last = { status: res.status, host, text };
-      if (res.ok) break;                 // success — use it
-      if (![401, 403, 404].includes(res.status)) break; // a real (non-auth/route) error → don't retry the other host
-      // else: auth/route failure on this host → try the next host
+      if (res.ok) break; // success — use it
+      // else: ANY failure → try the next host (some search types only exist on one host)
     } catch (e) {
-      last = { status: 0, host, text: String((e && e.message) || e) };
+      const msg = String((e && e.name === 'AbortError') ? `Timed out after ${perCallMs}ms` : (e && e.message) || e);
+      last = { status: 0, host, text: msg };
     }
   }
 

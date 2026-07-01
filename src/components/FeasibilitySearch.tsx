@@ -884,11 +884,12 @@ export const FeasibilitySearch: FC = () => {
 
   // Enformion records for the searched address — three real API searches:
   //   1. Property Search V2  → deed, current owners, MORTGAGES & TRANSACTIONS
-  //   2. Debt Search V2      → owner's bankruptcies / liens / judgments (PRO)
-  //   3. Eviction Search     → TENANT HISTORY at the address (PRO)
-  // Property runs first (it can supply the owner name when the GIS has none);
-  // debt + eviction then run in parallel. Each section reports its own outcome.
-  const fetchEnformionRecords = (reportData: SiteFeasibilityData, seq: number) => {
+  //   2. Eviction Search     → TENANT HISTORY at the address (PRO)
+  //   3. Debt Search V2      → owner's bankruptcies / liens / judgments (PRO)
+  // Runs SEQUENTIALLY: the per-call diagnostics are shared module state, so
+  // parallel runs would report the wrong error under the wrong section, and
+  // property can supply the owner name for the debt search when GIS has none.
+  const fetchEnformionRecords = async (reportData: SiteFeasibilityData, seq: number) => {
     setEnfProperty(null);
     setEnfDebt(null);
     setEnfEvictions(null);
@@ -897,6 +898,14 @@ export const FeasibilitySearch: FC = () => {
     const addr = (reportData.inputAddress || '').trim();
     if (!enformionConfigured() || !addr) return;
     setEnfLoading(true);
+
+    // The REAL failure reason for the section that just ran: base status message
+    // plus Enformion's own error text (validation messages, input errors).
+    const errOf = (fallback: string) => {
+      const base = enformionDiagMessage() || fallback;
+      const detail = getLastEnformionDetail();
+      return detail && !base.includes(detail) ? `${base}\n${detail}` : base;
+    };
 
     // Parse "123 Main St, Town, NC 28027" pieces for the eviction search
     // (State is REQUIRED with StreetAddress per the Enformion spec).
@@ -907,71 +916,50 @@ export const FeasibilitySearch: FC = () => {
     const stateMatch = addr.match(/\b([A-Z]{2})\b\s*\d{5}/) || addr.match(/,\s*([A-Z]{2})\b/);
     const state = (stateMatch && stateMatch[1]) || 'NC';
 
-    // Owner name for the debt search — authoritative GIS first/last when
-    // present; otherwise the formatted owner name (first-last order).
-    const gisFirst = (reportData.ownerFirst || '').trim();
-    const gisLast = (reportData.ownerLast || '').trim();
-    const ownerName = (reportData.ownerName || '').trim();
+    try {
+      // 1. Property record (deed, mortgages, transactions).
+      let rec: EnformionPropertyRecord | null = null;
+      try { rec = await enformionPropertySearch(addr); } catch { /* handled below */ }
+      if (seq !== searchSeqRef.current) return;
+      if (rec) setEnfProperty(rec);
+      else setEnfErrors((p) => ({ ...p, property: errOf('Property record search failed — please try again.') }));
 
-    const done = { property: false, debt: false, eviction: false };
-    const settle = (k: keyof typeof done) => {
-      done[k] = true;
-      if (done.property && done.debt && done.eviction && seq === searchSeqRef.current) setEnfLoading(false);
-    };
+      // 2. Tenant history / evictions at the address.
+      let ev: EnfEvictionRecord[] | null = null;
+      try { ev = await enformionEvictionSearch(street, city, state, zip); } catch { /* handled below */ }
+      if (seq !== searchSeqRef.current) return;
+      if (ev) setEnfEvictions(ev);
+      else setEnfErrors((p) => ({ ...p, eviction: errOf('Eviction search failed — please try again.') }));
 
-    const runDebt = (first: string, last: string) => {
-      if (!first || !last) {
-        if (seq === searchSeqRef.current) setEnfErrors((p) => ({ ...p, debt: 'No individual owner name available to search (LLC/business owners: search the members via Skip Trace first).' }));
-        settle('debt');
-        return;
+      // 3. Debt search — best available individual owner name: authoritative GIS
+      // first/last, else the formatted owner name, else the deed's first
+      // individual current owner from the property record above.
+      let first = (reportData.ownerFirst || '').trim();
+      let last = (reportData.ownerLast || '').trim();
+      const ownerName = (reportData.ownerName || '').trim();
+      if ((!first || !last) && ownerName && !looksLikeBusiness(ownerName)) {
+        const t = ownerName.split(/\s+/).filter(Boolean);
+        if (t.length >= 2) { first = t[0]; last = t[t.length - 1]; }
       }
-      enformionDebtSearch(first, last, `${city ? city + ', ' : ''}${state}`)
-        .then((d) => {
-          if (seq !== searchSeqRef.current) return;
-          if (d) setEnfDebt(d);
-          else setEnfErrors((p) => ({ ...p, debt: enformionDiagMessage() }));
-        })
-        .catch(() => { if (seq === searchSeqRef.current) setEnfErrors((p) => ({ ...p, debt: 'Debt search failed — please try again.' })); })
-        .finally(() => settle('debt'));
-    };
-
-    // Eviction / tenant history — by ADDRESS (state required).
-    enformionEvictionSearch(street, city, state, zip)
-      .then((ev) => {
-        if (seq !== searchSeqRef.current) return;
-        if (ev) setEnfEvictions(ev);
-        else setEnfErrors((p) => ({ ...p, eviction: enformionDiagMessage() }));
-      })
-      .catch(() => { if (seq === searchSeqRef.current) setEnfErrors((p) => ({ ...p, eviction: 'Eviction search failed — please try again.' })); })
-      .finally(() => settle('eviction'));
-
-    // Property record first, then the debt search with the best owner name.
-    enformionPropertySearch(addr)
-      .then((rec) => {
-        if (seq !== searchSeqRef.current) return;
-        if (rec) setEnfProperty(rec);
-        else setEnfErrors((p) => ({ ...p, property: enformionDiagMessage() }));
-
-        let first = gisFirst, last = gisLast;
-        if ((!first || !last) && ownerName && !looksLikeBusiness(ownerName)) {
-          const t = ownerName.split(/\s+/).filter(Boolean);
+      if ((!first || !last) && rec) {
+        const person = rec.currentOwners.find((n) => n && !looksLikeBusiness(n));
+        if (person) {
+          const t = person.split(/\s+/).filter(Boolean);
           if (t.length >= 2) { first = t[0]; last = t[t.length - 1]; }
         }
-        if ((!first || !last) && rec) {
-          // Fall back to the deed's first individual current owner.
-          const person = rec.currentOwners.find((n) => n && !looksLikeBusiness(n));
-          if (person) {
-            const t = person.split(/\s+/).filter(Boolean);
-            if (t.length >= 2) { first = t[0]; last = t[t.length - 1]; }
-          }
-        }
-        runDebt(first, last);
-      })
-      .catch(() => {
-        if (seq === searchSeqRef.current) setEnfErrors((p) => ({ ...p, property: 'Property record search failed — please try again.' }));
-        runDebt(gisFirst, gisLast);
-      })
-      .finally(() => settle('property'));
+      }
+      if (!first || !last) {
+        if (seq === searchSeqRef.current) setEnfErrors((p) => ({ ...p, debt: 'No individual owner name available to search (LLC/business owners: search the members via Skip Trace first).' }));
+      } else {
+        let d: EnfDebtResult | null = null;
+        try { d = await enformionDebtSearch(first, last, state); } catch { /* handled below */ }
+        if (seq !== searchSeqRef.current) return;
+        if (d) setEnfDebt(d);
+        else setEnfErrors((p) => ({ ...p, debt: errOf('Debt search failed — please try again.') }));
+      }
+    } finally {
+      if (seq === searchSeqRef.current) setEnfLoading(false);
+    }
   };
 
   // Build the cost estimate + material takeoff (each shows as it arrives). If
@@ -3001,7 +2989,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                         <div className="enf-empty">No bankruptcies, liens, or judgments found for this owner.</div>
                       )
                     ) : enfErrors.debt ? (
-                      <div className="enf-err"><AlertCircle size={12} /> {enfErrors.debt}{/\bHTTP 40[13]\b|credentials/.test(enfErrors.debt) ? '' : ' Note: Debt Search V2 requires an Enformion PRO account.'}</div>
+                      <div className="enf-err"><AlertCircle size={12} /> {enfErrors.debt}</div>
                     ) : !enfLoading ? (
                       <div className="enf-empty">Debt search did not run.</div>
                     ) : null}
@@ -3035,7 +3023,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                         <div className="enf-empty">No eviction filings found for this address — clean tenant history.</div>
                       )
                     ) : enfErrors.eviction ? (
-                      <div className="enf-err"><AlertCircle size={12} /> {enfErrors.eviction}{/\bHTTP 40[13]\b|credentials/.test(enfErrors.eviction) ? '' : ' Note: Eviction Search requires an Enformion PRO account.'}</div>
+                      <div className="enf-err"><AlertCircle size={12} /> {enfErrors.eviction}</div>
                     ) : !enfLoading ? (
                       <div className="enf-empty">Eviction search did not run.</div>
                     ) : null}
