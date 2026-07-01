@@ -1,8 +1,8 @@
 import { useState, useEffect, useRef } from 'react';
 import type { FormEvent, KeyboardEvent, FC } from 'react';
 import { createRoot } from 'react-dom/client';
-import { executeLandAnalysis, chatWithGemini, chatFollowUp, getUserKeys, detectNcCounty, lookupParcelById, fetchConstructionCostEstimate, fetchMaterialTakeoff, fetchLandClearingEstimate, fetchUtilitiesEstimate, fetchGoogleDistanceMatrixComps, getCompPrefs, getReportAutoGenerate, enformionConfigured, enformionContactEnrich, enformionPersonSearch, enformionBusinessSearch, looksLikeBusiness, enformionDiagMessage, getLastEnformionShape, getLastEnformionDetail, enformionPropertySearch, enformionDebtSearch, enformionEvictionSearch } from '../services/feasibilityService';
-import type { SkipTraceContact, EnformionPropertyRecord, EnfDebtResult, EnfEvictionRecord } from '../services/feasibilityService';
+import { executeLandAnalysis, chatWithGemini, chatFollowUp, getUserKeys, detectNcCounty, lookupParcelById, fetchConstructionCostEstimate, fetchMaterialTakeoff, fetchLandClearingEstimate, fetchUtilitiesEstimate, fetchGoogleDistanceMatrixComps, getCompPrefs, getReportAutoGenerate, enformionConfigured, enformionContactEnrich, enformionPersonSearch, enformionBusinessSearch, looksLikeBusiness, enformionDiagMessage, getLastEnformionShape, getLastEnformionDetail, enformionPropertySearch } from '../services/feasibilityService';
+import type { SkipTraceContact, EnformionPropertyRecord } from '../services/feasibilityService';
 import type { ChatMessage, ChatAttachment } from '../services/feasibilityService';
 import { saveReport, getReportEtaMs, recordReportDuration } from '../services/reportStore';
 import { listConversations, saveConversation, deleteConversation as deleteConvo, newConversationId, deriveTitle } from '../services/chatStore';
@@ -63,8 +63,6 @@ import {
   TrendingUp,
   ImageOff,
   Landmark,
-  Scale,
-  Home,
   Hammer,
   Trees,
   Droplets,
@@ -688,13 +686,11 @@ export const FeasibilitySearch: FC = () => {
   const [landClearingLoading, setLandClearingLoading] = useState(false);
   const [utilities, setUtilities] = useState<UtilitiesEstimate | null>(null);
   const [utilitiesLoading, setUtilitiesLoading] = useState(false);
-  // Enformion property-records suite for the searched address — Property Search
-  // V2 (mortgages & transactions), Debt Search V2, and Eviction/tenant history.
+  // Enformion Property Search V2 for the searched address — deed owners,
+  // recorded mortgages & sale transactions.
   const [enfProperty, setEnfProperty] = useState<EnformionPropertyRecord | null>(null);
-  const [enfDebt, setEnfDebt] = useState<EnfDebtResult | null>(null);
-  const [enfEvictions, setEnfEvictions] = useState<EnfEvictionRecord[] | null>(null);
   const [enfLoading, setEnfLoading] = useState(false);
-  const [enfErrors, setEnfErrors] = useState<{ property?: string; debt?: string; eviction?: string }>({});
+  const [enfErrors, setEnfErrors] = useState<{ property?: string }>({});
   // Manual report mode: report awaits the "Generate AI Report" button
   const [reportPending, setReportPending] = useState(false);
   // Owner skip trace (Enformion) — phones/emails for the parcel owner
@@ -882,87 +878,37 @@ export const FeasibilitySearch: FC = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [chatHistory]);
 
-  // Enformion records for the searched address — three real API searches:
-  //   1. Property Search V2  → deed, current owners, MORTGAGES & TRANSACTIONS
-  //   2. Eviction Search     → TENANT HISTORY at the address (PRO)
-  //   3. Debt Search V2      → owner's bankruptcies / liens / judgments (PRO)
-  // Runs SEQUENTIALLY: the per-call diagnostics are shared module state, so
-  // parallel runs would report the wrong error under the wrong section, and
-  // property can supply the owner name for the debt search when GIS has none.
+  // Enformion Property Search V2 for the searched address — deed, current
+  // owners, recorded MORTGAGES & sale TRANSACTIONS. Called directly against
+  // Enformion's CORS-enabled API (no serverless proxy in the hot path).
   const fetchEnformionRecords = async (reportData: SiteFeasibilityData, seq: number) => {
     setEnfProperty(null);
-    setEnfDebt(null);
-    setEnfEvictions(null);
     setEnfErrors({});
     setEnfLoading(false);
     const addr = (reportData.inputAddress || '').trim();
     if (!enformionConfigured() || !addr) return;
     setEnfLoading(true);
 
-    // The REAL failure reason for the section that just ran: base status message
-    // plus Enformion's own error text (validation messages, input errors).
+    // The REAL failure reason: base status message plus Enformion's own error
+    // text (validation messages, input errors).
     const errOf = (fallback: string) => {
       const detail = getLastEnformionDetail();
       // Enformion's per-key permission wall: the search type isn't enabled on
       // this API Access Profile. Give the exact fix instead of a raw error.
       const m = detail.match(/Access Profile does not permit client to call\s*([^.·]+)/i);
       if (m) {
-        return `Your Enformion API Access Profile doesn't have "${m[1].trim()}" enabled. This is a per-key permission (separate from your PRO plan): log in at api.enformion.com → Keys, or email supportgo@enformion.com and ask them to enable ${m[1].trim()} on your access profile. It usually takes effect immediately — then re-run this search.`;
+        return `Your Enformion API Access Profile doesn't have "${m[1].trim()}" enabled. This is a per-key permission: log in at api.enformion.com → Keys, or email supportgo@enformion.com and ask them to enable ${m[1].trim()} on your access profile — then hit Retry.`;
       }
       const base = enformionDiagMessage() || fallback;
       return detail && !base.includes(detail) ? `${base}\n${detail}` : base;
     };
 
-    // Parse "123 Main St, Town, NC 28027" pieces for the eviction search
-    // (State is REQUIRED with StreetAddress per the Enformion spec).
-    const parts = addr.replace(/,?\s*USA$/i, '').split(',').map((s) => s.trim()).filter(Boolean);
-    const street = parts[0] || '';
-    const city = parts.length >= 2 ? parts[1] : '';
-    const zip = (addr.match(/\b(\d{5})(?:-\d{4})?\b/) || [])[1] || '';
-    const stateMatch = addr.match(/\b([A-Z]{2})\b\s*\d{5}/) || addr.match(/,\s*([A-Z]{2})\b/);
-    const state = (stateMatch && stateMatch[1]) || 'NC';
-
     try {
-      // 1. Property record (deed, mortgages, transactions).
       let rec: EnformionPropertyRecord | null = null;
       try { rec = await enformionPropertySearch(addr); } catch { /* handled below */ }
       if (seq !== searchSeqRef.current) return;
       if (rec) setEnfProperty(rec);
-      else setEnfErrors((p) => ({ ...p, property: errOf('Property record search failed — please try again.') }));
-
-      // 2. Tenant history / evictions at the address.
-      let ev: EnfEvictionRecord[] | null = null;
-      try { ev = await enformionEvictionSearch(street, city, state, zip); } catch { /* handled below */ }
-      if (seq !== searchSeqRef.current) return;
-      if (ev) setEnfEvictions(ev);
-      else setEnfErrors((p) => ({ ...p, eviction: errOf('Eviction search failed — please try again.') }));
-
-      // 3. Debt search — best available individual owner name: authoritative GIS
-      // first/last, else the formatted owner name, else the deed's first
-      // individual current owner from the property record above.
-      let first = (reportData.ownerFirst || '').trim();
-      let last = (reportData.ownerLast || '').trim();
-      const ownerName = (reportData.ownerName || '').trim();
-      if ((!first || !last) && ownerName && !looksLikeBusiness(ownerName)) {
-        const t = ownerName.split(/\s+/).filter(Boolean);
-        if (t.length >= 2) { first = t[0]; last = t[t.length - 1]; }
-      }
-      if ((!first || !last) && rec) {
-        const person = rec.currentOwners.find((n) => n && !looksLikeBusiness(n));
-        if (person) {
-          const t = person.split(/\s+/).filter(Boolean);
-          if (t.length >= 2) { first = t[0]; last = t[t.length - 1]; }
-        }
-      }
-      if (!first || !last) {
-        if (seq === searchSeqRef.current) setEnfErrors((p) => ({ ...p, debt: 'No individual owner name available to search (LLC/business owners: search the members via Skip Trace first).' }));
-      } else {
-        let d: EnfDebtResult | null = null;
-        try { d = await enformionDebtSearch(first, last, state); } catch { /* handled below */ }
-        if (seq !== searchSeqRef.current) return;
-        if (d) setEnfDebt(d);
-        else setEnfErrors((p) => ({ ...p, debt: errOf('Debt search failed — please try again.') }));
-      }
+      else setEnfErrors({ property: errOf('Property record search failed — please try again.') });
     } finally {
       if (seq === searchSeqRef.current) setEnfLoading(false);
     }
@@ -2404,8 +2350,6 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
     setUtilities(null);
     setUtilitiesLoading(false);
     setEnfProperty(null);
-    setEnfDebt(null);
-    setEnfEvictions(null);
     setEnfErrors({});
     setEnfLoading(false);
     setOwnerSkip(null);
@@ -2895,13 +2839,13 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                 </div>
               </div>
 
-              {/* Enformion records: mortgage & transactions (Property Search V2),
-                  debt (Debt Search V2), and tenant history (Eviction Search). */}
-              {enformionConfigured() && (enfLoading || enfProperty || enfDebt || enfEvictions || enfErrors.property || enfErrors.debt || enfErrors.eviction) && (
+              {/* Enformion Property Search V2: deed owners, recorded mortgages
+                  & sale transactions for the searched address. */}
+              {enformionConfigured() && (enfLoading || enfProperty || enfErrors.property) && (
                 <div className="card registry-card enf-records-card">
                   <h3 className="registry-card-header" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                     <FileText size={16} style={{ color: 'var(--primary)' }} />
-                    <span>Property Records — Enformion</span>
+                    <span>Mortgage &amp; Transactions — Enformion</span>
                     <button
                       type="button"
                       className="enf-retry-btn"
@@ -2914,14 +2858,14 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                     </button>
                   </h3>
                   {enfLoading && (
-                    <div className="enf-loading"><Loader2 size={14} className="spinner" /><span>Pulling mortgage, transaction, debt &amp; tenant records…</span></div>
+                    <div className="enf-loading"><Loader2 size={14} className="spinner" /><span>Pulling deed, mortgage &amp; transaction records…</span></div>
                   )}
 
-                  {/* 1. Mortgage & Transactions (Property Search V2) */}
+                  {/* Property Search V2: deed + mortgages + sale transactions */}
                   <div className="enf-section">
                     <div className="enf-section-head">
                       <Landmark size={14} />
-                      <span>Mortgage &amp; Transactions</span>
+                      <span>Recorded Deed, Mortgages &amp; Sales</span>
                       {enfProperty && (
                         <span className="enf-count-pill">{enfProperty.mortgages.length + enfProperty.transactions.length} record{enfProperty.mortgages.length + enfProperty.transactions.length === 1 ? '' : 's'}</span>
                       )}
@@ -2977,75 +2921,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                     ) : null}
                   </div>
 
-                  {/* 2. Debt Search V2 — bankruptcies / liens / judgments (PRO) */}
-                  <div className="enf-section">
-                    <div className="enf-section-head">
-                      <Scale size={14} />
-                      <span>Owner Debt Search</span>
-                      {enfDebt && (
-                        enfDebt.total > 0
-                          ? <span className="enf-count-pill warn">{enfDebt.bankruptcies} BK · {enfDebt.liens} lien{enfDebt.liens === 1 ? '' : 's'} · {enfDebt.judgments} judgment{enfDebt.judgments === 1 ? '' : 's'}</span>
-                          : <span className="enf-count-pill clean">Clean — 0 records</span>
-                      )}
-                    </div>
-                    {enfDebt ? (
-                      enfDebt.records.length > 0 ? (
-                        enfDebt.records.map((d, i) => (
-                          <div key={i} className="enf-row">
-                            <div className="enf-row-top">
-                              <span className="enf-row-title">{d.debtType || d.description || 'Debt record'}{d.filingDate ? ` · filed ${d.filingDate}` : ''}</span>
-                              {d.amount > 0 && <span className="enf-row-amt">${d.amount.toLocaleString()}</span>}
-                            </div>
-                            <span className="enf-row-sub">
-                              {[d.description && d.description !== d.debtType && d.description, d.debtors.length > 0 && `Debtor: ${d.debtors.join(', ')}`, d.creditors.length > 0 && `Creditor: ${d.creditors.join(', ')}`, d.caseNumber && `Case ${d.caseNumber}`, d.state].filter(Boolean).join(' · ')}
-                            </span>
-                          </div>
-                        ))
-                      ) : (
-                        <div className="enf-empty">No bankruptcies, liens, or judgments found for this owner.</div>
-                      )
-                    ) : enfErrors.debt ? (
-                      <div className="enf-err"><AlertCircle size={12} /> {enfErrors.debt}</div>
-                    ) : !enfLoading ? (
-                      <div className="enf-empty">Debt search did not run.</div>
-                    ) : null}
-                  </div>
-
-                  {/* 3. Eviction Search — tenant history at the address (PRO) */}
-                  <div className="enf-section">
-                    <div className="enf-section-head">
-                      <Home size={14} />
-                      <span>Tenant History (Evictions)</span>
-                      {enfEvictions && (
-                        enfEvictions.length > 0
-                          ? <span className="enf-count-pill warn">{enfEvictions.length} record{enfEvictions.length === 1 ? '' : 's'}</span>
-                          : <span className="enf-count-pill clean">Clean — 0 records</span>
-                      )}
-                    </div>
-                    {enfEvictions ? (
-                      enfEvictions.length > 0 ? (
-                        enfEvictions.map((ev, i) => (
-                          <div key={i} className="enf-row">
-                            <div className="enf-row-top">
-                              <span className="enf-row-title">{ev.unlawfulDetainer ? 'Eviction (unlawful detainer)' : 'Eviction filing'}{ev.fileDate ? ` · ${ev.fileDate}` : ''}</span>
-                              {ev.amount > 0 && <span className="enf-row-amt">${ev.amount.toLocaleString()}</span>}
-                            </div>
-                            <span className="enf-row-sub">
-                              {[ev.defendants.length > 0 && `Tenant: ${ev.defendants.join(', ')}`, ev.plaintiffs.length > 0 && `Filed by: ${ev.plaintiffs.join(', ')}`, ev.caseNumber && `Case ${ev.caseNumber}`, ev.state].filter(Boolean).join(' · ')}
-                            </span>
-                          </div>
-                        ))
-                      ) : (
-                        <div className="enf-empty">No eviction filings found for this address — clean tenant history.</div>
-                      )
-                    ) : enfErrors.eviction ? (
-                      <div className="enf-err"><AlertCircle size={12} /> {enfErrors.eviction}</div>
-                    ) : !enfLoading ? (
-                      <div className="enf-empty">Eviction search did not run.</div>
-                    ) : null}
-                  </div>
-
-                  <div className="enf-foot">Live from the Enformion API (Property Search V2, Debt Search V2, Eviction Search) using your credentials. Debt &amp; eviction searches require an Enformion PRO plan; public-record coverage varies by county.</div>
+                  <div className="enf-foot">Live from the Enformion Property Search V2 API using your credentials. Public-record coverage varies by county.</div>
                 </div>
               )}
 

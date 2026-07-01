@@ -1691,24 +1691,61 @@ function humanEnfError(d: any): string | undefined {
   return parts.length ? parts.join(' · ').slice(0, 300) : undefined;
 }
 
-/** Remembered working Enformion host — accounts are provisioned on either the
- *  production or the dev/sandbox host; once one answers, stick with it. */
-let enfGoodHost: 'prod' | 'dev' | null = null;
+// Enformion is called DIRECTLY from the browser: devapi.enformion.com serves
+// every documented search type and answers preflight with
+// Access-Control-Allow-Origin: * (verified live — ~0.4s response), so there is
+// no serverless proxy in the hot path and no 10-second function limit to hit.
+// devapi is tried first (api.enformion.com 404s PropertyV2Search); the Netlify
+// proxy remains only as a last-resort fallback if a direct call can't connect.
+const ENF_DIRECT_HOSTS = ['https://devapi.enformion.com', 'https://api.enformion.com'];
+
+/** Remembered working direct host — once one answers, stick with it. */
+let enfGoodHost: string | null = null;
 
 async function enformionCall(path: string, searchType: string, body: any, timeoutMs = 45000): Promise<any | null> {
   const k = getUserKeys();
   if (!k.enformionApName || !k.enformionApPassword) { lastEnformionDiag = { status: 0, reason: 'not configured' }; return null; }
-  // Client-side host failover: one upstream call per proxy invocation (so the
-  // serverless function never hits its 10s limit). Try the KNOWN-GOOD host
-  // first, RETRY the same host once on a timeout/proxy failure (the second
-  // serverless invocation is warm, which often makes the difference on heavy
-  // searches like PropertyV2Search), then try the other host — including on
-  // 400s, since some search types only exist on one host.
-  const hostOrder: ('prod' | 'dev')[] = enfGoodHost === 'dev' ? ['dev', 'prod'] : ['prod', 'dev'];
-  const attempts: ('prod' | 'dev')[] = [hostOrder[0], hostOrder[0], hostOrder[1], hostOrder[1]];
-  for (const host of attempts) {
+  const payload = JSON.stringify(body);
+
+  // 1. Direct browser → Enformion.
+  const hosts = enfGoodHost ? [enfGoodHost, ...ENF_DIRECT_HOSTS.filter((h) => h !== enfGoodHost)] : ENF_DIRECT_HOSTS;
+  for (const host of hosts) {
     try {
-      const res = await fetchWithTimeout('/.netlify/functions/enformion', timeoutMs, {
+      const res = await fetchWithTimeout(`${host}${path}`, timeoutMs, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+          'galaxy-ap-name': k.enformionApName,
+          'galaxy-ap-password': k.enformionApPassword,
+          'galaxy-search-type': searchType,
+          'galaxy-client-type': 'DevAPI', // per docs: required for JavaScript clients
+        },
+        body: payload,
+      });
+      const text = await res.text();
+      let d: any = null;
+      try { d = text ? JSON.parse(text) : null; } catch { /* non-JSON error page */ }
+      const detail = humanEnfError(d) || (!res.ok && text ? text.slice(0, 200) : undefined);
+      lastEnformionDiag = { status: res.status, host, reason: res.ok ? undefined : `HTTP ${res.status}`, shape: d != null ? describeShape(d) : undefined, detail };
+      if (res.ok) { enfGoodHost = host; return d; }
+      if (res.status === 400 || res.status === 402 || res.status === 403) {
+        // Definitive refusal (bad input / not permitted / auth) — the host
+        // answered, so remember it and don't hammer retries.
+        enfGoodHost = host;
+        console.warn(`Enformion ${path} via ${host}: HTTP ${res.status}.`, detail || '');
+        return null;
+      }
+      console.warn(`Enformion ${path} via ${host}: HTTP ${res.status}.`, detail || '');
+      // 404 / 5xx → try the next host.
+    } catch { lastEnformionDiag = { status: 0, reason: 'network/CORS' }; }
+  }
+
+  // 2. Fallback: the serverless proxy (kept for environments where a direct
+  //    call can't connect, e.g. if Enformion ever locks down CORS).
+  for (const host of ['dev', 'prod']) {
+    try {
+      const res = await fetchWithTimeout('/.netlify/functions/enformion', Math.min(timeoutMs, 20000), {
         method: 'POST',
         headers: {
           'content-type': 'application/json',
@@ -1718,24 +1755,17 @@ async function enformionCall(path: string, searchType: string, body: any, timeou
           'x-enformion-path': path,
           'x-enformion-host': host,
         },
-        body: JSON.stringify(body),
+        body: payload,
       });
       if (!res.ok) { lastEnformionDiag = { status: 0, reason: `proxy error (HTTP ${res.status})` }; continue; }
       const env = await res.json(); // { ok, status, host, data, error }
       const d = env?.data;
       const detail = humanEnfError(d) || (typeof env?.error === 'string' ? env.error : undefined);
       lastEnformionDiag = { status: Number(env?.status) || 0, host: env?.host, reason: env?.error, shape: d != null ? describeShape(d) : undefined, detail };
-      if (env?.ok) { enfGoodHost = host; return env.data; }
+      if (env?.ok) return d;
       const st = Number(env?.status) || 0;
-      // The host ANSWERED (even if it refused) — it's the provisioned host for
-      // these credentials, so remember it and stop retrying this same request
-      // unless the failure was a timeout (status 0).
-      if (st > 0 && st !== 404) {
-        if (st !== 401) enfGoodHost = host;
-        if (st === 400 || st === 402 || st === 403) return null; // definitive refusal — retrying won't change it
-      }
-      if (st === 401 || st === 403) console.warn(`Enformion ${path} via ${host}: auth failed (HTTP ${st}) — check the AP Name / AP Password in Settings.`);
-      else console.warn(`Enformion ${path} via ${host}: HTTP ${st}.`, detail || env?.error || '');
+      if (st === 400 || st === 402 || st === 403) return null; // definitive refusal
+      console.warn(`Enformion ${path} via proxy(${host}): HTTP ${st}.`, detail || env?.error || '');
     } catch { lastEnformionDiag = { status: 0, reason: 'network' }; }
   }
   return null;
@@ -2055,13 +2085,10 @@ export async function skipTraceContact(ownerName: string, address?: string): Pro
 }
 
 // ===========================================================================
-// Enformion property-records suite — Property Search V2 (deeds, transactions,
-// mortgages, open liens), Debt Search V2 (bankruptcies/liens/judgments), and
-// Eviction Search (tenant history). All verified against the official
+// Enformion Property Search V2 — deed, current owners, sale TRANSACTIONS, and
+// recorded MORTGAGES for one address. Verified against the official
 // EnformionGO API reference (enformiongo.readme.io):
 //   POST /PropertyV2Search  galaxy-search-type: PropertyV2
-//   POST /DebtSearch/V2     galaxy-search-type: DebtV2      (PRO account)
-//   POST /EvictionSearch    galaxy-search-type: Eviction    (PRO account)
 // ===========================================================================
 
 /** Case-insensitive property read — Enformion mixes PascalCase and camelCase
@@ -2081,14 +2108,8 @@ const ciArr = (o: any, key: string): any[] => { const v = ci(o, key); return Arr
 function fmtEnfDate(raw: any): string {
   const s = String(raw ?? '').trim();
   if (!s) return '';
-  if (/^\d{8}$/.test(s)) return `${s.slice(4, 6)}/${s.slice(6, 8)}/${s.slice(0, 4)}`; // eviction yyyymmdd
+  if (/^\d{8}$/.test(s)) return `${s.slice(4, 6)}/${s.slice(6, 8)}/${s.slice(0, 4)}`; // yyyymmdd
   return s;
-}
-
-/** Eviction liabilityAmount comes zero-padded ("000002126" = $2,126). */
-function fmtEnfAmount(raw: any): number {
-  const n = Number(String(raw ?? '').replace(/[^0-9.]/g, ''));
-  return Number.isFinite(n) ? n : 0;
 }
 
 export interface EnfPropertyTransaction {
@@ -2109,19 +2130,6 @@ export interface EnformionPropertyRecord {
   mortgages: EnfMortgage[];
   openLienCount: number;
 }
-export interface EnfDebtRecord {
-  debtType: string; filingDate: string; description: string; amount: number;
-  caseNumber: string; state: string; debtors: string[]; creditors: string[];
-}
-export interface EnfDebtResult {
-  records: EnfDebtRecord[];
-  bankruptcies: number; liens: number; judgments: number; total: number;
-}
-export interface EnfEvictionRecord {
-  defendants: string[]; plaintiffs: string[]; address: string;
-  fileDate: string; caseNumber: string; amount: number; state: string; unlawfulDetainer: boolean;
-}
-
 function enfName(n: any): string {
   const nm = ci(n, 'Name') ?? n;
   return ciStr(nm, 'FullName') || ciStr(nm, 'CompanyName') || ciStr(nm, 'BusinessName')
@@ -2135,8 +2143,7 @@ function enfName(n: any): string {
 export async function enformionPropertySearch(address: string): Promise<EnformionPropertyRecord | null> {
   const { addressLine1, addressLine2 } = splitAddress(address);
   if (!addressLine1 || !addressLine2) return null;
-  // ResultsPerPage 1: we only use the top match, and the smaller payload keeps
-  // this heavy search inside the serverless proxy's execution window.
+  // ResultsPerPage 1: we only use the top match (smaller, faster payload).
   const data = await enformionCall('/PropertyV2Search', 'PropertyV2', {
     AddressLine1: addressLine1, AddressLine2: addressLine2, Page: 1, ResultsPerPage: 1,
   });
@@ -2211,78 +2218,6 @@ export async function enformionPropertySearch(address: string): Promise<Enformio
     mortgages: mortgages.slice(0, 6),
     openLienCount: ciArr(rec, 'OpenLienRecords').length,
   };
-}
-
-/** Enformion Debt Search V2 (PRO) — nationwide bankruptcies, liens & judgments
- *  for a person. DebtType "0" = all. Returns null on error / no access;
- *  a result with 0 records means Enformion answered "clean". */
-export async function enformionDebtSearch(firstName: string, lastName: string, state?: string): Promise<EnfDebtResult | null> {
-  if (!firstName.trim() || !lastName.trim()) return null;
-  // Per the official example, AddressLine2 takes the two-letter STATE (e.g. "NC").
-  const st = (state || '').trim().toUpperCase().match(/[A-Z]{2}$/)?.[0] || '';
-  const body: any = { FirstName: cap(firstName.trim()), LastName: cap(lastName.trim()), DebtType: '0', Page: 1, ResultsPerPage: 10 };
-  if (st) body.AddressLine2 = st;
-  let data = await enformionCall('/DebtSearch/V2', 'DebtV2', body);
-  // Validation 400 → retry once with the minimal name-only body.
-  if (!data && lastEnformionDiag.status === 400 && body.AddressLine2) {
-    const slim = { ...body };
-    delete slim.AddressLine2;
-    data = await enformionCall('/DebtSearch/V2', 'DebtV2', slim);
-  }
-  if (!data) return null;
-  const records: EnfDebtRecord[] = ciArr(data, 'debtRecords').map((r: any) => {
-    const names = ciArr(r, 'names');
-    const cases = ciArr(r, 'caseDetails');
-    const c0 = cases[0] || {};
-    return {
-      debtType: ciStr(r, 'debtType'),
-      filingDate: fmtEnfDate(ciStr(r, 'filingDate') || ciStr(c0, 'filingDate')),
-      description: ciStr(c0, 'filingTypeDescription') || ciStr(c0, 'actionTypeDescription'),
-      amount: ciNum(c0, 'liability') || ciNum(c0, 'liabilityAmount') || ciNum(c0, 'amountOrLiability'),
-      caseNumber: ciStr(c0, 'caseNumber'),
-      state: ciStr(c0, 'fileState') || ciStr(c0, 'courtState'),
-      debtors: names.filter((n: any) => /debtor/i.test(ciStr(n, 'type'))).map(enfName).filter(Boolean),
-      creditors: names.filter((n: any) => /creditor/i.test(ciStr(n, 'type'))).map(enfName).filter(Boolean),
-    };
-  });
-  return {
-    records: records.slice(0, 10),
-    bankruptcies: ciNum(data, 'bankruptcyRecordCounts'),
-    liens: ciNum(data, 'lienRecordCounts'),
-    judgments: ciNum(data, 'judgmentRecordCounts'),
-    total: ciNum(data, 'debtRecordCounts') || records.length,
-  };
-}
-
-/** Enformion Eviction Search (PRO) — tenant history at the ADDRESS (eviction
- *  filings + possession/money judgments). State is REQUIRED with StreetAddress
- *  per the API spec. Returns null on error / no access; [] means "no records". */
-export async function enformionEvictionSearch(streetAddress: string, city: string, state: string, zip?: string): Promise<EnfEvictionRecord[] | null> {
-  if (!streetAddress.trim() || !state.trim()) return null;
-  const body: any = { StreetAddress: streetAddress.trim(), State: state.trim().toUpperCase(), Page: 1, ResultsPerPage: 10 };
-  if (city.trim()) body.City = city.trim();
-  if (zip && zip.trim()) body.ZipCode = zip.trim();
-  let data = await enformionCall('/EvictionSearch', 'Eviction', body);
-  // Validation 400 (the City/Zip combination rules vary) → retry with the
-  // minimal spec-guaranteed body: StreetAddress + State only.
-  if (!data && lastEnformionDiag.status === 400 && (body.City || body.ZipCode)) {
-    data = await enformionCall('/EvictionSearch', 'Eviction', { StreetAddress: body.StreetAddress, State: body.State, Page: 1, ResultsPerPage: 10 });
-  }
-  if (!data) return null;
-  return ciArr(data, 'evictionRecords').map((r: any) => {
-    const det = ciArr(r, 'evictionDetails')[0] || {};
-    const addr = ciArr(r, 'addresses')[0] || {};
-    return {
-      defendants: ciArr(r, 'defendantNames').map(enfName).filter(Boolean),
-      plaintiffs: ciArr(r, 'plaintiffNames').map(enfName).filter(Boolean),
-      address: ciStr(addr, 'fullAddress'),
-      fileDate: fmtEnfDate(ciStr(det, 'fileDate')),
-      caseNumber: ciStr(det, 'caseNumber'),
-      amount: fmtEnfAmount(ci(det, 'liabilityAmount')),
-      state: ciStr(det, 'state'),
-      unlawfulDetainer: /^y/i.test(ciStr(det, 'unlawfulDetainer')),
-    };
-  }).slice(0, 10);
 }
 
 /** Bulk skip trace for the finder's owner list — phones/emails for each owner

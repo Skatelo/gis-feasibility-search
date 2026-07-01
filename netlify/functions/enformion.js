@@ -26,8 +26,6 @@ const ALLOWED_PATHS = new Set([
   '/PersonSearch',
   '/BusinessV2Search',
   '/PropertyV2Search', // Property Search V2 — deeds, transactions, mortgages, liens (galaxy-search-type: PropertyV2)
-  '/DebtSearch/V2',    // Debt Search V2 (PRO) — bankruptcies, liens, judgments (galaxy-search-type: DebtV2)
-  '/EvictionSearch',   // Eviction Search (PRO) — tenant/eviction history (galaxy-search-type: Eviction)
 ]);
 
 const json = (obj) => ({ statusCode: 200, headers: { ...CORS, 'content-type': 'application/json' }, body: JSON.stringify(obj) });
