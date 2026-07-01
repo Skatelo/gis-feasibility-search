@@ -1937,7 +1937,7 @@ code {
 
 .gemini-input-capsule {
   display: flex;
-  align-items: center;
+  align-items: flex-end;
   background: #f0f4f9;
   border-radius: 28px;
   padding: 6px 12px 6px 16px;
@@ -1954,6 +1954,7 @@ code {
 
 .gemini-prompt-input {
   flex: 1;
+  min-width: 0;
   border: none;
   background: transparent;
   outline: none;
@@ -1961,6 +1962,13 @@ code {
   font-size: 0.88rem;
   color: var(--text-primary);
   padding: 8px 0;
+  /* textarea: wrap long questions so all typed text is visible */
+  resize: none;
+  line-height: 1.4;
+  max-height: 140px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .gemini-prompt-input::placeholder {

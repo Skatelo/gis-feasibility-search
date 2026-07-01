@@ -711,6 +711,14 @@ export const FeasibilitySearch: FC = () => {
   const [chatHistory, setChatHistory] = useState<ChatMessage[]>([]);
   const [chatLoading, setChatLoading] = useState(false);
   const chatEndRef = useRef<HTMLDivElement>(null);
+  const chatInputRef = useRef<HTMLTextAreaElement>(null);
+  // Grow the chat textarea to fit what's typed (wraps to multiple lines) so the
+  // full question is always visible; caps out then scrolls.
+  const autoGrowChat = (el: HTMLTextAreaElement | null) => {
+    if (!el) return;
+    el.style.height = 'auto';
+    el.style.height = `${Math.min(el.scrollHeight, 140)}px`;
+  };
 
   // Keep the screen awake while a report is generating, so a device whose screen
   // turns off (and would otherwise suspend/throttle the page and stall the
@@ -1019,14 +1027,15 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
     setReportSaved(false);
   };
 
-  const handleChatSubmit = async (e: FormEvent) => {
-    e.preventDefault();
+  const handleChatSubmit = async (e?: FormEvent) => {
+    e?.preventDefault();
     if (!chatInput.trim() || !data || chatLoading) return;
 
     const userMessage: ChatMessage = { role: 'user', content: chatInput.trim() };
     const updatedHistory = [...chatHistory, userMessage];
     setChatHistory(updatedHistory);
     setChatInput('');
+    if (chatInputRef.current) chatInputRef.current.style.height = 'auto'; // reset after send
     setChatLoading(true);
 
     try {
@@ -4016,11 +4025,13 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                     <button type="button" className="input-attachment-btn" title="Add files or images">
                       <Paperclip size={16} />
                     </button>
-                    <input
-                      type="text"
+                    <textarea
+                      ref={chatInputRef}
+                      rows={1}
                       placeholder="Ask about setbacks, ADUs, slope grading costs..."
                       value={chatInput}
-                      onChange={(e) => setChatInput(e.target.value)}
+                      onChange={(e) => { setChatInput(e.target.value); autoGrowChat(e.target); }}
+                      onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleChatSubmit(); } }}
                       disabled={chatLoading}
                       className="gemini-prompt-input"
                     />
