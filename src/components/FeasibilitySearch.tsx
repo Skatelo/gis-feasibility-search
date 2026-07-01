@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import type { FormEvent, KeyboardEvent, FC } from 'react';
 import { createRoot } from 'react-dom/client';
-import { executeLandAnalysis, chatWithGemini, chatFollowUp, getUserKeys, detectNcCounty, lookupParcelById, fetchConstructionCostEstimate, fetchMaterialTakeoff, fetchLandClearingEstimate, fetchGoogleDistanceMatrixComps, getCompPrefs, getReportAutoGenerate, enformionConfigured, enformionContactEnrich, enformionPersonSearch, enformionBusinessSearch, looksLikeBusiness, enformionDiagMessage, getLastEnformionShape, getLastEnformionDetail } from '../services/feasibilityService';
+import { executeLandAnalysis, chatWithGemini, chatFollowUp, getUserKeys, detectNcCounty, lookupParcelById, fetchConstructionCostEstimate, fetchMaterialTakeoff, fetchLandClearingEstimate, fetchUtilitiesEstimate, fetchGoogleDistanceMatrixComps, getCompPrefs, getReportAutoGenerate, enformionConfigured, enformionContactEnrich, enformionPersonSearch, enformionBusinessSearch, looksLikeBusiness, enformionDiagMessage, getLastEnformionShape, getLastEnformionDetail } from '../services/feasibilityService';
 import type { SkipTraceContact } from '../services/feasibilityService';
 import type { ChatMessage, ChatAttachment } from '../services/feasibilityService';
 import { saveReport, getReportEtaMs, recordReportDuration } from '../services/reportStore';
@@ -9,7 +9,7 @@ import { listConversations, saveConversation, deleteConversation as deleteConvo,
 import type { ChatConversation } from '../services/chatStore';
 import { getSearchHistory, addSearchHistory } from '../services/searchHistoryStore';
 import { ReportsDrawer } from './ReportsDrawer';
-import type { SiteFeasibilityData, ConstructionCostEstimate, CostLineItem, MaterialTakeoff, LandClearingEstimate } from '../types/feasibility';
+import type { SiteFeasibilityData, ConstructionCostEstimate, CostLineItem, MaterialTakeoff, LandClearingEstimate, UtilitiesEstimate } from '../types/feasibility';
 
 /** Group cost line items by category, preserving first-seen order. (Avoids the
  *  global Map — lucide-react's `Map` icon is imported in this file.) */
@@ -65,6 +65,7 @@ import {
   Landmark,
   Hammer,
   Trees,
+  Droplets,
   Plus,
   Trash2,
   X
@@ -683,6 +684,8 @@ export const FeasibilitySearch: FC = () => {
   const [materialTakeoff, setMaterialTakeoff] = useState<MaterialTakeoff | null>(null);
   const [landClearing, setLandClearing] = useState<LandClearingEstimate | null>(null);
   const [landClearingLoading, setLandClearingLoading] = useState(false);
+  const [utilities, setUtilities] = useState<UtilitiesEstimate | null>(null);
+  const [utilitiesLoading, setUtilitiesLoading] = useState(false);
   // Manual report mode: report awaits the "Generate AI Report" button
   const [reportPending, setReportPending] = useState(false);
   // Owner skip trace (Enformion) — phones/emails for the parcel owner
@@ -888,6 +891,13 @@ export const FeasibilitySearch: FC = () => {
       .then((lc) => { if (seq === searchSeqRef.current && lc) setLandClearing(lc); })
       .catch(() => {})
       .finally(() => { if (seq === searchSeqRef.current) setLandClearingLoading(false); });
+    // Utilities + connection costs (public water/sewer tap fees, or well/septic).
+    setUtilities(null);
+    setUtilitiesLoading(true);
+    fetchUtilitiesEstimate(reportData)
+      .then((u) => { if (seq === searchSeqRef.current && u) setUtilities(u); })
+      .catch(() => {})
+      .finally(() => { if (seq === searchSeqRef.current) setUtilitiesLoading(false); });
     let pending = 2;
     let anySuccess = false;
     const settle = (ok: boolean) => {
@@ -2297,6 +2307,8 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
     setMaterialTakeoff(null);
     setLandClearing(null);
     setLandClearingLoading(false);
+    setUtilities(null);
+    setUtilitiesLoading(false);
     setOwnerSkip(null);
     setOwnerSkipError('');
     setOwnerSkipLoading(false);
@@ -3514,6 +3526,56 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                       <div className="cost-disclaimer">Whole-house material list — quantities from standard takeoff factors × the building size, priced at current local unit costs. This is MATERIALS only; labor, permits, builder fee &amp; contingency are in the full estimate above.</div>
                     </div>
                   )}
+                </div>
+              )}
+
+              {/* Utilities & Connection Costs — public water/sewer tap fees when
+                  served, otherwise real-time local well + septic costs. */}
+              {(utilities || utilitiesLoading) && (
+                <div className="card registry-card utilities-card">
+                  <h3 className="registry-card-header" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <Droplets size={16} style={{ color: 'var(--primary)' }} />
+                    <span>Utilities &amp; Connection Costs</span>
+                  </h3>
+                  {utilitiesLoading && !utilities ? (
+                    <div className="cost-loading"><Loader2 size={15} className="spinner" /><span>Checking water/sewer availability &amp; local costs…</span></div>
+                  ) : utilities ? (
+                    <>
+                      <div className="util-summary">
+                        <span className="util-summary-text">{utilities.summary}</span>
+                        {utilities.provider && <span className="util-provider">Authority: {utilities.provider}</span>}
+                      </div>
+                      <div className="util-rows">
+                        {utilities.lines.map((ln, i) => (
+                          <div key={i} className="util-row">
+                            <div className="util-row-top">
+                              <span className="util-name">{ln.name}</span>
+                              <span className={`util-badge ${ln.isPublic ? 'public' : 'private'}`}>
+                                {ln.isPublic ? 'Public hookup' : (ln.kind === 'water' ? 'Well needed' : 'Septic needed')}
+                              </span>
+                            </div>
+                            {ln.note && <div className="util-note">{ln.note}</div>}
+                            <div className="util-cost">${ln.low.toLocaleString()} – ${ln.high.toLocaleString()}</div>
+                          </div>
+                        ))}
+                        <div className="util-row util-total">
+                          <span>Estimated total to connect</span>
+                          <span className="util-cost">${utilities.totalLow.toLocaleString()} – ${utilities.totalHigh.toLocaleString()}</span>
+                        </div>
+                      </div>
+                      {utilities.sources.length > 0 && (
+                        <div className="cost-sources">
+                          <span className="cost-sources-label">Sources:</span>
+                          {utilities.sources.map((s, i) => (
+                            <a key={i} href={s} target="_blank" rel="noreferrer">
+                              {(() => { try { return new URL(s).hostname.replace(/^www\./, ''); } catch { return 'source'; } })()}
+                            </a>
+                          ))}
+                        </div>
+                      )}
+                      <div className="cost-disclaimer">Water/sewer availability is AI-checked against local utility data and {utilities.realTime ? 'priced at current local figures' : 'shown at regional baseline figures'}. Tap/impact fees + well/septic costs vary by lot, depth, and soil — confirm with the utility authority and a local well/septic contractor (a septic perc test is required before building).</div>
+                    </>
+                  ) : null}
                 </div>
               )}
 

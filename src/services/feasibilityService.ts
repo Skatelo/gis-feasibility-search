@@ -1,4 +1,4 @@
-import type { SiteFeasibilityData, SlopeProfile, CompProperty, FloodZoneInfo, WetlandsInfo, ConstructionCostEstimate, CostLineItem, MaterialTakeoff, MaterialTakeoffItem, LandClearingEstimate, TreeRemovalLine, ClearingMethod } from '../types/feasibility';
+import type { SiteFeasibilityData, SlopeProfile, CompProperty, FloodZoneInfo, WetlandsInfo, ConstructionCostEstimate, CostLineItem, MaterialTakeoff, MaterialTakeoffItem, LandClearingEstimate, TreeRemovalLine, ClearingMethod, UtilitiesEstimate, UtilityLine } from '../types/feasibility';
 import { fetchCountyZoningCode, hasCountyZoning, normalizeCountyKey } from '../data/ncZoning';
 import { getSupabase, isSupabaseConfigured } from './supabaseClient';
 
@@ -4676,6 +4676,92 @@ export async function fetchLandClearingEstimate(reportData: SiteFeasibilityData)
     pricingSources: r.sources,
     realTimePricing: !!rates,
     generatedAt: Date.now(),
+  };
+}
+
+// Fallback ranges (Southeast US) when the live lookup can't price a line.
+const UTIL_FALLBACK = { waterTapLow: 2000, waterTapHigh: 6000, sewerTapLow: 3000, sewerTapHigh: 9000, wellLow: 8000, wellHigh: 18000, septicLow: 8000, septicHigh: 25000 };
+
+/**
+ * Utilities + connection-cost estimate: whether PUBLIC water/sewer serve the
+ * parcel and their tap/impact fees, otherwise the real-time LOCAL cost of the
+ * private alternative (well / septic). Grounded on Google Search. Returns null
+ * only when keys/address are missing.
+ */
+export async function fetchUtilitiesEstimate(reportData: SiteFeasibilityData): Promise<UtilitiesEstimate | null> {
+  const keys = getUserKeys();
+  if (!keys.gemini) return null;
+  const county = reportData.countyName || '';
+  const zip = (String(reportData.inputAddress || '').match(/\b(\d{5})(?:-\d{4})?\b/) || [])[1] || '';
+  const locality = zip ? `${reportData.inputAddress} (ZIP ${zip}, ${county} County, NC)` : `${reportData.inputAddress} (${county} County, NC)`;
+
+  const prompt = `For the property at ${locality}, determine UTILITIES availability and CURRENT LOCAL connection costs for building a home (${new Date().getFullYear()}).
+1) Is PUBLIC/municipal WATER available to this parcel/area, and what is the water tap / connection / impact fee?
+2) Is PUBLIC/municipal SEWER available, and what is the sewer tap / connection / impact fee?
+3) If public water is NOT available, the CURRENT LOCAL cost to drill a private WELL (drilling + pump + connection).
+4) If public sewer is NOT available, the CURRENT LOCAL cost of a conventional SEPTIC system (perc/soil test + install).
+Name the local water/sewer authority if known.
+Return ONLY a JSON object in a \`\`\`json code block:
+\`\`\`json
+{ "publicWater": "available|not-available|unknown", "waterTapLow": 0, "waterTapHigh": 0, "publicSewer": "available|not-available|unknown", "sewerTapLow": 0, "sewerTapHigh": 0, "wellLow": 0, "wellHigh": 0, "septicLow": 0, "septicHigh": 0, "provider": "", "sources": ["https://..."] }
+\`\`\`
+Use CURRENT LOCAL figures from the utility authority / credible well & septic contractors; cite them; never invent a figure (leave unknown numbers 0).`;
+  const text = await groundedGeminiText(keys.gemini, prompt, 'You are a site-development utilities analyst for North Carolina. Use Google Search for the local water/sewer provider, tap fees, and current well & septic install costs. Return only the JSON; cite sources; never invent figures.', 90000);
+  if (!text) return null;
+  const m = text.match(/```json\s*([\s\S]*?)\s*```/) || text.match(/\{[\s\S]*\}/);
+  if (!m) return null;
+
+  let o: any;
+  try { o = JSON.parse((m[1] || m[0]).replace(/,\s*([}\]])/g, '$1')); } catch { return null; }
+  const num = (v: any) => { const n = Number(v); return Number.isFinite(n) && n > 0 ? Math.round(n) : 0; };
+  const norm = (v: any): 'available' | 'not-available' | 'unknown' => {
+    const s = String(v || '').toLowerCase();
+    if (s.startsWith('avail') || s === 'yes' || s === 'true') return 'available';
+    if (s.includes('not') || s === 'no' || s === 'false' || s === 'unavailable') return 'not-available';
+    return 'unknown';
+  };
+  const publicWater = norm(o.publicWater);
+  const publicSewer = norm(o.publicSewer);
+  let real = false;
+
+  const lines: UtilityLine[] = [];
+  // WATER: public tap fee when served, else private well.
+  if (publicWater === 'available') {
+    const low = num(o.waterTapLow), high = num(o.waterTapHigh);
+    if (low || high) real = true;
+    lines.push({ name: 'Public water tap fee', kind: 'water', isPublic: true, status: 'available', low: low || UTIL_FALLBACK.waterTapLow, high: high || Math.max(high, low, UTIL_FALLBACK.waterTapHigh), note: 'municipal water tap / connection / impact fee' });
+  } else {
+    const low = num(o.wellLow), high = num(o.wellHigh);
+    if (low || high) real = true;
+    lines.push({ name: 'Private well', kind: 'water', isPublic: false, status: publicWater, low: low || UTIL_FALLBACK.wellLow, high: high || Math.max(high, low, UTIL_FALLBACK.wellHigh), note: 'drill + pump + connection (no public water)' });
+  }
+  // SEWER: public tap fee when served, else septic.
+  if (publicSewer === 'available') {
+    const low = num(o.sewerTapLow), high = num(o.sewerTapHigh);
+    if (low || high) real = true;
+    lines.push({ name: 'Public sewer tap fee', kind: 'sewer', isPublic: true, status: 'available', low: low || UTIL_FALLBACK.sewerTapLow, high: high || Math.max(high, low, UTIL_FALLBACK.sewerTapHigh), note: 'municipal sewer tap / connection / impact fee' });
+  } else {
+    const low = num(o.septicLow), high = num(o.septicHigh);
+    if (low || high) real = true;
+    lines.push({ name: 'Septic system', kind: 'sewer', isPublic: false, status: publicSewer, low: low || UTIL_FALLBACK.septicLow, high: high || Math.max(high, low, UTIL_FALLBACK.septicHigh), note: 'perc/soil test + conventional system install (no public sewer)' });
+  }
+
+  const totalLow = lines.reduce((s, l) => s + l.low, 0);
+  const totalHigh = lines.reduce((s, l) => s + l.high, 0);
+  const bothPublic = publicWater === 'available' && publicSewer === 'available';
+  const neitherPublic = publicWater !== 'available' && publicSewer !== 'available';
+  const summary = bothPublic
+    ? 'Public water + sewer available — budget tap/impact fees.'
+    : neitherPublic
+      ? 'No public water/sewer — this parcel needs a private well + septic.'
+      : `${publicWater === 'available' ? 'Public water' : 'Well'} + ${publicSewer === 'available' ? 'public sewer' : 'septic'} required.`;
+
+  const sources = Array.isArray(o.sources) ? o.sources.map((s: any) => String(s)).filter((s: string) => /^https?:\/\//.test(s)).slice(0, 6) : [];
+  return {
+    locality: zip ? `ZIP ${zip} · ${county} County, NC` : `${county} County, NC`,
+    publicWater, publicSewer, lines, totalLow, totalHigh, summary,
+    provider: o.provider ? String(o.provider).slice(0, 120) : undefined,
+    sources, realTime: real, generatedAt: Date.now(),
   };
 }
 

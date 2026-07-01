@@ -152,6 +152,34 @@ export interface LandClearingEstimate {
   generatedAt: number;
 }
 
+/** One utility line: public water/sewer (with tap/connection fee) OR the private
+ *  alternative (well / septic) when public service isn't available. */
+export interface UtilityLine {
+  name: string;        // "Public water", "Public sewer", "Private well", "Septic system"
+  kind: 'water' | 'sewer';
+  isPublic: boolean;   // true = public hookup (tap fee); false = private (well/septic)
+  status: 'available' | 'not-available' | 'unknown';
+  low: number;         // cost range low ($)
+  high: number;        // cost range high ($)
+  note?: string;       // e.g. "tap/impact fee", "drill + pump", "perc test + install"
+}
+
+/** Utilities + connection-cost estimate for a parcel: public water/sewer tap fees
+ *  when service is available, otherwise real-time local well + septic costs. */
+export interface UtilitiesEstimate {
+  locality: string;
+  publicWater: 'available' | 'not-available' | 'unknown';
+  publicSewer: 'available' | 'not-available' | 'unknown';
+  lines: UtilityLine[];
+  totalLow: number;
+  totalHigh: number;
+  summary: string;     // one-line recommendation
+  provider?: string;   // water/sewer authority when known
+  sources: string[];
+  realTime: boolean;   // grounded live pricing vs. fallback
+  generatedAt: number;
+}
+
 export interface FloodZoneInfo {
   /** FEMA flood zone code, e.g. "AE", "VE", "A", "X", or "UNKNOWN". */
   zone: string;
