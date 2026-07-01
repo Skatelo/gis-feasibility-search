@@ -69,8 +69,9 @@ export const handler = async (event) => {
   };
 
   const order = hostPref === 'dev' ? ['dev'] : hostPref === 'prod' ? ['prod'] : ['prod', 'dev'];
-  // One host → generous window; two hosts → split so both fit under ~10s.
-  const perCallMs = order.length === 1 ? 9000 : 4300;
+  // Budgets leave ~2s headroom under Netlify's 10s synchronous-function limit
+  // (cold start + response marshalling count against it too).
+  const perCallMs = order.length === 1 ? 8000 : 3800;
 
   let last = { status: 0, host: '', text: '' };
   for (const key of order) {

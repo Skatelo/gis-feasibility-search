@@ -1662,7 +1662,11 @@ export function enformionDiagMessage(): string {
   const d = lastEnformionDiag;
   if (d.status === 401 || d.status === 403) return 'Enformion rejected the credentials — check the AP Name / AP Password in Account Settings.';
   if (d.status === 404) return 'Enformion endpoint not found (HTTP 404) — the API host/route may have changed.';
-  if (d.status === 0) return 'Could not reach Enformion (network/credentials not set).';
+  if (d.status === 0) {
+    if (d.reason && /proxy error|timed out/i.test(d.reason)) return `Enformion did not answer in time (${d.reason}) — heavy searches like Property Records can be slow. Try again.`;
+    if (!enformionConfigured()) return 'Enformion credentials are not set — add the AP Name / AP Password in Account Settings.';
+    return `Could not reach Enformion${d.reason ? ` (${d.reason})` : ''} — network hiccup or a slow search. Try again.`;
+  }
   if (d.status >= 500) return `Enformion service error (HTTP ${d.status}). Try again shortly.`;
   if (d.status >= 200 && d.status < 300) return 'No record matched this name/address in Enformion.';
   return `Enformion returned HTTP ${d.status}.`;
@@ -1695,11 +1699,14 @@ async function enformionCall(path: string, searchType: string, body: any, timeou
   const k = getUserKeys();
   if (!k.enformionApName || !k.enformionApPassword) { lastEnformionDiag = { status: 0, reason: 'not configured' }; return null; }
   // Client-side host failover: one upstream call per proxy invocation (so the
-  // serverless function never hits its 10s limit), trying the KNOWN-GOOD host
-  // first and the other one on ANY failure — including 400s, since some search
-  // types only exist on one host.
-  const hosts: ('prod' | 'dev')[] = enfGoodHost === 'dev' ? ['dev', 'prod'] : ['prod', 'dev'];
-  for (const host of hosts) {
+  // serverless function never hits its 10s limit). Try the KNOWN-GOOD host
+  // first, RETRY the same host once on a timeout/proxy failure (the second
+  // serverless invocation is warm, which often makes the difference on heavy
+  // searches like PropertyV2Search), then try the other host — including on
+  // 400s, since some search types only exist on one host.
+  const hostOrder: ('prod' | 'dev')[] = enfGoodHost === 'dev' ? ['dev', 'prod'] : ['prod', 'dev'];
+  const attempts: ('prod' | 'dev')[] = [hostOrder[0], hostOrder[0], hostOrder[1], hostOrder[1]];
+  for (const host of attempts) {
     try {
       const res = await fetchWithTimeout('/.netlify/functions/enformion', timeoutMs, {
         method: 'POST',
@@ -1719,8 +1726,16 @@ async function enformionCall(path: string, searchType: string, body: any, timeou
       const detail = humanEnfError(d) || (typeof env?.error === 'string' ? env.error : undefined);
       lastEnformionDiag = { status: Number(env?.status) || 0, host: env?.host, reason: env?.error, shape: d != null ? describeShape(d) : undefined, detail };
       if (env?.ok) { enfGoodHost = host; return env.data; }
-      if (env?.status === 401 || env?.status === 403) console.warn(`Enformion ${path} via ${host}: auth failed (HTTP ${env.status}) — check the AP Name / AP Password in Settings.`);
-      else console.warn(`Enformion ${path} via ${host}: HTTP ${env?.status}.`, detail || env?.error || '');
+      const st = Number(env?.status) || 0;
+      // The host ANSWERED (even if it refused) — it's the provisioned host for
+      // these credentials, so remember it and stop retrying this same request
+      // unless the failure was a timeout (status 0).
+      if (st > 0 && st !== 404) {
+        if (st !== 401) enfGoodHost = host;
+        if (st === 400 || st === 402 || st === 403) return null; // definitive refusal — retrying won't change it
+      }
+      if (st === 401 || st === 403) console.warn(`Enformion ${path} via ${host}: auth failed (HTTP ${st}) — check the AP Name / AP Password in Settings.`);
+      else console.warn(`Enformion ${path} via ${host}: HTTP ${st}.`, detail || env?.error || '');
     } catch { lastEnformionDiag = { status: 0, reason: 'network' }; }
   }
   return null;
@@ -2120,8 +2135,10 @@ function enfName(n: any): string {
 export async function enformionPropertySearch(address: string): Promise<EnformionPropertyRecord | null> {
   const { addressLine1, addressLine2 } = splitAddress(address);
   if (!addressLine1 || !addressLine2) return null;
+  // ResultsPerPage 1: we only use the top match, and the smaller payload keeps
+  // this heavy search inside the serverless proxy's execution window.
   const data = await enformionCall('/PropertyV2Search', 'PropertyV2', {
-    AddressLine1: addressLine1, AddressLine2: addressLine2, Page: 1, ResultsPerPage: 3,
+    AddressLine1: addressLine1, AddressLine2: addressLine2, Page: 1, ResultsPerPage: 1,
   });
   if (!data) return null;
   const rec = ciArr(data, 'PropertyV2Records')[0];

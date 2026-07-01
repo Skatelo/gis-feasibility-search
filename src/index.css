@@ -3995,3 +3995,13 @@ img, svg, video, canvas, table, pre { max-width: 100%; }
 .gemini-send-btn { background: #f1f3f4; color: #9aa0a6; }
 .gemini-send-btn.active { background: #1f1f1f; color: #ffffff; box-shadow: none; }
 .gemini-send-btn.active:hover { background: #000000; }
+
+/* Enformion card: retry button in the header */
+.enf-retry-btn {
+  display: inline-flex; align-items: center; gap: 5px; margin-left: auto;
+  font-size: 0.68rem; font-weight: 700; color: var(--primary);
+  background: transparent; border: 1px solid var(--bg-card-border);
+  border-radius: 999px; padding: 3px 10px; cursor: pointer; transition: var(--transition);
+}
+.enf-retry-btn:hover:not(:disabled) { border-color: var(--primary); background: var(--primary-glow); }
+.enf-retry-btn:disabled { opacity: 0.6; cursor: default; }

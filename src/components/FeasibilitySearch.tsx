@@ -902,8 +902,14 @@ export const FeasibilitySearch: FC = () => {
     // The REAL failure reason for the section that just ran: base status message
     // plus Enformion's own error text (validation messages, input errors).
     const errOf = (fallback: string) => {
-      const base = enformionDiagMessage() || fallback;
       const detail = getLastEnformionDetail();
+      // Enformion's per-key permission wall: the search type isn't enabled on
+      // this API Access Profile. Give the exact fix instead of a raw error.
+      const m = detail.match(/Access Profile does not permit client to call\s*([^.·]+)/i);
+      if (m) {
+        return `Your Enformion API Access Profile doesn't have "${m[1].trim()}" enabled. This is a per-key permission (separate from your PRO plan): log in at api.enformion.com → Keys, or email supportgo@enformion.com and ask them to enable ${m[1].trim()} on your access profile. It usually takes effect immediately — then re-run this search.`;
+      }
+      const base = enformionDiagMessage() || fallback;
       return detail && !base.includes(detail) ? `${base}\n${detail}` : base;
     };
 
@@ -2896,6 +2902,16 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                   <h3 className="registry-card-header" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                     <FileText size={16} style={{ color: 'var(--primary)' }} />
                     <span>Property Records — Enformion</span>
+                    <button
+                      type="button"
+                      className="enf-retry-btn"
+                      title="Re-run the Enformion record searches"
+                      disabled={enfLoading}
+                      onClick={() => { if (data) fetchEnformionRecords(data, searchSeqRef.current); }}
+                    >
+                      {enfLoading ? <Loader2 size={13} className="spinner" /> : <History size={13} />}
+                      <span>{enfLoading ? 'Searching…' : 'Retry'}</span>
+                    </button>
                   </h3>
                   {enfLoading && (
                     <div className="enf-loading"><Loader2 size={14} className="spinner" /><span>Pulling mortgage, transaction, debt &amp; tenant records…</span></div>
