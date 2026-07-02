@@ -909,7 +909,13 @@ export const FeasibilitySearch: FC = () => {
 
     try {
       let rec: EnformionPropertyRecord | null = null;
-      try { rec = await enformionPropertySearch(addr, searchedAddressRef.current); } catch { /* handled below */ }
+      try {
+        rec = await enformionPropertySearch(
+          addr,
+          searchedAddressRef.current,
+          reportData.coordinates ? { lat: reportData.coordinates.lat, lng: reportData.coordinates.lng } : undefined,
+        );
+      } catch { /* handled below */ }
       if (seq !== searchSeqRef.current) return;
       if (rec) setEnfProperty(rec);
       else setEnfErrors({ property: errOf('Property record search failed — please try again.') });

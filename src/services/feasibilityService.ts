@@ -2141,21 +2141,46 @@ function enfName(n: any): string {
  *  current owners, purchase price, assessed value & taxes, the recorded sale
  *  TRANSACTIONS with buyers/sellers, and every recorded MORTGAGE (amount,
  *  lender, loan type). Returns null when nothing matched (see diag for why). */
-export async function enformionPropertySearch(address: string, fallbackAddress?: string): Promise<EnformionPropertyRecord | null> {
+/** "City, ST ZIP" for a coordinate via Google reverse geocoding — the same
+ *  Maps key the app already uses. Never throws; '' when unavailable. */
+async function cityStateZipFromPoint(lat: number, lng: number): Promise<string> {
+  const key = getUserKeys().googleMaps;
+  if (!key) return '';
+  try {
+    const res = await fetchWithTimeout(`https://maps.googleapis.com/maps/api/geocode/json?latlng=${lat},${lng}&key=${key}`, 8000);
+    if (!res.ok) return '';
+    const j = await res.json();
+    for (const r of (j.results || [])) {
+      const comps = r.address_components || [];
+      const get = (type: string) => (comps.find((c: any) => (c.types || []).includes(type)) || {}).short_name || '';
+      const city = get('locality') || get('sublocality') || get('administrative_area_level_3') || get('postal_town');
+      const state = get('administrative_area_level_1');
+      const zip = get('postal_code');
+      if (city && state) return `${city}, ${state}${zip ? ` ${zip}` : ''}`;
+    }
+  } catch { /* ignore */ }
+  return '';
+}
+
+export async function enformionPropertySearch(address: string, fallbackAddress?: string, coords?: { lat: number; lng: number }): Promise<EnformionPropertyRecord | null> {
   // Build AddressLine1 (street) + AddressLine2 ("City, ST ZIP"). County GIS
-  // situs addresses are often STREET-ONLY with no comma ("1603 TREXLAR AVE"),
-  // which used to abort this search before it ever called Enformion. Take the
-  // street from the GIS situs when present and the city/state/zip tail from
-  // the address the user actually searched.
+  // situs addresses are often STREET-ONLY with no comma ("333 S MCPHERSON
+  // CHURCH RD"), and the user's typed search may lack commas too — so resolve
+  // the city/state in order of preference: GIS situs tail → typed-address
+  // tail → REVERSE GEOCODE of the parcel's own coordinates (always available
+  // after a successful GIS search). This search can therefore always run.
   const a = splitAddress(address);
   const b = splitAddress(fallbackAddress);
   const addressLine1 = (a.addressLine1 || b.addressLine1).trim();
-  const addressLine2 = (a.addressLine2 || b.addressLine2).trim();
+  let addressLine2 = (a.addressLine2 || b.addressLine2).trim();
+  if (!addressLine2 && coords && Number.isFinite(coords.lat) && Number.isFinite(coords.lng)) {
+    addressLine2 = await cityStateZipFromPoint(coords.lat, coords.lng);
+  }
   if (!addressLine1 || !addressLine2) {
     lastEnformionDiag = {
       status: 0,
       reason: 'incomplete address',
-      detail: `This parcel's address ("${address}") has no city/state — Enformion needs "street + city, state". Search with the full address (e.g. "123 Main St, Town, NC 28000") and it will run.`,
+      detail: `Could not determine the city/state for "${address}" (no comma tail and reverse geocoding returned nothing). Search with the full address (e.g. "123 Main St, Town, NC 28000") and it will run.`,
     };
     return null;
   }
@@ -4444,10 +4469,13 @@ async function fetchBlsLocalWages(county: string): Promise<BlsLocalWages | null>
     } catch { /* ignore */ }
     try {
       const ids = BLS_TRADES.map((t) => `OEU${at.type}${at.area}000000${t.soc}08`);
-      const res = await fetchWithTimeout('https://api.bls.gov/publicAPI/v2/timeseries/data/', 15000, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ seriesid: ids }),
-      });
-      if (!res.ok) continue;
+      // api.bls.gov sends no CORS headers, so the browser can't call it
+      // directly — go through our Netlify proxy (direct call kept as a
+      // fallback for non-Netlify dev environments).
+      const blsBody = { method: 'POST' as const, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ seriesid: ids }) };
+      let res = await fetchWithTimeout('/.netlify/functions/bls', 15000, blsBody).catch(() => null);
+      if (!res || !res.ok) res = await fetchWithTimeout('https://api.bls.gov/publicAPI/v2/timeseries/data/', 15000, blsBody).catch(() => null);
+      if (!res || !res.ok) continue;
       const j = await res.json();
       const wages: { label: string; hourly: number }[] = [];
       let year = '';
