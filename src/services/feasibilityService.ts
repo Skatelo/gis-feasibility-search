@@ -313,14 +313,83 @@ function orientedBoundingBox(ring: number[][]): { width: number; depth: number }
 // ---------------------------------------------------------------------------
 
 /** Base query URLs (no trailing /query) for single-layer county parcel servers. */
+// 68 counties, every entry LIVE-VERIFIED (scratch/verify-county-gis.mjs): each
+// layer answered the app's exact point query (geojson + native State Plane) at
+// BOTH the county courthouse and a rural point, with PIN/owner-grade
+// attributes — so it serves the whole county, not just a town. Mecklenburg is
+// intentionally absent (it has its own two-layer CAMA-enriched path). The 31
+// missing counties expose no public ArcGIS REST endpoint (viewer-only
+// products); they fall back to the statewide hosts, then the simulated
+// outline. Re-run the script to refresh/expand this list.
 const countyParcelLayers: Record<string, string> = {
-  wake: "https://maps.wake.gov/arcgis/rest/services/Property/Parcels/MapServer/0",
-  gaston: "https://gis.gastoncountync.gov/publicgis/rest/services/PublicGIS/Parcels/MapServer/11",
+  alamance: "https://maps.regisnc.org/arcgis/rest/services/BASE/ParcelsOnline/MapServer/0",
+  alexander: "https://services2.arcgis.com/Gg1zRGd1dMABDyPS/arcgis/rest/services/Smart_Gov/FeatureServer/0",
+  alleghany: "https://www.webgis.net/arcgis/rest/services/NC/Alleghany/MapServer/11",
+  anson: "https://services2.arcgis.com/gpWTUptGs0ubXJ8Q/arcgis/rest/services/Anson_WFL1/FeatureServer/3",
+  ashe: "https://services1.arcgis.com/vj28eVZMB2OMIUh5/arcgis/rest/services/AsheCountyParcels_201706/FeatureServer/0",
+  avery: "https://services1.arcgis.com/vj28eVZMB2OMIUh5/arcgis/rest/services/Avery_County_Parcels_covering_Banner_Elk_Town_Limits/FeatureServer/0",
+  brunswick: "https://bcgis.brunswickcountync.gov/arcgis/rest/services/Layers/TaxParcels/MapServer/0",
+  buncombe: "https://gis.buncombecounty.org/arcgis/rest/services/opendata/MapServer/1",
+  burke: "https://services3.arcgis.com/axQ4OCSpcxALIQsV/arcgis/rest/services/Burke_County_Base_Data_WL/FeatureServer/10",
   cabarrus: "https://location.cabarruscounty.us/arcgisservices/rest/services/Tax_Parcels_Full/MapServer/0",
-  orange: "https://gis.orangecountync.gov/arcgis/rest/services/WebParcelService/MapServer/0",
+  camden: "https://services7.arcgis.com/f8vjF7CsMeTPBIVC/arcgis/rest/services/Parcels_View/FeatureServer/1",
+  carteret: "https://arcgisweb.carteretcountync.gov/arcgis/rest/services/Layers/Parceldata/FeatureServer/0",
+  caswell: "https://www.webgis.net/arcgis/rest/services/NC/Caswell/MapServer/9",
+  catawba: "https://services1.arcgis.com/MsPajnMahHp6RYgB/arcgis/rest/services/Base_FS/FeatureServer/1",
+  chatham: "https://gisservices.chathamcountync.gov/webapps/rest/services/DedicatedDatasets/LandReference/MapServer/17",
+  cherokee: "https://services5.arcgis.com/UmQCfTNQbyTzAV5N/arcgis/rest/services/Parcels/FeatureServer/0",
+  cleveland: "https://www.webgis.net/arcgis/rest/services/NC/Cleveland/MapServer/1",
+  columbus: "https://services8.arcgis.com/XW1xe0eCMVrYcKIY/arcgis/rest/services/Columbus_Count_Parcels/FeatureServer/24",
+  craven: "https://gis.newbernnc.gov/arcgis/rest/services/newbern_services/Craven_Parcels/FeatureServer/0",
+  cumberland: "https://gis.co.cumberland.nc.us/server/rest/services/Tax/Parcels/MapServer/0",
+  davidson: "https://webgis.co.davidson.nc.us/arcgis/rest/services/FrameworkData/FrameworkLayers/MapServer/3",
+  durham: "https://gis-portal.townofchapelhill.org/server/rest/services/OpenData/DurhamCountyParcels/MapServer/0",
+  edgecombe: "https://services.arcgis.com/4MdqIsNzxG7xyTvf/arcgis/rest/services/City_of_Rocky_Mount_Edgecombe_Parcels/FeatureServer/15",
+  forsyth: "https://arcgis2.cityofws.org/arcgissmwa02/rest/services/OICv2/Property2/MapServer/3",
+  gaston: "https://gis.gastoncountync.gov/publicgis/rest/services/PublicGIS/Parcels/MapServer/11",
+  guilford: "https://gcgis.guilfordcountync.gov/arcgis/rest/services/GC_Cadastral_Current/GC_Parcels/FeatureServer/0",
+  halifax: "https://services8.arcgis.com/0zS9csrI5fS6Bcym/arcgis/rest/services/OpenGov_RR_Layers/FeatureServer/22",
+  harnett: "https://services6.arcgis.com/VIqR7UNKtUqQ1fzt/arcgis/rest/services/Harnett_County_Parcels/FeatureServer/0",
+  haywood: "https://maps.haywoodcountync.gov/arcgis/rest/services/Land_Records/Open_Data/MapServer/3",
+  henderson: "https://gisweb.hendersoncountync.gov/arcgis/rest/services/Parcels/FeatureServer/0",
+  hyde: "https://services1.arcgis.com/XBhYkoXKJCRHbe7M/arcgis/rest/services/hydeco_parcels/FeatureServer/1",
+  iredell: "https://maps.iredellcountync.gov/server/rest/services/Data/TaxSQL_Parcels/FeatureServer/0",
+  johnston: "https://services.arcgis.com/klfX5Vz1Hy74tGIF/arcgis/rest/services/Environmental/FeatureServer/4",
+  jones: "https://services3.arcgis.com/nJbIFHiSnaX0z0hS/arcgis/rest/services/Jones_Bitek/FeatureServer/0",
+  lenoir: "https://services5.arcgis.com/oHyVM17u2FMyV4oB/arcgis/rest/services/CurrentParcels/FeatureServer/0",
+  macon: "https://services1.arcgis.com/KUeKSLlMUcWvuPRM/arcgis/rest/services/Macon_WFL1/FeatureServer/11",
+  mcdowell: "https://www.webgis.net/arcgis/rest/services/NC/McDowell/MapServer/2",
+  mitchell: "https://services1.arcgis.com/KUeKSLlMUcWvuPRM/arcgis/rest/services/Mitchell_County_WFL1/FeatureServer/11",
+  montgomery: "https://www.webgis.net/arcgis/rest/services/NC/Montgomery/MapServer/1",
+  nash: "https://services.arcgis.com/4MdqIsNzxG7xyTvf/arcgis/rest/services/Nash_Parcels_in_the_RMMPO/FeatureServer/0",
   new_hanover: "https://gis.nhcgov.com/server/rest/services/Layers/Parcels/MapServer/0",
+  northampton: "https://services8.arcgis.com/eJ9GuQwMsO1iIOw1/arcgis/rest/services/NC_County_Parcels_WFL1/FeatureServer/1",
+  onslow: "https://gismaps.onslowcountync.gov/server/rest/services/WEB_PUBLICATIONS/County_Map_Layers/MapServer/0",
+  orange: "https://gis.orangecountync.gov/arcgis/rest/services/WebParcelService/MapServer/0",
+  pamlico: "https://services6.arcgis.com/krSNOBBGf8rF7cNp/arcgis/rest/services/Pamlico_County_Parcels/FeatureServer/0",
+  pasquotank: "https://services.arcgis.com/jkjoY4K3AKme8wiO/arcgis/rest/services/OpenGov/FeatureServer/7",
+  pender: "https://services7.arcgis.com/zHNS16tz3znqN3gM/arcgis/rest/services/Pender_County_RO_WTP_WFL1/FeatureServer/3",
+  person: "https://gis.personcountync.gov/arcgis/rest/services/Tax/BitekParcelInfo/MapServer/1",
+  pitt: "https://gis.pittcountync.gov/gis/rest/services/PittOpenData/CadastralPitt/MapServer/0",
+  polk: "https://services1.arcgis.com/23uf7jKvz6SRPFWJ/arcgis/rest/services/Parcels/FeatureServer/0",
+  randolph: "https://gis.randolphcountync.gov/arcgis/rest/services/PW/PW_ParcelMap/FeatureServer/14",
+  robeson: "https://services7.arcgis.com/miWUVbMhSUq6a8y1/arcgis/rest/services/Robeson_County_Parcels/FeatureServer/0",
+  rockingham: "https://www.webgis.net/arcgis/rest/services/NC/Rockingham/MapServer/8",
   rowan: "https://gis.rowancountync.gov/arcgis/rest/services/Public/RowanTaxParcels/MapServer/0",
-  cumberland: "https://gis.co.cumberland.nc.us/server/rest/services/Tax/Parcels/MapServer/0", // verified live: NAD83_PIN/OWNER/LOCATION_ADDR/ACREAGE/TOTAL_PROP_VALUE
+  rutherford: "https://services1.arcgis.com/KUeKSLlMUcWvuPRM/arcgis/rest/services/Rutherford_County_Recovery_Data_WFL1/FeatureServer/13",
+  sampson: "https://services3.arcgis.com/fM4kjZmPOS4ay2Ff/arcgis/rest/services/Sampson_County_Viewer/FeatureServer/9",
+  scotland: "https://services3.arcgis.com/bgKigTDifCMNj8OU/arcgis/rest/services/Tax_Parcels_Scotland_County_view/FeatureServer/6",
+  stanly: "https://services6.arcgis.com/w1igg0Q14weqYXUh/arcgis/rest/services/parcel_records_base/FeatureServer/3",
+  surry: "https://services.arcgis.com/yJw0QBrxA9TD7hLs/arcgis/rest/services/Parcels/FeatureServer/0",
+  swain: "https://maps.swaincountync.gov/server/rest/services/ParcelsForDownload/FeatureServer/0",
+  transylvania: "https://www.webgis.net/arcgis/rest/services/NC/Transylvania/MapServer/10",
+  vance: "https://services6.arcgis.com/pET3krhY1T0smsXf/arcgis/rest/services/Web_Map_Service/FeatureServer/3",
+  wake: "https://maps.wake.gov/arcgis/rest/services/Property/Parcels/MapServer/0",
+  watauga: "https://services2.arcgis.com/wdQEqhSQSuYA89VW/arcgis/rest/services/Watauga_County_Parcels/FeatureServer/0",
+  wilkes: "https://services3.arcgis.com/xb2qUX5xzfQSbb1s/arcgis/rest/services/Wilkesboro_PublicTownWebMap/FeatureServer/8",
+  wilson: "https://gis.wilson-co.com/arcgis/rest/services/Open_gov/Opengov_Address_Taxparcels/FeatureServer/0",
+  yadkin: "https://services1.arcgis.com/NjPxXbprfWFvge6E/arcgis/rest/services/Yadkin_VAD_Map/FeatureServer/6",
+  yancey: "https://services1.arcgis.com/KUeKSLlMUcWvuPRM/arcgis/rest/services/Yancey_County_WFL1/FeatureServer/11",
 };
 
 /** Shoelace area (ft²) of a State Plane ring set, to derive acreage when absent. */
@@ -342,18 +411,31 @@ function normalizeCountyParcelAttrs(a: Record<string, any>): Record<string, any>
     }
     return undefined;
   };
-  let ownname = get(/^ownname$/i, /^owner$/i, /ownername/i, /owner_?name/i, /^owner1$/i, /^acctname1?$/i, /^taxpayer$/i);
+  let ownname = get(/^ownname$/i, /^owner$/i, /ownername/i, /owner_?name/i, /^owner_?1$/i, /^acctname1?$/i, /^taxpayer$/i,
+    /^name_?1$/i, /^n_?name$/i, /^ownam1$/i, /^own1$/i, /jan1_?name1?/i, /current_?owners?$/i, /^current_?ow$/i,
+    /property_?owner/i, /^paname$/i, /primary_?owner/i, /owners_?name$/i, /^acct_?name$/i, /^name$/i);
   if (!ownname) {
     const last = get(/own.*lst.*n/i, /owner.*last/i, /lastname/i, /own_?last/i);
     const first = get(/own.*frst.*n/i, /owner.*first/i, /firstname/i, /own_?first/i);
     // Build "LAST, FIRST" so formatOwnerName reliably reorders to "First Last".
     if (last) ownname = first ? `${last}, ${first}` : last;
   }
-  let ownname2 = get(/^ownname2$/i, /owner2name/i, /^acctname2$/i);
+  let ownname2 = get(/^ownname2$/i, /owner2name/i, /^acctname2$/i, /^name_?2$/i, /^ownam2$/i, /^own2$/i, /^owner_?2$/i, /secondary_?owner/i);
   if (!ownname2) {
     const last2 = get(/ownr?2.*lst|owner2.*last/i);
     const first2 = get(/ownr?2.*frst|owner2.*first/i);
     if (last2) ownname2 = first2 ? `${last2}, ${first2}` : last2;
+  }
+  // Situs address: single-field variants first; else compose it from
+  // house-number + street-name pieces (several county schemas split it).
+  let siteadd = get(/site_?address/i, /^siteadd/i, /whole_?address/i, /situs/i, /location_?addr/i, /parcel_?addr/i,
+    /property_?address/i, /^phys_?addr/i, /physaddres/i, /^phylocat/i, /^prop_?locat/i, /physical_?(street_?address|location)$/i,
+    /^locaddress/i, /^street_?address$/i, /legal_?addr/i, /^str_?addr/i, /^address$/i, /prop_?add/i);
+  if (!siteadd) {
+    const hn = get(/house_?num/i, /housenumbe/i, /house_?nr/i, /street_?nbr/i, /phys.?lc.?street_?number/i, /^stnum$/i);
+    const sn = get(/^street_?name$/i, /^strname$/i, /^strtname$/i, /phys.?lc.?street_?name/i, /^pastna$/i, /^st_?name$/i);
+    const st = get(/^street_?type$/i, /^strtype$/i, /^str_?type$/i, /phys.?lc.?str_?type/i, /^pastab$/i, /^st_?type$/i);
+    if (hn && sn) siteadd = [hn, sn, st].filter(Boolean).map((v) => String(v).trim()).join(' ');
   }
   let sourceref = get(/^sourceref$/i, /deedref/i);
   if (!sourceref) {
@@ -362,17 +444,17 @@ function normalizeCountyParcelAttrs(a: Record<string, any>): Record<string, any>
     if (book) sourceref = page ? `${book}/${page}` : String(book);
   }
   return {
-    parno: get(/^pin_?num$/i, /^parno$/i, /parcel_?id/i, /^pid$/i, /^pin$/i, /^pin14$/i, /^nad83_?pin$/i, /parcelnum/i, /gpin/i, /nc_?pin/i) ?? "N/A",
-    gisacres: get(/gis_?acres/i, /calc.*acre/i, /calculated_?acreage/i, /deed_?ac(res)?/i, /^acres$/i, /acreage/i, /legal_?acres/i),
+    parno: get(/^pin_?num$/i, /^parno$/i, /parcel_?id/i, /^pid$/i, /^pin$/i, /^pin14$/i, /^nad83_?pin$/i, /parcel_?num/i, /^gis_?pin$/i, /gpin/i, /nc_?pin/i, /^newpin$/i, /^geo_?pin/i, /^par_?code$/i, /^tms$/i, /^pin/i) ?? "N/A",
+    gisacres: get(/gis_?acres/i, /calc.*acre/i, /calculated_?acreage/i, /^calc_?ac(re)?$/i, /^cacres$/i, /acres_?gis/i, /deed_?ac(res?|re)/i, /^acres$/i, /acreage/i, /legal_?acres/i, /tax_?acres/i, /total_?acres/i, /poly_?acres/i, /map_?acres/i, /assessed_?ac$/i, /^total_?calc/i, /land_?area/i, /^pacrea$/i, /^calculated$/i, /gross.*acres/i),
     ownname: ownname ?? "N/A",
     ownname2: ownname2 ?? "",
-    siteadd: get(/site_?address/i, /^siteadd/i, /whole_?address/i, /situs/i, /location_?addr/i, /^address$/i, /prop_?add/i),
-    mailadd: get(/mailaddr?1/i, /^addr1$/i, /curr_?addr1/i, /mailing/i, /mail_?add/i, /^address$/i),
+    siteadd,
+    mailadd: get(/mailaddr?1/i, /^addr1$/i, /curr_?addr1/i, /mailing/i, /mail_?add/i, /^address_?1$/i, /^address$/i, /taxpayer_?addr(ess)?_?1?/i, /^owadr1$/i, /^current_?ad$/i, /postal_?address/i, /owner_?addr(ess)?_?1?$/i, /acct_?addr$/i),
     mcity: get(/mail.*city/i, /^mcity$/i, /curr_?city/i, /loccity/i, /^city$/i),
     mstate: get(/mail.*state/i, /^mstate$/i, /curr_?state/i, /^state$/i),
     mzip: get(/mail.*zip/i, /^mzip$/i, /curr_?zip/i, /zipnum/i, /^zip(code)?$/i),
     scity: get(/^scity$/i, /loccity/i, /^city$/i),
-    parval: get(/^parval$/i, /total_?value_?assd/i, /assessed_?value/i, /total_?value/i, /total_?prop_?value/i, /^totval$/i, /tot_?mark_?val/i, /market_?value/i, /appraised/i),
+    parval: get(/^parval$/i, /total_?value_?assd/i, /assessed_?value/i, /total_?value/i, /total_?prop_?value/i, /^totval$/i, /tot_?mark_?val/i, /market_?value/i, /appraised/i, /^totmkt$/i, /mkt_?total/i, /^tax_?value$/i, /^netval/i, /^par_?value$/i, /^adj_?value$/i, /^mkt_?value$/i, /total_?asses/i, /^assessed_?va?/i, /^cost_?tot/i, /^tot_?val/i, /^cur_?tot_?tot$/i),
     landval: get(/^landval$/i, /land_?val(ue)?/i, /tot_?land_?val/i),
     saledate: get(/^sale_?date$/i, /^saledate$/i, /deed_?date/i, /transfer_?date/i),
     reviseyear: get(/revis.*year/i, /^yearid$/i, /parcel_?year/i, /tax_?year/i, /^year_?$/i),
