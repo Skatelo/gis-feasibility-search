@@ -2922,7 +2922,11 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                           </div>
                         ))}
                         {enfProperty.mortgages.length === 0 && enfProperty.transactions.length === 0 && (
-                          <div className="enf-empty">Deed record found, but no recorded mortgages or sale transactions are on file for this parcel.</div>
+                          <div className="enf-empty">
+                            {enfProperty.recorderIncluded
+                              ? 'Deed record found; Enformion\'s recorder section came back EMPTY for this parcel — no mortgages or sale transactions are on file with their data provider (common for new subdivision lots; county recorder coverage varies).'
+                              : 'Deed record found, but Enformion\'s response did not include the Recorder (mortgage & transaction) section at all — ask Enformion support to enable the RecorderRecords include on your API access profile.'}
+                          </div>
                         )}
                       </>
                     ) : enfErrors.property ? (
@@ -3697,6 +3701,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                                 {ln.isPublic ? 'Public hookup' : (ln.kind === 'water' ? 'Well needed' : 'Septic needed')}
                               </span>
                             </div>
+                            {ln.detail && <div className="util-note util-detail">{ln.detail}</div>}
                             {ln.note && <div className="util-note">{ln.note}</div>}
                             {ln.verified ? (
                               <div className="util-cost">{ln.low === ln.high ? `$${ln.low.toLocaleString()}` : `$${ln.low.toLocaleString()} – $${ln.high.toLocaleString()}`} <span className="util-verified-tag">verified local price</span></div>
@@ -3707,11 +3712,42 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                         ))}
                         {(utilities.totalLow > 0 || utilities.totalHigh > 0) && (
                           <div className="util-row util-total">
-                            <span>Total to connect (verified items only)</span>
-                            <span className="util-cost">${utilities.totalLow.toLocaleString()} – ${utilities.totalHigh.toLocaleString()}</span>
+                            <span>{utilities.totalLow === utilities.totalHigh ? 'Total tap fees (verified)' : 'Total to connect (verified items only)'}</span>
+                            <span className="util-cost">{utilities.totalLow === utilities.totalHigh ? `$${utilities.totalLow.toLocaleString()}` : `$${utilities.totalLow.toLocaleString()} – $${utilities.totalHigh.toLocaleString()}`}</span>
                           </div>
                         )}
+                        {utilities.tapNote && (
+                          <div className="util-tapnote">{utilities.tapNote}</div>
+                        )}
                       </div>
+
+                      {/* Residential permit fees — jurisdiction's adopted fee
+                          schedule, verified figures only. */}
+                      {utilities.permits.length > 0 && (
+                        <div className="util-rows util-permits">
+                          <div className="util-subhead">Permits &amp; development fees</div>
+                          {utilities.permits.map((p, i) => (
+                            <div key={i} className="util-row">
+                              <div className="util-row-top">
+                                <span className="util-name">{p.name}</span>
+                              </div>
+                              {p.note && <div className="util-note">{p.note}</div>}
+                              <div className="util-cost">{p.low === p.high ? `$${p.low.toLocaleString()}` : `~$${p.low.toLocaleString()} – $${p.high.toLocaleString()}`} <span className="util-verified-tag">fee schedule</span></div>
+                            </div>
+                          ))}
+                          {(() => {
+                            const pl = utilities.permits.reduce((s, p) => s + p.low, 0);
+                            const ph = utilities.permits.reduce((s, p) => s + p.high, 0);
+                            const tl = utilities.totalLow + pl, th = utilities.totalHigh + ph;
+                            return (
+                              <div className="util-row util-total">
+                                <span>Estimated development fees (taps + permits)</span>
+                                <span className="util-cost">{tl === th ? `$${tl.toLocaleString()}` : `~$${tl.toLocaleString()} – $${th.toLocaleString()}`}</span>
+                              </div>
+                            );
+                          })()}
+                        </div>
+                      )}
                       {utilities.sources.length > 0 && (
                         <div className="cost-sources">
                           <span className="cost-sources-label">Sources:</span>

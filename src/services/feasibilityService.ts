@@ -1,4 +1,4 @@
-import type { SiteFeasibilityData, SlopeProfile, CompProperty, FloodZoneInfo, WetlandsInfo, ConstructionCostEstimate, CostLineItem, MaterialTakeoff, MaterialTakeoffItem, LandClearingEstimate, TreeRemovalLine, ClearingMethod, UtilitiesEstimate, UtilityLine } from '../types/feasibility';
+import type { SiteFeasibilityData, SlopeProfile, CompProperty, FloodZoneInfo, WetlandsInfo, ConstructionCostEstimate, CostLineItem, MaterialTakeoff, MaterialTakeoffItem, LandClearingEstimate, TreeRemovalLine, ClearingMethod, UtilitiesEstimate, UtilityLine, PermitFeeLine } from '../types/feasibility';
 import { fetchCountyZoningCode, hasCountyZoning, normalizeCountyKey } from '../data/ncZoning';
 import { getSupabase, isSupabaseConfigured } from './supabaseClient';
 
@@ -2219,6 +2219,10 @@ export interface EnformionPropertyRecord {
   transactions: EnfPropertyTransaction[];
   mortgages: EnfMortgage[];
   openLienCount: number;
+  /** Whether Enformion's response even CONTAINED the RecorderRecords section
+   *  (mortgages & sale transactions live there). false = the section was
+   *  absent from the response — an account/include issue, not empty data. */
+  recorderIncluded: boolean;
 }
 function enfName(n: any): string {
   const nm = ci(n, 'Name') ?? n;
@@ -2370,7 +2374,7 @@ export async function enformionPropertySearch(address: string, fallbackAddress?:
     });
   }
 
-  return {
+  const result: EnformionPropertyRecord = {
     apn: ciStr(summary, 'Apn') || ciStr(propId, 'ApnUnformatted'),
     currentOwners: ciArr(summary, 'CurrentOwners').map(enfName).filter(Boolean),
     purchasePrice: ciNum(purchase, 'Price'),
@@ -2384,7 +2388,19 @@ export async function enformionPropertySearch(address: string, fallbackAddress?:
     transactions: transactions.slice(0, 8),
     mortgages: mortgages.slice(0, 6),
     openLienCount: ciArr(rec, 'OpenLienRecords').length,
+    recorderIncluded: ci(rec, 'RecorderRecords') != null,
   };
+  // PII-safe shape log so "no mortgages/transactions" is verifiable against
+  // what Enformion actually sent (open DevTools console after a search).
+  if (!result.transactions.length && !result.mortgages.length) {
+    console.log('[Enformion PropertyV2] deed matched but 0 mortgages/transactions parsed. Response sections:', {
+      recorderIncluded: result.recorderIncluded,
+      recorderCount: recorder.length,
+      assessorIncluded: ci(rec, 'AssessorRecords') != null,
+      topLevelKeys: Object.keys(rec || {}),
+    });
+  }
+  return result;
 }
 
 /** Bulk skip trace for the finder's owner list — phones/emails for each owner
@@ -5104,17 +5120,18 @@ JURISDICTION AT THIS EXACT PARCEL (from the U.S. Census place boundaries): ${jur
 ${incorporated
     ? `Because this parcel is INSIDE ${place}'s municipal limits, public water & sewer are typically available — find ${place}'s (or the county authority's) water and sewer tap/connection/impact fees.`
     : `Because this parcel is in UNINCORPORATED county land, public sewer is usually NOT available and often no public water either — price a private well and a septic system unless you find evidence a public/community system actually reaches this specific area.`}
-1) Is PUBLIC/municipal WATER available to this parcel/area, and what is the water tap / connection / impact fee?
-2) Is PUBLIC/municipal SEWER available, and what is the sewer tap / connection / impact fee?
+1) Is PUBLIC/municipal WATER available to this parcel/area, and what is the water tap / connection / impact fee? Give the fee for the STANDARD RESIDENTIAL SERVICE SIZE and put that size in waterTapDetail (e.g. "3/4-inch service — City of Kannapolis fee schedule").
+2) Is PUBLIC/municipal SEWER available, and what is the sewer tap / connection / impact fee? Same: standard residential size in sewerTapDetail.
 3) If public water is NOT available, the CURRENT LOCAL cost to drill a private WELL (drilling + pump + connection).
 4) If public sewer is NOT available, the CURRENT LOCAL cost of a conventional SEPTIC system (perc/soil test + install).
+5) The jurisdiction's CURRENT RESIDENTIAL PERMIT FEES from its adopted fee schedule: the flat residential ZONING permit fee, the flat DRIVEWAY permit fee (if it has one), and the typical TOTAL building + trade permits (building, electrical, plumbing, mechanical, inspections) for a NEW 1,400–1,800 sqft single-family home CALCULATED FROM the schedule's actual method (per-sqft or valuation-based). Note the calculation basis in permitNote.
 Name the local water/sewer authority if known.
 Return ONLY a JSON object in a \`\`\`json code block:
 \`\`\`json
-{ "publicWater": "available|not-available|unknown", "waterTapLow": 0, "waterTapHigh": 0, "publicSewer": "available|not-available|unknown", "sewerTapLow": 0, "sewerTapHigh": 0, "wellLow": 0, "wellHigh": 0, "septicLow": 0, "septicHigh": 0, "provider": "", "sources": ["https://..."] }
+{ "publicWater": "available|not-available|unknown", "waterTapLow": 0, "waterTapHigh": 0, "waterTapDetail": "", "publicSewer": "available|not-available|unknown", "sewerTapLow": 0, "sewerTapHigh": 0, "sewerTapDetail": "", "wellLow": 0, "wellHigh": 0, "septicLow": 0, "septicHigh": 0, "zoningPermitFee": 0, "drivewayPermitFee": 0, "buildingPermitLow": 0, "buildingPermitHigh": 0, "permitNote": "", "provider": "", "sources": ["https://..."] }
 \`\`\`
 STRICT PRICING RULES — REAL FIGURES ONLY:
-- Every dollar figure MUST come from a page you actually found with Google Search: the utility authority's CURRENT published fee schedule / rate ordinance for tap-connection-impact fees, or named LOCAL well-drilling & septic contractors' current pricing for this county.
+- Every dollar figure MUST come from a page you actually found with Google Search: the utility authority's CURRENT published fee schedule / rate ordinance for tap-connection-impact fees, the jurisdiction's CURRENT adopted permit fee schedule, or named LOCAL well-drilling & septic contractors' current pricing for this county.
 - List in "sources" the exact URLs the figures came from. A figure without a source URL is not allowed.
 - If you cannot find a verifiable current local figure for a line, you MUST leave it 0. NEVER estimate, NEVER use national/regional averages, NEVER guess.`;
   const text = await groundedGeminiText(keys.gemini, prompt, 'You are a site-development utilities analyst for North Carolina. Use Google Search to find the local water/sewer provider, its CURRENT published tap/connection/impact fee schedule, and current local well & septic contractor pricing. Return only the JSON. Every number must be traceable to a cited source URL; leave any unverifiable number 0 — never estimate or use regional averages.', 90000);
@@ -5150,11 +5167,13 @@ STRICT PRICING RULES — REAL FIGURES ONLY:
     return { low: lo, high: hi, verified: true };
   };
 
+  const detailOf = (v: any) => { const s = String(v || '').trim(); return s ? s.slice(0, 120) : undefined; };
+
   const lines: UtilityLine[] = [];
   // WATER: public tap fee when served, else private well.
   if (publicWater === 'available') {
     const r = range(o.waterTapLow, o.waterTapHigh);
-    lines.push({ name: 'Public water tap fee', kind: 'water', isPublic: true, status: 'available', ...r, note: 'municipal water tap / connection / impact fee' });
+    lines.push({ name: 'Public water tap fee', kind: 'water', isPublic: true, status: 'available', ...r, detail: detailOf(o.waterTapDetail), note: 'municipal water tap / connection / impact fee' });
   } else {
     const r = range(o.wellLow, o.wellHigh);
     lines.push({ name: 'Private well', kind: 'water', isPublic: false, status: publicWater, ...r, note: 'drill + pump + connection (no public water)' });
@@ -5162,13 +5181,36 @@ STRICT PRICING RULES — REAL FIGURES ONLY:
   // SEWER: public tap fee when served, else septic.
   if (publicSewer === 'available') {
     const r = range(o.sewerTapLow, o.sewerTapHigh);
-    lines.push({ name: 'Public sewer tap fee', kind: 'sewer', isPublic: true, status: 'available', ...r, note: 'municipal sewer tap / connection / impact fee' });
+    lines.push({ name: 'Public sewer tap fee', kind: 'sewer', isPublic: true, status: 'available', ...r, detail: detailOf(o.sewerTapDetail), note: 'municipal sewer tap / connection / impact fee' });
   } else {
     const r = range(o.septicLow, o.septicHigh);
     lines.push({ name: 'Septic system', kind: 'sewer', isPublic: false, status: publicSewer, ...r, note: 'perc/soil test + conventional system install (no public sewer)' });
   }
 
-  const real = lines.some((l) => l.verified);
+  // Residential permit fees from the jurisdiction's adopted fee schedule —
+  // verified figures only, same no-guessing rule as the tap fees.
+  const permits: PermitFeeLine[] = [];
+  const zp = num(o.zoningPermitFee);
+  if (zp) permits.push({ name: 'Residential zoning permit', low: zp, high: zp, verified: true });
+  const dp = num(o.drivewayPermitFee);
+  if (dp) permits.push({ name: 'Driveway permit', low: dp, high: dp, verified: true });
+  const bl = num(o.buildingPermitLow), bh = num(o.buildingPermitHigh);
+  if (bl || bh) {
+    permits.push({
+      name: 'Building + trade permits (new SFH, ~1,400–1,800 sqft)',
+      low: bl || bh, high: Math.max(bl, bh),
+      note: detailOf(o.permitNote) || 'calculated from square footage / construction valuation — exact amount depends on the plans',
+      verified: true,
+    });
+  }
+
+  // Developer-prepaid caveat — tap fees on subdivision lots are often already
+  // satisfied by the developer's infrastructure installation.
+  const tapNote = (publicWater === 'available' || publicSewer === 'available')
+    ? 'These tap fees are not necessarily still owed: if this lot is in a subdivision where the developer already installed and paid for the taps, the fees may be satisfied. Ask the utility whether taps were purchased for this lot before budgeting — it can change the development cost by thousands.'
+    : undefined;
+
+  const real = lines.some((l) => l.verified) || permits.length > 0;
   // Totals sum ONLY verified lines (0 when nothing was verifiable).
   const totalLow = lines.reduce((s, l) => s + (l.verified ? l.low : 0), 0);
   const totalHigh = lines.reduce((s, l) => s + (l.verified ? l.high : 0), 0);
@@ -5184,7 +5226,7 @@ STRICT PRICING RULES — REAL FIGURES ONLY:
   return {
     locality: zip ? `ZIP ${zip} · ${county} County, NC` : `${county} County, NC`,
     jurisdiction, incorporated,
-    publicWater, publicSewer, lines, totalLow, totalHigh, summary,
+    publicWater, publicSewer, lines, totalLow, totalHigh, permits, tapNote, summary,
     provider: o.provider ? String(o.provider).slice(0, 120) : undefined,
     sources, realTime: real, generatedAt: Date.now(),
   };

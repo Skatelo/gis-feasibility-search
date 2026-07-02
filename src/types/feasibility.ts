@@ -162,8 +162,21 @@ export interface UtilityLine {
   low: number;         // cost range low ($) — 0 when no verified local figure was found
   high: number;        // cost range high ($) — 0 when no verified local figure was found
   note?: string;       // e.g. "tap/impact fee", "drill + pump", "perc test + install"
+  /** Fee-schedule specifics, e.g. '¾-inch service · City of Kannapolis fee schedule'. */
+  detail?: string;
   /** true only when the figure came from a live, cited local source. Unverified
    *  lines carry NO dollar figure (never a regional baseline / guess). */
+  verified: boolean;
+}
+
+/** One residential permit fee from the jurisdiction's CURRENT fee schedule
+ *  (zoning permit, driveway permit, building + trade permits). Only verified,
+ *  cited figures are ever shown. */
+export interface PermitFeeLine {
+  name: string;
+  low: number;
+  high: number;
+  note?: string;
   verified: boolean;
 }
 
@@ -180,6 +193,11 @@ export interface UtilitiesEstimate {
   lines: UtilityLine[];
   totalLow: number;
   totalHigh: number;
+  /** Residential permit fees from the jurisdiction's current fee schedule
+   *  (zoning / driveway / building + trades). Verified figures only. */
+  permits: PermitFeeLine[];
+  /** Caveat shown when public taps apply: developer may have already paid them. */
+  tapNote?: string;
   summary: string;     // one-line recommendation
   provider?: string;   // water/sewer authority when known
   sources: string[];
