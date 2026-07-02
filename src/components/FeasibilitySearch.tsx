@@ -718,6 +718,10 @@ export const FeasibilitySearch: FC = () => {
 
   // Monotonic search sequence — partial emissions from a superseded search are ignored.
   const searchSeqRef = useRef(0);
+  // The address as the user searched it (usually "street, city, NC zip") — the
+  // GIS situs address in reportData.inputAddress is often street-only, so
+  // Enformion gets its city/state/zip from this.
+  const searchedAddressRef = useRef('');
 
   // Chatbot states
   const [chatInput, setChatInput] = useState('');
@@ -905,7 +909,7 @@ export const FeasibilitySearch: FC = () => {
 
     try {
       let rec: EnformionPropertyRecord | null = null;
-      try { rec = await enformionPropertySearch(addr); } catch { /* handled below */ }
+      try { rec = await enformionPropertySearch(addr, searchedAddressRef.current); } catch { /* handled below */ }
       if (seq !== searchSeqRef.current) return;
       if (rec) setEnfProperty(rec);
       else setEnfErrors({ property: errOf('Property record search failed — please try again.') });
@@ -2335,6 +2339,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
     }
 
     const seq = ++searchSeqRef.current; // invalidates any in-flight previous search
+    searchedAddressRef.current = addressToSearch.trim(); // full "street, city, state" for Enformion
     // Comp-search preferences (Account & API Settings) drive the search radius +
     // the initial property-type filter for this run.
     const compPrefs = getCompPrefs();

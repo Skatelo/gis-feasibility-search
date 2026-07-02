@@ -1663,6 +1663,7 @@ export function enformionDiagMessage(): string {
   if (d.status === 401 || d.status === 403) return 'Enformion rejected the credentials — check the AP Name / AP Password in Account Settings.';
   if (d.status === 404) return 'Enformion endpoint not found (HTTP 404) — the API host/route may have changed.';
   if (d.status === 0) {
+    if (d.reason === 'incomplete address') return 'Enformion was not called — this parcel\'s address is missing its city/state.';
     if (d.reason && /proxy error|timed out/i.test(d.reason)) return `Enformion did not answer in time (${d.reason}) — heavy searches like Property Records can be slow. Try again.`;
     if (!enformionConfigured()) return 'Enformion credentials are not set — add the AP Name / AP Password in Account Settings.';
     return `Could not reach Enformion${d.reason ? ` (${d.reason})` : ''} — network hiccup or a slow search. Try again.`;
@@ -2140,9 +2141,24 @@ function enfName(n: any): string {
  *  current owners, purchase price, assessed value & taxes, the recorded sale
  *  TRANSACTIONS with buyers/sellers, and every recorded MORTGAGE (amount,
  *  lender, loan type). Returns null when nothing matched (see diag for why). */
-export async function enformionPropertySearch(address: string): Promise<EnformionPropertyRecord | null> {
-  const { addressLine1, addressLine2 } = splitAddress(address);
-  if (!addressLine1 || !addressLine2) return null;
+export async function enformionPropertySearch(address: string, fallbackAddress?: string): Promise<EnformionPropertyRecord | null> {
+  // Build AddressLine1 (street) + AddressLine2 ("City, ST ZIP"). County GIS
+  // situs addresses are often STREET-ONLY with no comma ("1603 TREXLAR AVE"),
+  // which used to abort this search before it ever called Enformion. Take the
+  // street from the GIS situs when present and the city/state/zip tail from
+  // the address the user actually searched.
+  const a = splitAddress(address);
+  const b = splitAddress(fallbackAddress);
+  const addressLine1 = (a.addressLine1 || b.addressLine1).trim();
+  const addressLine2 = (a.addressLine2 || b.addressLine2).trim();
+  if (!addressLine1 || !addressLine2) {
+    lastEnformionDiag = {
+      status: 0,
+      reason: 'incomplete address',
+      detail: `This parcel's address ("${address}") has no city/state — Enformion needs "street + city, state". Search with the full address (e.g. "123 Main St, Town, NC 28000") and it will run.`,
+    };
+    return null;
+  }
   // ResultsPerPage 1: we only use the top match (smaller, faster payload).
   const data = await enformionCall('/PropertyV2Search', 'PropertyV2', {
     AddressLine1: addressLine1, AddressLine2: addressLine2, Page: 1, ResultsPerPage: 1,
