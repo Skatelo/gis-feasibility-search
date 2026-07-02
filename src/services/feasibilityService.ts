@@ -5101,7 +5101,7 @@ export async function fetchLandClearingEstimate(reportData: SiteFeasibilityData)
  */
 export async function fetchUtilitiesEstimate(reportData: SiteFeasibilityData): Promise<UtilitiesEstimate | null> {
   const keys = getUserKeys();
-  if (!keys.gemini) return null;
+  if (!keys.gemini) throw new Error('Add your Gemini API key in Account Settings to run the utilities & fees lookup on this device.');
   const county = reportData.countyName || '';
   const zip = (String(reportData.inputAddress || '').match(/\b(\d{5})(?:-\d{4})?\b/) || [])[1] || '';
   const locality = zip ? `${reportData.inputAddress} (ZIP ${zip}, ${county} County, NC)` : `${reportData.inputAddress} (${county} County, NC)`;
@@ -5134,13 +5134,13 @@ STRICT PRICING RULES — REAL FIGURES ONLY:
 - Every dollar figure MUST come from a page you actually found with Google Search: the utility authority's CURRENT published fee schedule / rate ordinance for tap-connection-impact fees, the jurisdiction's CURRENT adopted permit fee schedule, or named LOCAL well-drilling & septic contractors' current pricing for this county.
 - List in "sources" the exact URLs the figures came from. A figure without a source URL is not allowed.
 - If you cannot find a verifiable current local figure for a line, you MUST leave it 0. NEVER estimate, NEVER use national/regional averages, NEVER guess.`;
-  const text = await groundedGeminiText(keys.gemini, prompt, 'You are a site-development utilities analyst for North Carolina. Use Google Search to find the local water/sewer provider, its CURRENT published tap/connection/impact fee schedule, and current local well & septic contractor pricing. Return only the JSON. Every number must be traceable to a cited source URL; leave any unverifiable number 0 — never estimate or use regional averages.', 90000);
-  if (!text) return null;
+  const text = await groundedGeminiText(keys.gemini, prompt, 'You are a site-development utilities and permit-fee analyst for North Carolina — any city, town, or county. Use Google Search to find the LOCAL water/sewer provider for the given jurisdiction, its CURRENT published tap/connection/impact fee schedule, the jurisdiction\'s CURRENT adopted residential permit fee schedule, and current local well & septic contractor pricing. Return only the JSON. Every number must be traceable to a cited source URL; leave any unverifiable number 0 — never estimate or use regional averages.', 90000);
+  if (!text) throw new Error('The live fee-schedule search did not answer (a slow or rate-limited moment) — tap Retry.');
   const m = text.match(/```json\s*([\s\S]*?)\s*```/) || text.match(/\{[\s\S]*\}/);
-  if (!m) return null;
+  if (!m) throw new Error('The live search answered in an unexpected format — tap Retry.');
 
   let o: any;
-  try { o = JSON.parse((m[1] || m[0]).replace(/,\s*([}\]])/g, '$1')); } catch { return null; }
+  try { o = JSON.parse((m[1] || m[0]).replace(/,\s*([}\]])/g, '$1')); } catch { throw new Error('The live search answered in an unexpected format — tap Retry.'); }
   const num = (v: any) => { const n = Number(v); return Number.isFinite(n) && n > 0 ? Math.round(n) : 0; };
   const norm = (v: any): 'available' | 'not-available' | 'unknown' => {
     const s = String(v || '').toLowerCase();

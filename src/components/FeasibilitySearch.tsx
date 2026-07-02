@@ -686,6 +686,7 @@ export const FeasibilitySearch: FC = () => {
   const [landClearingLoading, setLandClearingLoading] = useState(false);
   const [utilities, setUtilities] = useState<UtilitiesEstimate | null>(null);
   const [utilitiesLoading, setUtilitiesLoading] = useState(false);
+  const [utilitiesError, setUtilitiesError] = useState('');
   // Enformion Property Search V2 for the searched address — deed owners,
   // recorded mortgages & sale transactions.
   const [enfProperty, setEnfProperty] = useState<EnformionPropertyRecord | null>(null);
@@ -882,6 +883,23 @@ export const FeasibilitySearch: FC = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [chatHistory]);
 
+  // Utilities + connection costs + permit fees lookup. The card NEVER silently
+  // disappears: failures land in utilitiesError with the real reason and a
+  // Retry button re-runs just this lookup.
+  const runUtilitiesLookup = (reportData: SiteFeasibilityData, seq: number) => {
+    setUtilities(null);
+    setUtilitiesError('');
+    setUtilitiesLoading(true);
+    fetchUtilitiesEstimate(reportData)
+      .then((u) => {
+        if (seq !== searchSeqRef.current) return;
+        if (u) setUtilities(u);
+        else setUtilitiesError('The utilities lookup returned nothing — tap Retry.');
+      })
+      .catch((e) => { if (seq === searchSeqRef.current) setUtilitiesError(e?.message || 'Utilities lookup failed — tap Retry.'); })
+      .finally(() => { if (seq === searchSeqRef.current) setUtilitiesLoading(false); });
+  };
+
   // Enformion Property Search V2 for the searched address — deed, current
   // owners, recorded MORTGAGES & sale TRANSACTIONS. Called directly against
   // Enformion's CORS-enabled API (no serverless proxy in the hot path).
@@ -941,12 +959,7 @@ export const FeasibilitySearch: FC = () => {
       .catch(() => {})
       .finally(() => { if (seq === searchSeqRef.current) setLandClearingLoading(false); });
     // Utilities + connection costs (public water/sewer tap fees, or well/septic).
-    setUtilities(null);
-    setUtilitiesLoading(true);
-    fetchUtilitiesEstimate(reportData)
-      .then((u) => { if (seq === searchSeqRef.current && u) setUtilities(u); })
-      .catch(() => {})
-      .finally(() => { if (seq === searchSeqRef.current) setUtilitiesLoading(false); });
+    runUtilitiesLookup(reportData, seq);
     // Enformion records (property/mortgage/transactions, debt, tenant history)
     // fire alongside — they render in their own card as each search resolves.
     fetchEnformionRecords(reportData, seq);
@@ -2360,6 +2373,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
     setLandClearingLoading(false);
     setUtilities(null);
     setUtilitiesLoading(false);
+    setUtilitiesError('');
     setEnfProperty(null);
     setEnfErrors({});
     setEnfLoading(false);
@@ -3674,15 +3688,28 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
               )}
 
               {/* Utilities & Connection Costs — public water/sewer tap fees when
-                  served, otherwise real-time local well + septic costs. */}
-              {(utilities || utilitiesLoading) && (
+                  served, otherwise real-time local well + septic costs. The card
+                  stays visible on failure with the real reason + Retry. */}
+              {(utilities || utilitiesLoading || utilitiesError) && (
                 <div className="card registry-card utilities-card">
                   <h3 className="registry-card-header" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                     <Droplets size={16} style={{ color: 'var(--primary)' }} />
-                    <span>Utilities &amp; Connection Costs</span>
+                    <span>Utilities, Taps &amp; Permit Fees</span>
+                    <button
+                      type="button"
+                      className="enf-retry-btn"
+                      title="Re-run the utilities & fee-schedule lookup"
+                      disabled={utilitiesLoading}
+                      onClick={() => { if (data) runUtilitiesLookup(data, searchSeqRef.current); }}
+                    >
+                      {utilitiesLoading ? <Loader2 size={13} className="spinner" /> : <History size={13} />}
+                      <span>{utilitiesLoading ? 'Searching…' : 'Retry'}</span>
+                    </button>
                   </h3>
                   {utilitiesLoading && !utilities ? (
-                    <div className="cost-loading"><Loader2 size={15} className="spinner" /><span>Checking water/sewer availability &amp; local costs…</span></div>
+                    <div className="cost-loading"><Loader2 size={15} className="spinner" /><span>Checking water/sewer availability, tap fees &amp; permit schedules…</span></div>
+                  ) : utilitiesError && !utilities ? (
+                    <div className="enf-err"><AlertCircle size={12} /> {utilitiesError}</div>
                   ) : utilities ? (
                     <>
                       <div className="util-summary">
