@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import type { FormEvent, KeyboardEvent, FC } from 'react';
 import { createRoot } from 'react-dom/client';
-import { executeLandAnalysis, chatWithGemini, chatFollowUp, getUserKeys, detectNcCounty, lookupParcelById, fetchConstructionCostEstimate, fetchMaterialTakeoff, fetchLandClearingEstimate, fetchUtilitiesEstimate, fetchGoogleDistanceMatrixComps, getCompPrefs, getReportAutoGenerate, enformionConfigured, enformionContactEnrich, enformionPersonSearch, enformionBusinessSearch, looksLikeBusiness, enformionDiagMessage, getLastEnformionShape, getLastEnformionDetail, enformionPropertySearch } from '../services/feasibilityService';
+import { executeLandAnalysis, chatWithGemini, chatFollowUp, getUserKeys, detectNcCounty, lookupParcelById, fetchConstructionCostEstimate, fetchMaterialTakeoff, fetchLandClearingEstimate, fetchUtilitiesEstimate, fetchGoogleDistanceMatrixComps, getCompPrefs, getReportAutoGenerate, enformionConfigured, enformionContactEnrich, enformionPersonSearch, enformionBusinessSearch, looksLikeBusiness, enformionDiagMessage, getLastEnformionShape, getLastEnformionDetail, enformionPropertySearch, ncAddressSuggestions } from '../services/feasibilityService';
 import type { SkipTraceContact, EnformionPropertyRecord } from '../services/feasibilityService';
 import type { ChatMessage, ChatAttachment } from '../services/feasibilityService';
 import { saveReport, getReportEtaMs, recordReportDuration } from '../services/reportStore';
@@ -1611,73 +1611,107 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
     return () => window.removeEventListener('open-gis-reports', openReports);
   }, []);
 
-  // Dynamic loader for Google Maps JS API script
+  // Dynamic loader for the Google Maps JS API. Resilient by design:
+  // - POLLS instead of trusting one-shot events: the key can be added AFTER
+  //   mount (sign-in / settings), and with loading=async the places library
+  //   initializes AFTER the script's load event fires — the old one-shot
+  //   listener regularly missed it, leaving autocomplete dead until reload.
+  // - Uses importLibrary('places') (the loading=async contract) with the
+  //   legacy constructor as a fallback.
   useEffect(() => {
-    const callback = () => {
-      setMapsLoaded(true);
-      if (typeof google !== 'undefined' && google.maps && google.maps.places) {
-        autocompleteServiceRef.current = new google.maps.places.AutocompleteService();
+    let cancelled = false;
+    let timer: number | undefined;
+
+    const tick = async () => {
+      if (cancelled) return;
+      const g: any = (window as any).google;
+      if (g?.maps) {
+        setMapsLoaded(true);
+        if (!autocompleteServiceRef.current) {
+          try { if (g.maps.importLibrary) await g.maps.importLibrary('places'); } catch { /* retry next tick */ }
+          const gg: any = (window as any).google;
+          if (!cancelled && gg?.maps?.places?.AutocompleteService) {
+            autocompleteServiceRef.current = new gg.maps.places.AutocompleteService();
+          }
+        }
+        if (autocompleteServiceRef.current) return; // fully ready — stop polling
+      } else if (!document.getElementById('googleMapsScript')) {
+        const apiKey = getUserKeys().googleMaps;
+        if (apiKey) {
+          const script = document.createElement('script');
+          // loading=async is Google's recommended bootstrap param.
+          script.src = `https://maps.googleapis.com/maps/api/js?key=${apiKey}&libraries=places,geometry&loading=async`;
+          script.id = 'googleMapsScript';
+          script.async = true;
+          script.defer = true;
+          document.head.appendChild(script);
+        }
       }
+      timer = window.setTimeout(tick, 1200);
     };
-
-    if (typeof google !== 'undefined' && google.maps && google.maps.places) {
-      callback();
-      return;
-    }
-
-    const existingScript = document.getElementById("googleMapsScript");
-    if (existingScript) {
-      existingScript.addEventListener("load", callback);
-      return;
-    }
-
-    const keys = getUserKeys();
-    const apiKey = keys.googleMaps;
-    if (!apiKey) {
-      console.warn("User Google Maps API Key is not configured in settings.");
-      return;
-    }
-
-
-    const script = document.createElement("script");
-    // loading=async is Google's recommended bootstrap param (silences the
-    // "loaded directly without loading=async" console warning + best perf).
-    script.src = `https://maps.googleapis.com/maps/api/js?key=${apiKey}&libraries=places,geometry&loading=async`;
-    script.id = "googleMapsScript";
-    script.async = true;
-    script.defer = true;
-    script.addEventListener("load", callback);
-    document.head.appendChild(script);
+    tick();
+    return () => { cancelled = true; if (timer) clearTimeout(timer); };
   }, []);
 
-  // Fetch predictions with debouncing
+  // Fetch predictions with debouncing. Three sources so suggestions ALWAYS
+  // appear: 1) Places AutocompleteSuggestion (the current API — required for
+  // newer Google keys where the legacy service is denied), 2) legacy
+  // AutocompleteService, 3) the keyless NC statewide geocoder when Google is
+  // unavailable, still initializing, or rejects the key.
   useEffect(() => {
-    if (!mapsLoaded || !autocompleteServiceRef.current || !addressInput.trim()) {
+    const q = addressInput.trim();
+    if (q.length < 3) {
       setPredictions([]);
       setShowDropdown(false);
       return;
     }
+    let cancelled = false;
 
-    const delayDebounce = setTimeout(() => {
-      autocompleteServiceRef.current.getPlacePredictions(
-        {
-          input: addressInput,
-          componentRestrictions: { country: "us" },
-        },
-        (preds: any[], status: any) => {
-          if (status === "OK" && preds) {
-            setPredictions(preds);
-            setShowDropdown(true);
-            setActiveIndex(-1);
-          } else {
-            setPredictions([]);
-            setShowDropdown(false);
-          }
-        }
-      );
-    }, 150);
+    const viaNew = async (): Promise<any[] | null> => {
+      try {
+        const g: any = (window as any).google;
+        const AS = g?.maps?.places?.AutocompleteSuggestion;
+        if (!AS?.fetchAutocompleteSuggestions) return null;
+        const { suggestions } = await AS.fetchAutocompleteSuggestions({ input: q, includedRegionCodes: ['us'] });
+        const preds = (suggestions || []).map((s: any, i: number) => {
+          const p = s?.placePrediction;
+          const description = p?.text?.text || (typeof p?.text === 'string' ? p.text : '');
+          return { place_id: p?.placeId || `new_${i}`, description };
+        }).filter((x: any) => x.description);
+        return preds.length ? preds : null;
+      } catch { return null; }
+    };
 
-    return () => clearTimeout(delayDebounce);
+    const viaLegacy = (): Promise<any[] | null> => new Promise((resolve) => {
+      const svc = autocompleteServiceRef.current;
+      if (!svc) return resolve(null);
+      try {
+        svc.getPlacePredictions(
+          { input: q, componentRestrictions: { country: 'us' } },
+          (preds: any[], status: any) => {
+            if (status === 'OK' && preds?.length) resolve(preds);
+            else if (status === 'ZERO_RESULTS') resolve([]);
+            else resolve(null); // denied / error → let the fallback answer
+          },
+        );
+      } catch { resolve(null); }
+    });
+
+    const delayDebounce = setTimeout(async () => {
+      let preds = await viaNew();
+      if (preds === null) preds = await viaLegacy();
+      if (!preds || preds.length === 0) {
+        const nc = await ncAddressSuggestions(q);
+        if (nc.length) preds = nc.map((a, i) => ({ place_id: `nc_${i}`, description: a }));
+      }
+      if (cancelled) return;
+      const finalPreds = preds || [];
+      setPredictions(finalPreds);
+      setShowDropdown(finalPreds.length > 0);
+      setActiveIndex(-1);
+    }, 250);
+
+    return () => { cancelled = true; clearTimeout(delayDebounce); };
   }, [addressInput, mapsLoaded]);
 
   // Click outside listener

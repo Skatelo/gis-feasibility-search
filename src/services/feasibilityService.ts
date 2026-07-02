@@ -74,6 +74,28 @@ const NC_PARCEL_ENGINE_MIRROR = "https://services.nconemap.gov/secure/rest/servi
 // likely to hit a gateway timeout. The State Plane query needs geometry only.
 const NC_PARCEL_FIELDS = "parno,siteadd,gisacres,ownname,ownname2,ownfrst,ownlast,mailadd,mcity,mstate,mzip,scity,parval,landval,saledate,reviseyear,sourceref,legdecfull,cntyname";
 
+/** Keyless address suggestions from the NC statewide geocoder — the always-
+ *  available fallback for the search box when Google Places is unavailable,
+ *  slow to initialize, or denied for the API key. */
+export async function ncAddressSuggestions(query: string, max = 5): Promise<string[]> {
+  const q = query.trim();
+  if (q.length < 3) return [];
+  try {
+    const url = `${NC_GEOCODER}?SingleLine=${encodeURIComponent(q)}&maxLocations=${max}&outFields=&f=json`;
+    const res = await fetchWithTimeout(url, 6000);
+    if (!res.ok) return [];
+    const j = await res.json();
+    const out: string[] = [];
+    for (const c of (j.candidates || [])) {
+      let a = String(c.address || '').trim();
+      if (!a) continue;
+      if (!/\bNC\b/i.test(a)) a += ', NC';
+      if (!out.includes(a)) out.push(a);
+    }
+    return out.slice(0, max);
+  } catch { return []; }
+}
+
 /** fetch() with an abort timeout so a hung GIS server fails fast instead of stalling the UI. */
 async function fetchWithTimeout(url: string, ms = 20000, init?: RequestInit): Promise<Response> {
   const controller = new AbortController();
