@@ -2230,42 +2230,65 @@ function enfName(n: any): string {
  *  current owners, purchase price, assessed value & taxes, the recorded sale
  *  TRANSACTIONS with buyers/sellers, and every recorded MORTGAGE (amount,
  *  lender, loan type). Returns null when nothing matched (see diag for why). */
-/** "City, ST ZIP" for a coordinate via Google reverse geocoding — the same
- *  Maps key the app already uses. Never throws; '' when unavailable. */
-async function cityStateZipFromPoint(lat: number, lng: number): Promise<string> {
+/** Google-NORMALIZED structured address for a coordinate — the same engine as
+ *  the search box autocomplete. Returns clean USPS-style pieces
+ *  ("333 S McPherson Church Rd" + "Fayetteville, NC 28303") that Enformion's
+ *  address parser accepts (raw all-caps GIS situs strings can trip it with
+ *  "Range Error"). Never throws; null when unavailable. */
+async function structuredAddressFromPoint(lat: number, lng: number): Promise<{ line1: string; line2: string } | null> {
   const key = getUserKeys().googleMaps;
-  if (!key) return '';
+  if (!key) return null;
   try {
     const res = await fetchWithTimeout(`https://maps.googleapis.com/maps/api/geocode/json?latlng=${lat},${lng}&key=${key}`, 8000);
-    if (!res.ok) return '';
+    if (!res.ok) return null;
     const j = await res.json();
-    for (const r of (j.results || [])) {
+    // Prefer precise results (street_address/premise) over area matches.
+    const ranked = [...(j.results || [])].sort((x: any, y: any) => {
+      const score = (r: any) => ((r.types || []).includes('street_address') || (r.types || []).includes('premise')) ? 0 : 1;
+      return score(x) - score(y);
+    });
+    for (const r of ranked) {
       const comps = r.address_components || [];
       const get = (type: string) => (comps.find((c: any) => (c.types || []).includes(type)) || {}).short_name || '';
+      const streetNum = get('street_number');
+      const route = get('route');
       const city = get('locality') || get('sublocality') || get('administrative_area_level_3') || get('postal_town');
       const state = get('administrative_area_level_1');
       const zip = get('postal_code');
-      if (city && state) return `${city}, ${state}${zip ? ` ${zip}` : ''}`;
+      if (route && city && state) {
+        return { line1: [streetNum, route].filter(Boolean).join(' '), line2: `${city}, ${state}${zip ? ` ${zip}` : ''}` };
+      }
     }
   } catch { /* ignore */ }
-  return '';
+  return null;
 }
 
 export async function enformionPropertySearch(address: string, fallbackAddress?: string, coords?: { lat: number; lng: number }): Promise<EnformionPropertyRecord | null> {
-  // Build AddressLine1 (street) + AddressLine2 ("City, ST ZIP"). County GIS
-  // situs addresses are often STREET-ONLY with no comma ("333 S MCPHERSON
-  // CHURCH RD"), and the user's typed search may lack commas too — so resolve
-  // the city/state in order of preference: GIS situs tail → typed-address
-  // tail → REVERSE GEOCODE of the parcel's own coordinates (always available
-  // after a successful GIS search). This search can therefore always run.
+  // Build candidate AddressLine1 (street) + AddressLine2 ("City, ST ZIP")
+  // forms and try them in order until one matches:
+  //   1. GIS situs street (authoritative for THE parcel) + best city/state tail
+  //   2. Google-normalized address from the parcel's own coordinates — the
+  //      same autocomplete engine as the search box, so Enformion's address
+  //      parser gets a clean standardized form (fixes "Range Error" on raw
+  //      all-caps county situs strings)
+  //   3. The user's typed search address as-is
   const a = splitAddress(address);
   const b = splitAddress(fallbackAddress);
-  const addressLine1 = (a.addressLine1 || b.addressLine1).trim();
-  let addressLine2 = (a.addressLine2 || b.addressLine2).trim();
-  if (!addressLine2 && coords && Number.isFinite(coords.lat) && Number.isFinite(coords.lng)) {
-    addressLine2 = await cityStateZipFromPoint(coords.lat, coords.lng);
-  }
-  if (!addressLine1 || !addressLine2) {
+  const google = (coords && Number.isFinite(coords.lat) && Number.isFinite(coords.lng))
+    ? await structuredAddressFromPoint(coords.lat, coords.lng)
+    : null;
+
+  const attempts: { line1: string; line2: string }[] = [];
+  const push = (l1?: string, l2?: string) => {
+    const line1 = (l1 || '').trim(), line2 = (l2 || '').trim();
+    if (line1 && line2 && !attempts.some((x) => x.line1.toLowerCase() === line1.toLowerCase() && x.line2.toLowerCase() === line2.toLowerCase())) {
+      attempts.push({ line1, line2 });
+    }
+  };
+  push(a.addressLine1, a.addressLine2 || b.addressLine2 || google?.line2);
+  push(google?.line1, google?.line2);
+  push(b.addressLine1, b.addressLine2 || google?.line2);
+  if (!attempts.length) {
     lastEnformionDiag = {
       status: 0,
       reason: 'incomplete address',
@@ -2273,13 +2296,27 @@ export async function enformionPropertySearch(address: string, fallbackAddress?:
     };
     return null;
   }
+
   // ResultsPerPage 1: we only use the top match (smaller, faster payload).
-  const data = await enformionCall('/PropertyV2Search', 'PropertyV2', {
-    AddressLine1: addressLine1, AddressLine2: addressLine2, Page: 1, ResultsPerPage: 1,
-  });
-  if (!data) return null;
-  const rec = ciArr(data, 'PropertyV2Records')[0];
-  if (!rec) return null;
+  let rec: any = null;
+  for (const at of attempts) {
+    const data = await enformionCall('/PropertyV2Search', 'PropertyV2', {
+      AddressLine1: at.line1, AddressLine2: at.line2, Page: 1, ResultsPerPage: 1,
+    });
+    if (data) {
+      rec = ciArr(data, 'PropertyV2Records')[0];
+      if (rec) break; // matched — stop trying alternate address forms
+    }
+    // No match / parser rejection — try the next (differently formatted) form.
+  }
+  if (!rec) {
+    // Surface exactly which address forms were searched, so a true no-match is
+    // distinguishable from a formatting problem.
+    const prev = lastEnformionDiag;
+    const triedNote = `Searched as: ${attempts.map((x) => `"${x.line1} · ${x.line2}"`).join(' and ')}.`;
+    lastEnformionDiag = { ...prev, detail: [prev.detail, triedNote].filter(Boolean).join(' ') };
+    return null;
+  }
 
   const summary = ci(ci(rec, 'Property'), 'Summary') || {};
   const assessor = ciArr(rec, 'AssessorRecords')[0] || {};
