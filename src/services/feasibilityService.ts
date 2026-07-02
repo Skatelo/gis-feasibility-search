@@ -65,6 +65,9 @@ export function setReportAutoGenerate(auto: boolean): void {
 
 const NC_GEOCODER = "https://services.nconemap.gov/secure/rest/services/AddressNC/AddressNC_geocoder/GeocodeServer/findAddressCandidates";
 const NC_PARCEL_ENGINE = "https://services.gis.nc.gov/secure/rest/services/NC1Map_Parcels/MapServer/1/query";
+// Same statewide layer on NC OneMap's other host — tried when the primary is
+// down (they fail independently more often than together).
+const NC_PARCEL_ENGINE_MIRROR = "https://services.nconemap.gov/secure/rest/services/NC1Map_Parcels/MapServer/1/query";
 
 // Only the fields the app actually uses — requesting these instead of `*` keeps
 // the response small so the (sometimes overloaded) statewide server is far less
@@ -317,6 +320,7 @@ const countyParcelLayers: Record<string, string> = {
   orange: "https://gis.orangecountync.gov/arcgis/rest/services/WebParcelService/MapServer/0",
   new_hanover: "https://gis.nhcgov.com/server/rest/services/Layers/Parcels/MapServer/0",
   rowan: "https://gis.rowancountync.gov/arcgis/rest/services/Public/RowanTaxParcels/MapServer/0",
+  cumberland: "https://gis.co.cumberland.nc.us/server/rest/services/Tax/Parcels/MapServer/0", // verified live: NAD83_PIN/OWNER/LOCATION_ADDR/ACREAGE/TOTAL_PROP_VALUE
 };
 
 /** Shoelace area (ft²) of a State Plane ring set, to derive acreage when absent. */
@@ -358,17 +362,17 @@ function normalizeCountyParcelAttrs(a: Record<string, any>): Record<string, any>
     if (book) sourceref = page ? `${book}/${page}` : String(book);
   }
   return {
-    parno: get(/^pin_?num$/i, /^parno$/i, /parcel_?id/i, /^pid$/i, /^pin$/i, /^pin14$/i, /parcelnum/i, /gpin/i, /nc_?pin/i) ?? "N/A",
+    parno: get(/^pin_?num$/i, /^parno$/i, /parcel_?id/i, /^pid$/i, /^pin$/i, /^pin14$/i, /^nad83_?pin$/i, /parcelnum/i, /gpin/i, /nc_?pin/i) ?? "N/A",
     gisacres: get(/gis_?acres/i, /calc.*acre/i, /calculated_?acreage/i, /deed_?ac(res)?/i, /^acres$/i, /acreage/i, /legal_?acres/i),
     ownname: ownname ?? "N/A",
     ownname2: ownname2 ?? "",
-    siteadd: get(/site_?address/i, /^siteadd/i, /whole_?address/i, /situs/i, /^address$/i, /prop_?add/i),
-    mailadd: get(/mailaddr?1/i, /^addr1$/i, /curr_?addr1/i, /mailing/i, /mail_?add/i),
+    siteadd: get(/site_?address/i, /^siteadd/i, /whole_?address/i, /situs/i, /location_?addr/i, /^address$/i, /prop_?add/i),
+    mailadd: get(/mailaddr?1/i, /^addr1$/i, /curr_?addr1/i, /mailing/i, /mail_?add/i, /^address$/i),
     mcity: get(/mail.*city/i, /^mcity$/i, /curr_?city/i, /loccity/i, /^city$/i),
     mstate: get(/mail.*state/i, /^mstate$/i, /curr_?state/i, /^state$/i),
     mzip: get(/mail.*zip/i, /^mzip$/i, /curr_?zip/i, /zipnum/i, /^zip(code)?$/i),
     scity: get(/^scity$/i, /loccity/i, /^city$/i),
-    parval: get(/^parval$/i, /total_?value_?assd/i, /assessed_?value/i, /total_?value/i, /^totval$/i, /tot_?mark_?val/i, /market_?value/i, /appraised/i),
+    parval: get(/^parval$/i, /total_?value_?assd/i, /assessed_?value/i, /total_?value/i, /total_?prop_?value/i, /^totval$/i, /tot_?mark_?val/i, /market_?value/i, /appraised/i),
     landval: get(/^landval$/i, /land_?val(ue)?/i, /tot_?land_?val/i),
     saledate: get(/^sale_?date$/i, /^saledate$/i, /deed_?date/i, /transfer_?date/i),
     reviseyear: get(/revis.*year/i, /^yearid$/i, /parcel_?year/i, /tax_?year/i, /^year_?$/i),
@@ -712,14 +716,17 @@ export async function executeLandAnalysis(
   let isSimulated = false;
   const countyKeyLower = normalizeCountyKey(countyName);
 
-  // 1) Statewide NC OneMap parcel layer (primary).
-  {
+  // 1) Statewide NC OneMap parcel layer — primary host, then the mirror host
+  //    (same layer served from services.gis.nc.gov AND services.nconemap.gov;
+  //    they fail independently more often than together).
+  for (const parcelHost of [config.parcelUrl, NC_PARCEL_ENGINE_MIRROR].filter((v, i, arr) => arr.indexOf(v) === i)) {
+    if (parcelFeature) break;
     onStageChange?.("Querying statewide NC OneMap records...");
 
     let wgs84Data: any = null;
     let statePlaneData: any = null;
 
-    let parcelQueryWgs84 = `${config.parcelUrl}` +
+    let parcelQueryWgs84 = `${parcelHost}` +
         `?geometry=${lng},${lat}` +
         `&geometryType=esriGeometryPoint` +
         `&inSR=4326` +
@@ -728,7 +735,7 @@ export async function executeLandAnalysis(
         `&outFields=${NC_PARCEL_FIELDS}` +
         `&returnGeometry=true&outSR=4326&f=geojson`;
 
-    let parcelQueryStatePlane = `${config.parcelUrl}` +
+    let parcelQueryStatePlane = `${parcelHost}` +
         `?geometry=${lng},${lat}` +
         `&geometryType=esriGeometryPoint` +
         `&inSR=4326` +
@@ -739,15 +746,15 @@ export async function executeLandAnalysis(
 
     try {
       const [resWgs84, resStatePlane] = await Promise.all([
-        fetchWithRetry(parcelQueryWgs84, 2, 4000), // fail fast
-        fetchWithRetry(parcelQueryStatePlane, 2, 4000)
+        fetchWithRetry(parcelQueryWgs84, 1, 5000), // fail fast — the mirror host is next
+        fetchWithRetry(parcelQueryStatePlane, 1, 5000)
       ]);
       if (resWgs84.ok && resStatePlane.ok) {
         wgs84Data = await resWgs84.json();
         statePlaneData = await resStatePlane.json();
       }
     } catch (err) {
-      console.warn("Direct point query failed on statewide NC MapServer:", err);
+      console.warn(`Direct point query failed on statewide NC MapServer (${parcelHost.includes('nconemap') ? 'mirror' : 'primary'} host):`, err);
     }
 
     // If no direct point intersection is found, retry with a spatial envelope tolerance (e.g. 50 feet buffer)
@@ -756,8 +763,8 @@ export async function executeLandAnalysis(
       const delta = 0.00015;
       const envGeometry = `${lng - delta},${lat - delta},${lng + delta},${lat + delta}`;
 
-      parcelQueryWgs84 = `${config.parcelUrl}?geometry=${envGeometry}&geometryType=esriGeometryEnvelope&inSR=4326&spatialRel=esriSpatialRelIntersects&where=1%3D1&outFields=${NC_PARCEL_FIELDS}&returnGeometry=true&outSR=4326&f=geojson`;
-      parcelQueryStatePlane = `${config.parcelUrl}?geometry=${envGeometry}&geometryType=esriGeometryEnvelope&inSR=4326&spatialRel=esriSpatialRelIntersects&where=1%3D1&outFields=parno&returnGeometry=true&outSR=2264&f=json`;
+      parcelQueryWgs84 = `${parcelHost}?geometry=${envGeometry}&geometryType=esriGeometryEnvelope&inSR=4326&spatialRel=esriSpatialRelIntersects&where=1%3D1&outFields=${NC_PARCEL_FIELDS}&returnGeometry=true&outSR=4326&f=geojson`;
+      parcelQueryStatePlane = `${parcelHost}?geometry=${envGeometry}&geometryType=esriGeometryEnvelope&inSR=4326&spatialRel=esriSpatialRelIntersects&where=1%3D1&outFields=parno&returnGeometry=true&outSR=2264&f=json`;
 
       try {
         const [resWgs84, resStatePlane] = await Promise.all([
