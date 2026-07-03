@@ -128,6 +128,40 @@ async function fetchWithRetry(url: string, attempts = 3, timeoutMs = 8000, init?
   throw lastError instanceof Error ? lastError : new Error("request failed after retries");
 }
 
+// ---------------------------------------------------------------------------
+// GEMINI REQUEST GATE — every Gemini API request in the app passes through this
+// single-slot queue, so requests run ONE AT A TIME with a short spacing delay
+// instead of bursting in parallel (a search fires the zoning lookup, cost
+// estimate, takeoff, tree count, tree rates, utilities, comp-photo picks and
+// the report on the SAME key at once — that burst is what trips the per-minute
+// rate limit and made sections fail with 429s).
+// Two priorities: 'high' (report/chat streams, zoning — user-facing, blocking)
+// jumps ahead of pending 'low' background lookups. The gate is held only for
+// the REQUEST itself (rate limits count requests), not for long SSE streams.
+// ---------------------------------------------------------------------------
+const GEMINI_SPACING_MS = 800;
+const geminiQueueHigh: (() => void)[] = [];
+const geminiQueueLow: (() => void)[] = [];
+let geminiGateBusy = false;
+function pumpGeminiQueue(): void {
+  if (geminiGateBusy) return;
+  const next = geminiQueueHigh.shift() || geminiQueueLow.shift();
+  if (!next) return;
+  geminiGateBusy = true;
+  next();
+}
+function queueGemini<T>(task: () => Promise<T>, priority: 'high' | 'low' = 'low'): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const start = () => {
+      task().then(resolve, reject).finally(() => {
+        setTimeout(() => { geminiGateBusy = false; pumpGeminiQueue(); }, GEMINI_SPACING_MS);
+      });
+    };
+    (priority === 'high' ? geminiQueueHigh : geminiQueueLow).push(start);
+    pumpGeminiQueue();
+  });
+}
+
 export interface ZoningStandards {
   lotType: string;
   maxHeightFt: number;
@@ -1656,7 +1690,7 @@ Rules: NEVER invent names, addresses, IDs, or dates — use null for anything no
 
   const callOnce = async (aggressive: boolean): Promise<LlcSkipTrace | null> => {
     try {
-      const res = await fetch(url, {
+      const res = await queueGemini(() => fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -1664,7 +1698,7 @@ Rules: NEVER invent names, addresses, IDs, or dates — use null for anything no
           systemInstruction: { parts: [{ text: 'You are a meticulous corporate-records skip-tracer. You find the registered agent and the managers/members behind an LLC from the Secretary of State registry and indexed public-records directories. Report only source-supported facts; never fabricate. Return the requested JSON only.' }] },
           tools: [{ google_search: {} }],
         }),
-      });
+      }), 'high');
       if (!res.ok) return null;
       const data = await res.json();
       const text = data.candidates?.[0]?.content?.parts?.map((p: any) => p.text).filter(Boolean).join('') || '';
@@ -3018,7 +3052,7 @@ function parseZoningResult(text: string): ZoningResult | null {
 async function zoningViaGemini(promptText: string, geminiKey: string): Promise<ZoningResult | null> {
   try {
     const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=${geminiKey}`;
-    const res = await fetch(url, {
+    const res = await queueGemini(() => fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -3026,7 +3060,7 @@ async function zoningViaGemini(promptText: string, geminiKey: string): Promise<Z
         systemInstruction: { parts: [{ text: ZONING_SYSTEM }] },
         tools: [{ google_search: {} }],
       }),
-    });
+    }), 'high');
     if (!res.ok) return null;
     const data = await res.json();
     const text = data.candidates?.[0]?.content?.parts?.map((p: any) => p.text).filter(Boolean).join('') || '';
@@ -3346,7 +3380,7 @@ Output ONLY a JSON array inside a markdown code block:
 ]
 \`\`\``;
 
-  const res = await fetchWithTimeout(
+  const res = await queueGemini(() => fetchWithTimeout(
     `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=${geminiApiKey}`,
     120000,
     {
@@ -3361,7 +3395,7 @@ Output ONLY a JSON array inside a markdown code block:
         generationConfig: { temperature: 0 }
       }),
     },
-  );
+  ), 'low');
   if (!res.ok) return [];
   const text = (await res.json()).candidates?.[0]?.content?.parts?.[0]?.text || '';
   const parsed = parseCompsFromJsonText(text);
@@ -4313,7 +4347,7 @@ async function geminiPickExteriorIndex(images: { mimeType: string; data: string 
       text: `These ${images.length} images (indexed 0 to ${images.length - 1}, in order) are photos from ONE home listing. Reply with ONLY the single integer index of the image that best shows the BUILDING'S EXTERIOR — the whole house/structure seen from OUTSIDE (front facade preferred). It must NOT be an interior room (kitchen, bath, bedroom, living room), an aerial/satellite view, a map, a floor plan, a sign, a logo, or any cartoon/graphic. If NONE clearly shows a building exterior, reply -1. Reply with just the number.`,
     }];
     images.forEach((img) => parts.push({ inline_data: { mime_type: img.mimeType, data: img.data } }));
-    const res = await fetchWithTimeout(url, 30000, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ contents: [{ role: "user", parts }], generationConfig: { temperature: 0, maxOutputTokens: 256 } }) });
+    const res = await queueGemini(() => fetchWithTimeout(url, 30000, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ contents: [{ role: "user", parts }], generationConfig: { temperature: 0, maxOutputTokens: 256 } }) }), 'low');
     if (!res.ok) return null;
     const data = await res.json();
     const text = data.candidates?.[0]?.content?.parts?.map((p: any) => p.text).filter(Boolean).join("") || "";
@@ -4649,7 +4683,7 @@ async function groundedGeminiText(geminiKey: string, prompt: string, systemText:
   // one extra retry fixes most "keeps timing out" runs without user action.
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      const res = await fetchWithTimeout(url, timeoutMs, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body });
+      const res = await queueGemini(() => fetchWithTimeout(url, timeoutMs, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body }), 'low');
       if (res.ok) {
         const data = await res.json();
         const text = data.candidates?.[0]?.content?.parts?.map((p: any) => p.text).filter(Boolean).join('') || '';
@@ -5038,7 +5072,7 @@ Return ONLY JSON: {"small":<int>,"medium":<int>,"large":<int>,"canopyCoverPct":<
   const LAST = 3;
   for (let attempt = 0; attempt <= LAST; attempt++) {
     try {
-      const res = await fetchWithTimeout(url, 45000, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body });
+      const res = await queueGemini(() => fetchWithTimeout(url, 45000, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body }), 'low');
       if (!res.ok) {
         if (attempt < LAST && res.status === 429) { await new Promise((r) => setTimeout(r, [8000, 16000, 28000][attempt])); continue; }
         if (attempt < LAST && res.status >= 500) { await new Promise((r) => setTimeout(r, 2500 * (attempt + 1))); continue; }
@@ -5420,11 +5454,11 @@ function isMobileDevice(): boolean {
 
 /** Non-streaming Gemini call — used for the parallel draft. Returns text only. */
 async function geminiGenerateText(url: string, body: any): Promise<string> {
-  const res = await fetchWithTimeout(url, 90000, {
+  const res = await queueGemini(() => fetchWithTimeout(url, 90000, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
-  });
+  }), 'high');
   if (!res.ok) throw new Error(`Gemini API error: ${res.status}`);
   const data = await res.json();
   return data.candidates?.[0]?.content?.parts?.map((p: any) => p.text || '').join('') || '';
@@ -5434,11 +5468,11 @@ async function geminiGenerateText(url: string, body: any): Promise<string> {
  *  fallback when an SSE stream drops (common on mobile): one request returns the
  *  whole report at once instead of a long-lived connection that can be killed. */
 async function geminiGenerateWithSources(url: string, body: any): Promise<{ text: string; sources?: ChatSource[] }> {
-  const res = await fetchWithTimeout(url, 120000, {
+  const res = await queueGemini(() => fetchWithTimeout(url, 120000, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
-  });
+  }), 'high');
   if (!res.ok) throw new Error(`Gemini API error: ${res.status}`);
   const data = await res.json();
   const text = data.candidates?.[0]?.content?.parts?.map((p: any) => p.text || '').join('') || '';
@@ -5453,11 +5487,13 @@ async function geminiGenerateWithSources(url: string, body: any): Promise<{ text
 
 /** Streams a Gemini SSE response, invoking onToken per chunk; returns full text + sources. */
 async function streamGeminiSSE(url: string, body: any, onToken?: (chunk: string) => void): Promise<{ text: string; sources?: ChatSource[] }> {
-  const res = await fetch(url, {
+  // Gate only the request initiation (that's what rate limits count) — the gate
+  // is released once the stream is open, so reading tokens doesn't block others.
+  const res = await queueGemini(() => fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
-  });
+  }), 'high');
   if (!res.ok || !res.body) {
     const detail = res.ok ? 'no response body' : `${res.status} - ${await res.text()}`;
     throw new Error(`Gemini API error: ${detail}`);
@@ -5541,7 +5577,7 @@ async function webSearchViaGemini(query: string, geminiKey: string): Promise<str
   // it on failure.
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      const res = await fetchWithTimeout(url, 30000, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body });
+      const res = await queueGemini(() => fetchWithTimeout(url, 30000, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body }), 'high');
       if (res.ok) {
         const data = await res.json();
         const text = data.candidates?.[0]?.content?.parts?.map((p: any) => p.text || '').join('') || '';
