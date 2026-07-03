@@ -9,6 +9,7 @@
 // ---------------------------------------------------------------------------
 import type { User } from '@supabase/supabase-js';
 import { getSupabase, isSupabaseConfigured, getRememberPreference, setRememberPreference } from './supabaseClient';
+import { cleanupSyncMetadata } from './syncStore';
 import type { UserKeys } from './feasibilityService';
 
 export interface SessionUser {
@@ -53,13 +54,25 @@ export function writeSessionMirror(user: SessionUser | null): void {
 /** Fetches (or lazily creates) the user's profile row and returns a SessionUser. */
 export async function buildSessionUser(authUser: User): Promise<SessionUser> {
   const supabase = getSupabase();
+  // JWT hygiene FIRST: strip oversized legacy sync blobs from the account's
+  // auth metadata. Bloated metadata rides inside every access token and is
+  // what produces the /rest/v1/profiles & /rest/v1/user_sync 520/400 errors.
+  void cleanupSyncMetadata('oversized');
   let keys: UserKeys = {};
   try {
-    const { data, error } = await supabase
-      .from('profiles')
-      .select('keys')
-      .eq('user_id', authUser.id)
-      .maybeSingle();
+    // Up to 3 attempts with backoff — a transient edge 520 on this one read
+    // used to silently wipe the account's saved API keys for the session.
+    let data: { keys: unknown } | null = null;
+    let error: { message?: string } | null = null;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      ({ data, error } = await supabase
+        .from('profiles')
+        .select('keys')
+        .eq('user_id', authUser.id)
+        .maybeSingle());
+      if (!error) break;
+      if (attempt < 2) await new Promise((r) => setTimeout(r, 800 * (attempt + 1)));
+    }
     if (error) throw error;
     if (data?.keys) {
       keys = data.keys as UserKeys;
@@ -129,12 +142,18 @@ export async function persistUserKeys(activeUser: SessionUser, keys: UserKeys): 
   const updated: SessionUser = { ...activeUser, keys };
   if (isSupabaseConfigured() && activeUser.userId) {
     const supabase = getSupabase();
-    const { error } = await supabase.from('profiles').upsert({
-      user_id: activeUser.userId,
-      email: activeUser.email,
-      keys,
-      updated_at: new Date().toISOString(),
-    });
+    // Up to 3 attempts — a transient edge 520 shouldn't fail a settings save.
+    let error: { message?: string } | null = null;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      ({ error } = await supabase.from('profiles').upsert({
+        user_id: activeUser.userId,
+        email: activeUser.email,
+        keys,
+        updated_at: new Date().toISOString(),
+      }));
+      if (!error) break;
+      if (attempt < 2) await new Promise((r) => setTimeout(r, 800 * (attempt + 1)));
+    }
     if (error) throw new Error(`Failed to save settings to your account: ${error.message}`);
   } else {
     // Local fallback mode: update the registered-users store.

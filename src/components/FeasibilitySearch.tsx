@@ -334,6 +334,18 @@ export const sanitizeReportText = (md: string): string => {
   return s;
 };
 
+/** Index just AFTER the report's "Development Cost" section heading line
+ *  (markdown # heading or a whole-line **bold** heading), so the Instant
+ *  Construction Cost Estimate can be injected INSIDE that section. -1 = the
+ *  report has no such heading (the estimate is then appended after the report). */
+export const findDevCostCut = (txt: string): number => {
+  const re = /^(?:#{1,6}[^\n]*development cost[^\n]*|\*\*[^\n]*development cost[^\n]*\*\*\s*)$/gim;
+  const m = re.exec(txt);
+  if (!m) return -1;
+  const lineEnd = txt.indexOf('\n', m.index);
+  return lineEnd === -1 ? txt.length : lineEnd + 1;
+};
+
 export const parseMarkdown = (text: string) => {
   if (!text) return null;
   const lines = text.split('\n');
@@ -684,6 +696,7 @@ export const FeasibilitySearch: FC = () => {
   const [materialTakeoff, setMaterialTakeoff] = useState<MaterialTakeoff | null>(null);
   const [landClearing, setLandClearing] = useState<LandClearingEstimate | null>(null);
   const [landClearingLoading, setLandClearingLoading] = useState(false);
+  const [landClearingError, setLandClearingError] = useState('');
   const [utilities, setUtilities] = useState<UtilitiesEstimate | null>(null);
   const [utilitiesLoading, setUtilitiesLoading] = useState(false);
   const [utilitiesError, setUtilitiesError] = useState('');
@@ -703,6 +716,7 @@ export const FeasibilitySearch: FC = () => {
   const [compTypeFilter, setCompTypeFilter] = useState('all'); // property-type display filter
   const [compsShowAll, setCompsShowAll] = useState(false);  // show 10 vs. all
   const [compsRefetching, setCompsRefetching] = useState(false);
+  const [compsError, setCompsError] = useState('');         // radius re-run failure (card shows the reason)
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [history, setHistory] = useState<any[]>([]);
 
@@ -942,27 +956,31 @@ export const FeasibilitySearch: FC = () => {
     }
   };
 
-  // Build the cost estimate + material takeoff (each shows as it arrives). If
-  // BOTH fail (e.g. a transient Gemini rate limit), the card stays and offers a
-  // retry instead of vanishing.
-  const generateCostEstimates = (reportData: SiteFeasibilityData, seq: number): Promise<ConstructionCostEstimate | null> => {
+  // Land clearing / tree-cost lookup. Like the utilities card, the tree card
+  // NEVER silently disappears: failures land in landClearingError with the real
+  // reason and a Retry button re-runs just this lookup.
+  const runLandClearingLookup = (reportData: SiteFeasibilityData, seq: number) => {
+    setLandClearing(null);
+    setLandClearingError('');
+    setLandClearingLoading(true);
+    fetchLandClearingEstimate(reportData)
+      .then((lc) => {
+        if (seq !== searchSeqRef.current) return;
+        if (lc) setLandClearing(lc);
+        else setLandClearingError('The tree/clearing estimate returned nothing — tap Retry.');
+      })
+      .catch((e) => { if (seq === searchSeqRef.current) setLandClearingError(e?.message || 'Tree/clearing estimate failed — tap Retry.'); })
+      .finally(() => { if (seq === searchSeqRef.current) setLandClearingLoading(false); });
+  };
+
+  // Cost estimate + material takeoff only (each shows as it arrives). If BOTH
+  // fail (e.g. a transient Gemini rate limit), the section stays and offers a
+  // retry instead of vanishing. Retry re-runs ONLY this lookup.
+  const runCostTakeoffLookup = (reportData: SiteFeasibilityData, seq: number): Promise<ConstructionCostEstimate | null> => {
     setCostLoading(true);
     setCostError(false);
     setCostEstimate(null);
     setMaterialTakeoff(null);
-    // Land-clearing / site-prep estimate (rule-based + satellite vision) — fires
-    // alongside, shows in its own card on the left.
-    setLandClearing(null);
-    setLandClearingLoading(true);
-    fetchLandClearingEstimate(reportData)
-      .then((lc) => { if (seq === searchSeqRef.current && lc) setLandClearing(lc); })
-      .catch(() => {})
-      .finally(() => { if (seq === searchSeqRef.current) setLandClearingLoading(false); });
-    // Utilities + connection costs (public water/sewer tap fees, or well/septic).
-    runUtilitiesLookup(reportData, seq);
-    // Enformion records (property/mortgage/transactions, debt, tenant history)
-    // fire alongside — they render in their own card as each search resolves.
-    fetchEnformionRecords(reportData, seq);
     let pending = 2;
     let anySuccess = false;
     const settle = (ok: boolean) => {
@@ -981,13 +999,29 @@ export const FeasibilitySearch: FC = () => {
     return estPromise;
   };
 
-  // Re-run ONLY the comps for the current parcel at a new max DRIVING-mile radius
-  // (3 / 5 / 10). The report itself stays as generated; this just widens/tightens
-  // the comp set shown in the card.
+  // Fire every per-parcel lookup for a fresh search: cost + takeoff, tree
+  // clearing, utilities, and Enformion records — each in its own card/section
+  // with its own error + Retry handling.
+  const generateCostEstimates = (reportData: SiteFeasibilityData, seq: number): Promise<ConstructionCostEstimate | null> => {
+    // Land-clearing / site-prep estimate (rule-based + satellite vision).
+    runLandClearingLookup(reportData, seq);
+    // Utilities + connection costs (public water/sewer tap fees, or well/septic).
+    runUtilitiesLookup(reportData, seq);
+    // Enformion records (property/mortgage/transactions, debt, tenant history)
+    // fire alongside — they render in their own card as each search resolves.
+    fetchEnformionRecords(reportData, seq);
+    return runCostTakeoffLookup(reportData, seq);
+  };
+
+  // Re-run the comps for the current parcel at the chosen max DRIVING-mile
+  // radius (3 / 5 / 10). EVERY pill click triggers a FRESH comps run for that
+  // radius (cache bypassed), so the comp set always reflects the chosen miles.
+  // The report itself stays as generated. Failures surface in the card.
   const changeCompRadius = async (newRadius: number) => {
-    if (newRadius === compRadius) return;
+    if (compsRefetching) return; // one run at a time
     setCompRadius(newRadius);
     setCompsShowAll(false);
+    setCompsError('');
     const d = data;
     if (!d || !d.coordinates) return;
     const seq = searchSeqRef.current;
@@ -1003,11 +1037,13 @@ export const FeasibilitySearch: FC = () => {
         d.countyName || '',
         undefined,
         newRadius,
+        true, // fresh run — never serve the cached set for a radius click
       );
       if (seq !== searchSeqRef.current) return; // a new search superseded this
       setData((prev) => (prev ? { ...prev, comps: run.comps, compRunSummary: run.summary } : prev));
-    } catch (e) {
+    } catch (e: any) {
       console.warn('Comp radius re-fetch failed:', e);
+      if (seq === searchSeqRef.current) setCompsError(`The ${newRadius}-mile comps run failed (${e?.message || 'network/API error'}) — the previous comp set is still shown. Tap a radius to retry.`);
     } finally {
       if (seq === searchSeqRef.current) setCompsRefetching(false);
     }
@@ -2405,6 +2441,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
     setMaterialTakeoff(null);
     setLandClearing(null);
     setLandClearingLoading(false);
+    setLandClearingError('');
     setUtilities(null);
     setUtilitiesLoading(false);
     setUtilitiesError('');
@@ -2419,6 +2456,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
     setCompTypeFilter(compPrefs.propertyType);
     setCompsShowAll(false);
     setCompsRefetching(false);
+    setCompsError('');
     resetChatUiState();
 
     // Progressive loading: merge each partial emission into view state the
@@ -2561,6 +2599,164 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
   const allComps = data?.comps || [];
   const filteredComps = compTypeFilter === 'all' ? allComps : allComps.filter((c) => compTypeBucket(c.propertyType) === compTypeFilter);
   const visibleComps = compsShowAll ? filteredComps : filteredComps.slice(0, 10);
+
+  // Development Costs — the Instant Construction Cost Estimate + Local
+  // Material Takeoff, now rendered INSIDE the AI Feasibility Report (injected
+  // at its Development Cost section) instead of as a standalone left-column
+  // card. Stays visible through loading/error with its own Retry.
+  const developmentCostSection = (costEstimate || costLoading || materialTakeoff || costError) ? (
+    <div className="report-devcost-section" style={{ margin: '12px 0', padding: '12px 14px', border: '1px solid var(--bg-card-border)', borderRadius: '10px', background: 'var(--bg-card-hover, rgba(148, 163, 184, 0.07))' }}>
+      <h3 className="registry-card-header" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+        <Hammer size={16} style={{ color: 'var(--primary)' }} />
+        <span>Development Costs — Instant Construction Cost Estimate</span>
+        <button
+          type="button"
+          className="enf-retry-btn"
+          title="Re-run the local construction-cost estimate & material takeoff"
+          disabled={costLoading}
+          onClick={() => { if (data) runCostTakeoffLookup(data, searchSeqRef.current); }}
+        >
+          {costLoading ? <Loader2 size={13} className="spinner" /> : <History size={13} />}
+          <span>{costLoading ? 'Pricing…' : 'Retry'}</span>
+        </button>
+      </h3>
+
+                  {costError && !costEstimate && !materialTakeoff ? (
+                    <div className="cost-loading" style={{ flexDirection: 'column', alignItems: 'flex-start', gap: '8px' }}>
+                      <span>Couldn't generate the local cost estimate (the pricing service was busy).</span>
+                      <button
+                        type="button"
+                        className="btn-quick-action"
+                        onClick={() => { if (data) runCostTakeoffLookup(data, searchSeqRef.current); }}
+                      >
+                        <Loader2 size={14} className={costLoading ? 'spinner' : ''} /> Retry estimate
+                      </button>
+                    </div>
+                  ) : costLoading && !costEstimate && !materialTakeoff ? (
+                    <div className="cost-loading">
+                      <Loader2 size={15} className="spinner" />
+                      <span>Pricing this build with current local costs…</span>
+                    </div>
+                  ) : costEstimate ? (
+                    <>
+                      <div className="cost-hero">
+                        <div className="cost-total-block">
+                          <span className="cost-total-label">Estimated build cost</span>
+                          <span className="cost-total-value">${costEstimate.totalCost.toLocaleString()}</span>
+                        </div>
+                        <div className="cost-meta">
+                          <span><strong>${costEstimate.costPerSqft.toLocaleString()}</strong> / sqft</span>
+                          <span><strong>{costEstimate.plannedSqft.toLocaleString()}</strong> sqft home</span>
+                        </div>
+                        <div className="cost-locality"><MapPin size={11} /> {costEstimate.locality}</div>
+                        {costEstimate.laborBasis && (
+                          <div className="cost-labor-basis"><Hammer size={11} /> {costEstimate.laborBasis}</div>
+                        )}
+                      </div>
+
+                      {groupCostItems(costEstimate.lineItems).map(([cat, items]) => (
+                        <div key={cat} className="cost-group">
+                          <div className="cost-group-head">
+                            <span>{cat}</span>
+                            <span>${items.reduce((s, i) => s + i.cost, 0).toLocaleString()}</span>
+                          </div>
+                          {items.map((li, i) => (
+                            <div key={i} className="cost-line">
+                              <span className="cost-line-item">{li.item}{li.detail && <span className="cost-line-detail"> · {li.detail}</span>}</span>
+                              <span className="cost-line-cost">${li.cost.toLocaleString()}</span>
+                            </div>
+                          ))}
+                        </div>
+                      ))}
+
+                      <div className="cost-group cost-totals">
+                        <div className="cost-line"><span>Hard cost subtotal</span><span>${costEstimate.hardCostTotal.toLocaleString()}</span></div>
+                        {costEstimate.builderFee > 0 && <div className="cost-line"><span>Builder fee</span><span>${costEstimate.builderFee.toLocaleString()}</span></div>}
+                        {costEstimate.contingency > 0 && <div className="cost-line"><span>Contingency</span><span>${costEstimate.contingency.toLocaleString()}</span></div>}
+                        <div className="cost-line cost-grand"><span>Total build cost</span><span>${costEstimate.totalCost.toLocaleString()}</span></div>
+                      </div>
+
+                      {costEstimate.assumptions.length > 0 && (
+                        <div className="cost-assumptions">
+                          <span className="cost-assumptions-label">Assumptions:</span> {costEstimate.assumptions.join(' · ')}
+                        </div>
+                      )}
+                      {costEstimate.sources.length > 0 && (
+                        <div className="cost-sources">
+                          <span className="cost-sources-label">Local pricing sources:</span>
+                          {costEstimate.sources.map((s, i) => (
+                            <a key={i} href={s} target="_blank" rel="noreferrer">
+                              {(() => { try { return new URL(s).hostname.replace(/^www\./, ''); } catch { return 'source'; } })()}
+                            </a>
+                          ))}
+                        </div>
+                      )}
+                      <div className="cost-disclaimer">Instant AI estimate from current local pricing — confirm with local bids before contracting. Excludes the land/lot price.</div>
+                    </>
+                  ) : null}
+
+                  {/* Local Material Takeoff — parcel ZIP → quantity (recipe × size) × local unit price */}
+                  {materialTakeoff && (
+                    <div className="takeoff-section">
+                      <div className="takeoff-head">
+                        <span><Landmark size={13} /> Local Material Takeoff{materialTakeoff.zip ? ` · ZIP ${materialTakeoff.zip}` : ''}</span>
+                        <span className="takeoff-total">${materialTakeoff.materialTotal.toLocaleString()}</span>
+                      </div>
+                      <div className="takeoff-sub">Every major material to build a ~{materialTakeoff.plannedSqft.toLocaleString()} sqft house — quantity × current local unit price, phase by phase</div>
+                      <div className="takeoff-table">
+                        <div className="takeoff-row takeoff-row-head">
+                          <span>Material</span><span>Qty</span><span>Unit&nbsp;$</span><span>Cost</span>
+                        </div>
+                        {(() => {
+                          // Group line items by build phase, preserving recipe order.
+                          const order: string[] = [];
+                          const byPhase: Record<string, typeof materialTakeoff.items> = {};
+                          for (const it of materialTakeoff.items) {
+                            const ph = it.phase || 'Materials';
+                            if (!byPhase[ph]) { byPhase[ph] = []; order.push(ph); }
+                            byPhase[ph].push(it);
+                          }
+                          return order.map((ph) => {
+                            const phaseCost = byPhase[ph].reduce((s, it) => s + it.cost, 0);
+                            return (
+                              <div key={ph} className="takeoff-phase">
+                                <div className="takeoff-phase-head">
+                                  <span>{ph}</span>
+                                  <span>${phaseCost.toLocaleString()}</span>
+                                </div>
+                                {byPhase[ph].map((it, i) => (
+                                  <div key={i} className="takeoff-row">
+                                    <span className="takeoff-mat">{it.material}</span>
+                                    <span>{it.quantity.toLocaleString()} {it.unit}</span>
+                                    <span>${it.unitPrice.toLocaleString(undefined, { minimumFractionDigits: it.unitPrice < 10 ? 2 : 0, maximumFractionDigits: 2 })}</span>
+                                    <span className="takeoff-cost">${it.cost.toLocaleString()}</span>
+                                  </div>
+                                ))}
+                              </div>
+                            );
+                          });
+                        })()}
+                        <div className="takeoff-row takeoff-grand">
+                          <span className="takeoff-mat">Total materials</span><span></span><span></span>
+                          <span className="takeoff-cost">${materialTakeoff.materialTotal.toLocaleString()}</span>
+                        </div>
+                      </div>
+                      {materialTakeoff.sources.length > 0 && (
+                        <div className="cost-sources">
+                          <span className="cost-sources-label">Material price sources:</span>
+                          {materialTakeoff.sources.map((s, i) => (
+                            <a key={i} href={s} target="_blank" rel="noreferrer">
+                              {(() => { try { return new URL(s).hostname.replace(/^www\./, ''); } catch { return 'source'; } })()}
+                            </a>
+                          ))}
+                        </div>
+                      )}
+                      <div className="cost-disclaimer">Whole-house material list — quantities from standard takeoff factors × the building size, priced at current local unit costs. This is MATERIALS only; labor, permits, builder fee &amp; contingency are in the full estimate above.</div>
+                    </div>
+                  )}
+    </div>
+  ) : null;
+
 
   return (
     <div className="dashboard-container">
@@ -2920,6 +3116,68 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                     <div className="enf-loading"><Loader2 size={14} className="spinner" /><span>Pulling deed, mortgage &amp; transaction records…</span></div>
                   )}
 
+                  {/* Deep assessor data (Property Search V2): APN & parcel
+                      identification, land-use / property-type flags, exact
+                      acreage & land sqft, and the structural characteristics —
+                      the raw-land vs. improved signal straight from county
+                      assessor files. */}
+                  {enfProperty && (
+                    <div className="enf-section">
+                      <div className="enf-section-head">
+                        <LayoutGrid size={14} />
+                        <span>Assessor Data &amp; Parcel Identification</span>
+                        <span
+                          className="enf-count-pill"
+                          title={enfProperty.isVacantLand
+                            ? 'County records show a vacant/unimproved land-use flag and/or 0 structural sqft — raw land with no house or building on it.'
+                            : 'County records show a structure on this parcel.'}
+                          style={enfProperty.isVacantLand
+                            ? { background: 'var(--success-bg, #dcfce7)', color: 'var(--success, #16a34a)', border: '1px solid var(--success-border, #86efac)' }
+                            : { background: 'var(--warning-bg, #fef3c7)', color: 'var(--warning-text, #92400e)', border: '1px solid var(--warning-border, #fcd34d)' }}
+                        >
+                          {enfProperty.isVacantLand ? 'Raw / vacant land' : 'Improved — structure on record'}
+                        </span>
+                      </div>
+                      {enfProperty.apn && (
+                        <div className="enf-kv"><span className="k">APN (Assessor's Parcel #)</span><span className="v">{enfProperty.apn}{enfProperty.apnUnformatted && enfProperty.apnUnformatted !== enfProperty.apn ? ` · raw ${enfProperty.apnUnformatted}` : ''}</span></div>
+                      )}
+                      {(enfProperty.county || enfProperty.fips) && (
+                        <div className="enf-kv"><span className="k">County / FIPS</span><span className="v">{[enfProperty.county, enfProperty.fips && `FIPS ${enfProperty.fips}`].filter(Boolean).join(' · ')}</span></div>
+                      )}
+                      {enfProperty.legalDescription && (
+                        <div className="enf-kv"><span className="k">Legal description</span><span className="v">{enfProperty.legalDescription}</span></div>
+                      )}
+                      {enfProperty.zoning && (
+                        <div className="enf-kv"><span className="k">Zoning flag (assessor)</span><span className="v">{enfProperty.zoning}</span></div>
+                      )}
+                      {(enfProperty.landUse || enfProperty.landUseCode) && (
+                        <div className="enf-kv"><span className="k">Land use</span><span className="v">{enfProperty.landUse || '—'}{enfProperty.landUseCode ? ` (code ${enfProperty.landUseCode})` : ''}</span></div>
+                      )}
+                      {enfProperty.propertyType && (
+                        <div className="enf-kv"><span className="k">Property type flag</span><span className="v">{enfProperty.propertyType}</span></div>
+                      )}
+                      {(enfProperty.lotAcres > 0 || enfProperty.lotSqft > 0) && (
+                        <div className="enf-kv"><span className="k">Parcel size (assessor)</span><span className="v">{[enfProperty.lotAcres > 0 && `${enfProperty.lotAcres.toLocaleString(undefined, { maximumFractionDigits: 3 })} acres`, enfProperty.lotSqft > 0 && `${enfProperty.lotSqft.toLocaleString()} sqft land`].filter(Boolean).join(' · ')}</span></div>
+                      )}
+                      <div className="enf-kv"><span className="k">Structure sqft</span><span className="v">{enfProperty.buildingSqft > 0 ? `${enfProperty.buildingSqft.toLocaleString()} sqft` : '0 — no building on record'}</span></div>
+                      {enfProperty.yearBuilt > 0 && (
+                        <div className="enf-kv"><span className="k">Year built</span><span className="v">{enfProperty.yearBuilt}</span></div>
+                      )}
+                      {(enfProperty.beds > 0 || enfProperty.baths > 0) && (
+                        <div className="enf-kv"><span className="k">Beds / baths</span><span className="v">{[enfProperty.beds > 0 && `${enfProperty.beds} bed`, enfProperty.baths > 0 && `${enfProperty.baths} bath${enfProperty.bathsPartial > 0 ? ` + ${enfProperty.bathsPartial} half` : ''}`].filter(Boolean).join(' / ')}</span></div>
+                      )}
+                      {enfProperty.stories && (
+                        <div className="enf-kv"><span className="k">Stories</span><span className="v">{enfProperty.stories}</span></div>
+                      )}
+                      {(enfProperty.construction || enfProperty.exteriorWalls) && (
+                        <div className="enf-kv"><span className="k">Construction</span><span className="v">{[enfProperty.construction, enfProperty.exteriorWalls].filter(Boolean).join(' · ')}</span></div>
+                      )}
+                      <div style={{ fontSize: '0.68rem', color: 'var(--text-muted)', marginTop: '6px', lineHeight: 1.45 }}>
+                        Pulled straight from the county assessor file — the APN is the single source of truth for unaddressed land (county records like “0 Smith Rd” / “State Hwy 49”): query by APN + county/state via the Parcel # search mode instead of a flaky street address. Land-use codes (Vacant Land, Agricultural, Timberland, Unimproved Residential) and the 0-structural-sqft flag instantly separate raw lots from built ones.
+                      </div>
+                    </div>
+                  )}
+
                   {/* Property Search V2: deed + mortgages + sale transactions */}
                   <div className="enf-section">
                     <div className="enf-section-head">
@@ -2934,7 +3192,6 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                         {enfProperty.currentOwners.length > 0 && (
                           <div className="enf-kv"><span className="k">Deed owner{enfProperty.currentOwners.length > 1 ? 's' : ''}</span><span className="v">{enfProperty.currentOwners.join(' & ')}</span></div>
                         )}
-                        {enfProperty.apn && <div className="enf-kv"><span className="k">APN</span><span className="v">{enfProperty.apn}</span></div>}
                         {(enfProperty.purchasePrice > 0 || enfProperty.purchaseDate) && (
                           <div className="enf-kv"><span className="k">Last purchase</span><span className="v">{enfProperty.purchasePrice > 0 ? `$${enfProperty.purchasePrice.toLocaleString()}` : '—'}{enfProperty.purchaseDate ? ` · ${enfProperty.purchaseDate}` : ''}</span></div>
                         )}
@@ -3387,8 +3644,31 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                   <h3 className="registry-card-header">Verified Market Comps (SOLD ONLY)</h3>
                   <div style={{ display: 'flex', alignItems: 'flex-start', gap: '10px', padding: '10px 0', color: 'var(--text-secondary)', fontSize: '0.82rem', lineHeight: 1.45 }}>
                     <AlertCircle size={16} style={{ flexShrink: 0, marginTop: '2px', color: 'var(--warning, #d97706)' }} />
-                    <span>No qualifying comps found: no new-construction sales (built 2025–2026) matching this parcel's zoning use closed within the last 12 months inside the 5 driving-mile radius (RealtyAPI: Realtor, Redfin, Zillow). The chat bubble has the run breakdown.</span>
+                    <span>No qualifying comps found: no new-construction sales (built 2025–2026) matching this parcel's zoning use closed within the last 12 months inside the {compRadius} driving-mile radius (RealtyAPI: Realtor, Redfin, Zillow). The chat bubble has the run breakdown. Try a wider radius:</span>
                   </div>
+                  {/* Radius pills: EVERY click runs a FRESH comps search at that
+                      max driving-mile radius — the way to widen an empty run. */}
+                  <div className="comp-filter-bar">
+                    <div className="comp-filter-group">
+                      <span className="comp-filter-label">Radius</span>
+                      {[3, 5, 10].map((r) => (
+                        <button
+                          key={r}
+                          type="button"
+                          className={`comp-filter-pill${compRadius === r ? ' active' : ''}`}
+                          disabled={compsRefetching}
+                          title={`Run a fresh comps search within ${r} driving miles`}
+                          onClick={() => changeCompRadius(r)}
+                        >
+                          {r} mi
+                        </button>
+                      ))}
+                      {compsRefetching && <Loader2 size={13} className="spinner" style={{ color: 'var(--text-muted)' }} />}
+                    </div>
+                  </div>
+                  {compsError && (
+                    <div className="enf-err" style={{ marginTop: '8px' }}><AlertCircle size={12} /> {compsError}</div>
+                  )}
                 </div>
               )}
               {data.comps && data.comps.length > 0 && (
@@ -3410,7 +3690,8 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                   <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginBottom: '0.6rem', fontStyle: 'italic', borderBottom: '1px dashed var(--bg-card-border)', paddingBottom: '0.5rem' }}>
                     *Criteria: New construction (built 2025–2026) matching this parcel's zoning use, sold within 12 months, no sqft limits, within {compRadius} driving miles. Sources: Realtor.com sold records (radius scan, ✓ confirmed) + public MLS via Google Search.*
                   </div>
-                  {/* Comp filters: max radius (re-fetches) + property type (instant) */}
+                  {/* Comp filters: max radius (EVERY click re-runs a fresh comps
+                      search at that mileage) + property type (instant) */}
                   <div className="comp-filter-bar">
                     <div className="comp-filter-group">
                       <span className="comp-filter-label">Radius</span>
@@ -3420,6 +3701,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                           type="button"
                           className={`comp-filter-pill${compRadius === r ? ' active' : ''}`}
                           disabled={compsRefetching}
+                          title={`Run a fresh comps search within ${r} driving miles`}
                           onClick={() => changeCompRadius(r)}
                         >
                           {r} mi
@@ -3440,6 +3722,9 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                       </select>
                     </div>
                   </div>
+                  {compsError && (
+                    <div className="enf-err" style={{ marginBottom: '8px' }}><AlertCircle size={12} /> {compsError}</div>
+                  )}
                   {filteredComps.length === 0 ? (
                     <div style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '12px 0', color: 'var(--text-secondary)', fontSize: '0.8rem' }}>
                       <AlertCircle size={15} style={{ color: 'var(--warning, #d97706)' }} />
@@ -3576,150 +3861,6 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                 </div>
               )}
 
-              {/* Instant Construction Cost Estimate — real-time LOCAL pricing,
-                  shown after the comps and before the full AI report. */}
-              {(costEstimate || costLoading || materialTakeoff || costError) && (
-                <div className="card registry-card cost-estimate-card">
-                  <h3 className="registry-card-header" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                    <Hammer size={16} style={{ color: 'var(--primary)' }} />
-                    <span>Instant Construction Cost Estimate</span>
-                  </h3>
-
-                  {costError && !costEstimate && !materialTakeoff ? (
-                    <div className="cost-loading" style={{ flexDirection: 'column', alignItems: 'flex-start', gap: '8px' }}>
-                      <span>Couldn't generate the local cost estimate (the pricing service was busy).</span>
-                      <button
-                        type="button"
-                        className="btn-quick-action"
-                        onClick={() => { if (data) generateCostEstimates(data, searchSeqRef.current); }}
-                      >
-                        <Loader2 size={14} className={costLoading ? 'spinner' : ''} /> Retry estimate
-                      </button>
-                    </div>
-                  ) : costLoading && !costEstimate && !materialTakeoff ? (
-                    <div className="cost-loading">
-                      <Loader2 size={15} className="spinner" />
-                      <span>Pricing this build with current local costs…</span>
-                    </div>
-                  ) : costEstimate ? (
-                    <>
-                      <div className="cost-hero">
-                        <div className="cost-total-block">
-                          <span className="cost-total-label">Estimated build cost</span>
-                          <span className="cost-total-value">${costEstimate.totalCost.toLocaleString()}</span>
-                        </div>
-                        <div className="cost-meta">
-                          <span><strong>${costEstimate.costPerSqft.toLocaleString()}</strong> / sqft</span>
-                          <span><strong>{costEstimate.plannedSqft.toLocaleString()}</strong> sqft home</span>
-                        </div>
-                        <div className="cost-locality"><MapPin size={11} /> {costEstimate.locality}</div>
-                        {costEstimate.laborBasis && (
-                          <div className="cost-labor-basis"><Hammer size={11} /> {costEstimate.laborBasis}</div>
-                        )}
-                      </div>
-
-                      {groupCostItems(costEstimate.lineItems).map(([cat, items]) => (
-                        <div key={cat} className="cost-group">
-                          <div className="cost-group-head">
-                            <span>{cat}</span>
-                            <span>${items.reduce((s, i) => s + i.cost, 0).toLocaleString()}</span>
-                          </div>
-                          {items.map((li, i) => (
-                            <div key={i} className="cost-line">
-                              <span className="cost-line-item">{li.item}{li.detail && <span className="cost-line-detail"> · {li.detail}</span>}</span>
-                              <span className="cost-line-cost">${li.cost.toLocaleString()}</span>
-                            </div>
-                          ))}
-                        </div>
-                      ))}
-
-                      <div className="cost-group cost-totals">
-                        <div className="cost-line"><span>Hard cost subtotal</span><span>${costEstimate.hardCostTotal.toLocaleString()}</span></div>
-                        {costEstimate.builderFee > 0 && <div className="cost-line"><span>Builder fee</span><span>${costEstimate.builderFee.toLocaleString()}</span></div>}
-                        {costEstimate.contingency > 0 && <div className="cost-line"><span>Contingency</span><span>${costEstimate.contingency.toLocaleString()}</span></div>}
-                        <div className="cost-line cost-grand"><span>Total build cost</span><span>${costEstimate.totalCost.toLocaleString()}</span></div>
-                      </div>
-
-                      {costEstimate.assumptions.length > 0 && (
-                        <div className="cost-assumptions">
-                          <span className="cost-assumptions-label">Assumptions:</span> {costEstimate.assumptions.join(' · ')}
-                        </div>
-                      )}
-                      {costEstimate.sources.length > 0 && (
-                        <div className="cost-sources">
-                          <span className="cost-sources-label">Local pricing sources:</span>
-                          {costEstimate.sources.map((s, i) => (
-                            <a key={i} href={s} target="_blank" rel="noreferrer">
-                              {(() => { try { return new URL(s).hostname.replace(/^www\./, ''); } catch { return 'source'; } })()}
-                            </a>
-                          ))}
-                        </div>
-                      )}
-                      <div className="cost-disclaimer">Instant AI estimate from current local pricing — confirm with local bids before contracting. Excludes the land/lot price.</div>
-                    </>
-                  ) : null}
-
-                  {/* Local Material Takeoff — parcel ZIP → quantity (recipe × size) × local unit price */}
-                  {materialTakeoff && (
-                    <div className="takeoff-section">
-                      <div className="takeoff-head">
-                        <span><Landmark size={13} /> Local Material Takeoff{materialTakeoff.zip ? ` · ZIP ${materialTakeoff.zip}` : ''}</span>
-                        <span className="takeoff-total">${materialTakeoff.materialTotal.toLocaleString()}</span>
-                      </div>
-                      <div className="takeoff-sub">Every major material to build a ~{materialTakeoff.plannedSqft.toLocaleString()} sqft house — quantity × current local unit price, phase by phase</div>
-                      <div className="takeoff-table">
-                        <div className="takeoff-row takeoff-row-head">
-                          <span>Material</span><span>Qty</span><span>Unit&nbsp;$</span><span>Cost</span>
-                        </div>
-                        {(() => {
-                          // Group line items by build phase, preserving recipe order.
-                          const order: string[] = [];
-                          const byPhase: Record<string, typeof materialTakeoff.items> = {};
-                          for (const it of materialTakeoff.items) {
-                            const ph = it.phase || 'Materials';
-                            if (!byPhase[ph]) { byPhase[ph] = []; order.push(ph); }
-                            byPhase[ph].push(it);
-                          }
-                          return order.map((ph) => {
-                            const phaseCost = byPhase[ph].reduce((s, it) => s + it.cost, 0);
-                            return (
-                              <div key={ph} className="takeoff-phase">
-                                <div className="takeoff-phase-head">
-                                  <span>{ph}</span>
-                                  <span>${phaseCost.toLocaleString()}</span>
-                                </div>
-                                {byPhase[ph].map((it, i) => (
-                                  <div key={i} className="takeoff-row">
-                                    <span className="takeoff-mat">{it.material}</span>
-                                    <span>{it.quantity.toLocaleString()} {it.unit}</span>
-                                    <span>${it.unitPrice.toLocaleString(undefined, { minimumFractionDigits: it.unitPrice < 10 ? 2 : 0, maximumFractionDigits: 2 })}</span>
-                                    <span className="takeoff-cost">${it.cost.toLocaleString()}</span>
-                                  </div>
-                                ))}
-                              </div>
-                            );
-                          });
-                        })()}
-                        <div className="takeoff-row takeoff-grand">
-                          <span className="takeoff-mat">Total materials</span><span></span><span></span>
-                          <span className="takeoff-cost">${materialTakeoff.materialTotal.toLocaleString()}</span>
-                        </div>
-                      </div>
-                      {materialTakeoff.sources.length > 0 && (
-                        <div className="cost-sources">
-                          <span className="cost-sources-label">Material price sources:</span>
-                          {materialTakeoff.sources.map((s, i) => (
-                            <a key={i} href={s} target="_blank" rel="noreferrer">
-                              {(() => { try { return new URL(s).hostname.replace(/^www\./, ''); } catch { return 'source'; } })()}
-                            </a>
-                          ))}
-                        </div>
-                      )}
-                      <div className="cost-disclaimer">Whole-house material list — quantities from standard takeoff factors × the building size, priced at current local unit costs. This is MATERIALS only; labor, permits, builder fee &amp; contingency are in the full estimate above.</div>
-                    </div>
-                  )}
-                </div>
-              )}
 
               {/* Utilities & Connection Costs — public water/sewer tap fees when
                   served, otherwise real-time local well + septic costs. The card
@@ -3827,14 +3968,26 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
 
               {/* Land Clearing & Site Prep — rule-based pricing engine (regional
                   NC $/acre rates × satellite-classified vegetation density). */}
-              {(landClearing || landClearingLoading) && (
+              {(landClearing || landClearingLoading || landClearingError) && (
                 <div className="card registry-card clearing-card">
                   <h3 className="registry-card-header" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                     <Trees size={16} style={{ color: 'var(--primary)' }} />
                     <span>Land Clearing &amp; Site Prep Estimate</span>
+                    <button
+                      type="button"
+                      className="enf-retry-btn"
+                      title="Re-run the satellite tree count & clearing-cost lookup"
+                      disabled={landClearingLoading}
+                      onClick={() => { if (data) runLandClearingLookup(data, searchSeqRef.current); }}
+                    >
+                      {landClearingLoading ? <Loader2 size={13} className="spinner" /> : <History size={13} />}
+                      <span>{landClearingLoading ? 'Counting…' : 'Retry'}</span>
+                    </button>
                   </h3>
                   {landClearingLoading && !landClearing ? (
                     <div className="cost-loading"><Loader2 size={15} className="spinner" /><span>Reading tree cover from satellite imagery…</span></div>
+                  ) : landClearingError && !landClearing ? (
+                    <div className="enf-err"><AlertCircle size={12} /> {landClearingError}</div>
                   ) : landClearing ? (
                     <>
                       <div className="clearing-hero">
@@ -3923,24 +4076,30 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                   <span>AI Feasibility Report</span>
                 </h3>
                 {reportPending ? (
-                  <div className="report-manual">
-                    <p className="report-manual-text">The full AI Feasibility Report (25 sections — zoning, rezoning, comps, valuation, risk &amp; more) is ready to generate.</p>
-                    <button type="button" className="report-generate-btn" onClick={startReportManually}>
-                      <FileText size={16} /> Generate AI Report
-                    </button>
-                  </div>
-                ) : chatLoading && chatHistory.length === 0 ? (
-                  <div style={{ padding: '8px 0' }}>
-                    <div className="gemini-wave-loader-wrapper">
-                      <div className="gemini-wave-loader">
-                        <div className="wave-bar bar-1"></div>
-                        <div className="wave-bar bar-2"></div>
-                        <div className="wave-bar bar-3"></div>
-                      </div>
-                      <span className="loading-text">Generating the full feasibility report...</span>
+                  <>
+                    <div className="report-manual">
+                      <p className="report-manual-text">The full AI Feasibility Report (25 sections — zoning, rezoning, comps, valuation, risk &amp; more) is ready to generate.</p>
+                      <button type="button" className="report-generate-btn" onClick={startReportManually}>
+                        <FileText size={16} /> Generate AI Report
+                      </button>
                     </div>
-                    {reportTimer && <ReportCountdown startedAt={reportTimer.startedAt} etaMs={reportTimer.etaMs} />}
-                  </div>
+                    {developmentCostSection}
+                  </>
+                ) : chatLoading && chatHistory.length === 0 ? (
+                  <>
+                    <div style={{ padding: '8px 0' }}>
+                      <div className="gemini-wave-loader-wrapper">
+                        <div className="gemini-wave-loader">
+                          <div className="wave-bar bar-1"></div>
+                          <div className="wave-bar bar-2"></div>
+                          <div className="wave-bar bar-3"></div>
+                        </div>
+                        <span className="loading-text">Generating the full feasibility report...</span>
+                      </div>
+                      {reportTimer && <ReportCountdown startedAt={reportTimer.startedAt} etaMs={reportTimer.etaMs} />}
+                    </div>
+                    {developmentCostSection}
+                  </>
                 ) : chatHistory.length > 0 && chatHistory[0].role === 'model' ? (
                   <>
                     {(() => {
@@ -3959,18 +4118,41 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                         </div>
                       );
                     })()}
-                    <div className="message-content model-text report-inline-body">
-                      {parseMarkdown(sanitizeReportText(chatHistory[0].content))}
-                    </div>
+                    {(() => {
+                      // Inject the Instant Construction Cost Estimate INSIDE the
+                      // report's Development Cost section (right under its
+                      // heading). If the report has no such heading, the
+                      // estimate renders directly after the report body.
+                      const txt = sanitizeReportText(chatHistory[0].content);
+                      const cut = developmentCostSection ? findDevCostCut(txt) : -1;
+                      if (cut < 0) {
+                        return (
+                          <>
+                            <div className="message-content model-text report-inline-body">{parseMarkdown(txt)}</div>
+                            {developmentCostSection}
+                          </>
+                        );
+                      }
+                      return (
+                        <>
+                          <div className="message-content model-text report-inline-body">{parseMarkdown(txt.slice(0, cut))}</div>
+                          {developmentCostSection}
+                          <div className="message-content model-text report-inline-body">{parseMarkdown(txt.slice(cut))}</div>
+                        </>
+                      );
+                    })()}
                     <div style={{ marginTop: '12px', paddingTop: '10px', borderTop: '1px dashed var(--bg-card-border)', fontSize: '0.78rem', color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: '6px' }}>
                       <MessageCircle size={13} />
                       <span>Questions about this report? Use the chat bubble in the corner.</span>
                     </div>
                   </>
                 ) : (
-                  <div style={{ fontSize: '0.85rem', color: 'var(--text-muted)', padding: '8px 0' }}>
-                    The investor-style feasibility report will appear here automatically once the site analysis completes.
-                  </div>
+                  <>
+                    <div style={{ fontSize: '0.85rem', color: 'var(--text-muted)', padding: '8px 0' }}>
+                      The investor-style feasibility report will appear here automatically once the site analysis completes.
+                    </div>
+                    {developmentCostSection}
+                  </>
                 )}
               </div>
 

@@ -2233,11 +2233,39 @@ export interface EnfMortgage {
 }
 export interface EnformionPropertyRecord {
   apn: string;
+  /** Unformatted APN exactly as keyed in the county assessor file. */
+  apnUnformatted: string;
+  fips: string;
+  county: string;
   currentOwners: string[];
   purchasePrice: number; purchaseDate: string;
   assessedValue: number; assessedYear: string;
   taxAmount: number; taxYear: string;
   landUse: string; legalDescription: string;
+  // --- Deep assessor characteristics (Property Search V2) ---
+  /** County land-use CODE (raw flag, e.g. "100", "VAC") — filterable. */
+  landUseCode: string;
+  /** Property-type classification flag from the assessor file. */
+  propertyType: string;
+  /** Assessor zoning flag for the parcel. */
+  zoning: string;
+  /** Exact acreage from the county assessor file. */
+  lotAcres: number;
+  /** Land square footage. */
+  lotSqft: number;
+  /** TOTAL structural square footage — 0 means no building on record (raw land). */
+  buildingSqft: number;
+  yearBuilt: number;
+  beds: number;
+  baths: number;
+  bathsPartial: number;
+  stories: string;
+  /** Construction materials / build style from the assessor file. */
+  construction: string;
+  exteriorWalls: string;
+  /** true when the county record flags vacant/agricultural/timber/unimproved
+   *  land use, or shows 0 structural sqft and no year built — i.e. raw land. */
+  isVacantLand: boolean;
   transactions: EnfPropertyTransaction[];
   mortgages: EnfMortgage[];
   openLienCount: number;
@@ -2353,6 +2381,23 @@ export async function enformionPropertySearch(address: string, fallbackAddress?:
   const tax = ci(assessor, 'Tax') || {};
   const propId = ci(assessor, 'PropertyIdentification') || {};
   const legal = ci(assessor, 'PropertyLegal') || {};
+  // Deep assessor sections — Enformion nests structural/geographic data under
+  // several section names that vary by county feed; probe them all.
+  const size = ci(assessor, 'PropertySize') || {};
+  const useInfo = ci(assessor, 'PropertyUseInfo') || {};
+  const rooms = ci(assessor, 'IntRoomInfo') || {};
+  const structIn = ci(assessor, 'IntStructInfo') || {};
+  const structEx = ci(assessor, 'ExtStructInfo') || {};
+  const chars = ci(assessor, 'PropertyCharacteristics') || {};
+  // First non-empty string / non-zero number across candidate keys × sections.
+  const firstStr = (keys: string[], ...objs: any[]): string => {
+    for (const k of keys) for (const o of objs) { const v = ciStr(o, k); if (v) return v; }
+    return '';
+  };
+  const firstNum = (keys: string[], ...objs: any[]): number => {
+    for (const k of keys) for (const o of objs) { const n = ciNum(o, k); if (n) return n; }
+    return 0;
+  };
 
   const transactions: EnfPropertyTransaction[] = [];
   const mortgages: EnfMortgage[] = [];
@@ -2396,8 +2441,19 @@ export async function enformionPropertySearch(address: string, fallbackAddress?:
     });
   }
 
+  // Deep property characteristics: land-use flags, exact parcel size, and the
+  // structural specs (0 building sqft + vacant-type use code = raw land).
+  const landUse = firstStr(['CountyUseDescr', 'LandUseCodeDescription', 'PropertyUseStandardized', 'PropertyUseGroup', 'PropertyUseMuni', 'LandUseDescription', 'CountyLandUseDescription', 'StateLandUseDescription'], propId, useInfo, summary);
+  const landUseCode = firstStr(['CountyLandUseCode', 'CountyUseCode', 'LandUseCode', 'StateLandUseCode', 'MuniLandUseCode', 'PropertyUseStandardizedCode'], propId, useInfo, summary);
+  const propertyType = firstStr(['PropertyType', 'PropertyClass', 'PropertyTypeDetail', 'PropertyClassDescription'], summary, propId, useInfo);
+  const buildingSqft = firstNum(['AreaBuilding', 'BuildingAreaSqFt', 'LivingAreaSqFt', 'UniversalBuildingAreaSqFt', 'AreaGross', 'GrossAreaSqFt', 'TotalBuildingAreaSqFt'], size, chars, summary);
+  const yearBuilt = firstNum(['YearBuilt', 'EffectiveYearBuilt'], structIn, structEx, chars, summary, assessor);
+  const vacantByUse = /vacant|unimproved|raw land|timber|agricultur|farm ?land|undeveloped|no structure/i.test(`${landUse} ${propertyType}`);
   const result: EnformionPropertyRecord = {
     apn: ciStr(summary, 'Apn') || ciStr(propId, 'ApnUnformatted'),
+    apnUnformatted: ciStr(propId, 'ApnUnformatted') || ciStr(propId, 'Apn'),
+    fips: firstStr(['Fips', 'FipsCode', 'SitusStateCountyFips', 'StateCountyFips'], propId, summary),
+    county: firstStr(['County', 'CountyName', 'SitusCounty'], propId, summary, assessor),
     currentOwners: ciArr(summary, 'CurrentOwners').map(enfName).filter(Boolean),
     purchasePrice: ciNum(purchase, 'Price'),
     purchaseDate: fmtEnfDate(ciStr(purchase, 'Date')),
@@ -2405,8 +2461,22 @@ export async function enformionPropertySearch(address: string, fallbackAddress?:
     assessedYear: ciStr(assessed, 'Date') || ciStr(tax, 'AssessedYear'),
     taxAmount: ciNum(tax, 'TaxAmount'),
     taxYear: ciStr(tax, 'TaxYear'),
-    landUse: ciStr(propId, 'CountyUseDescr') || ciStr(propId, 'LandUseCodeDescription'),
+    landUse,
     legalDescription: ciStr(legal, 'LegalDescription'),
+    landUseCode,
+    propertyType,
+    zoning: firstStr(['Zoning', 'ZoningCode', 'AssessorZoning', 'ZoningDescription'], propId, legal, useInfo, summary, assessor),
+    lotAcres: firstNum(['AreaLotAcres', 'LotSizeAcres', 'Acres', 'AreaAcres'], size, summary, propId, legal),
+    lotSqft: firstNum(['AreaLotSF', 'AreaLotSf', 'LotSizeSqFt', 'LandSquareFootage', 'LotSquareFeet'], size, summary, propId),
+    buildingSqft,
+    yearBuilt,
+    beds: firstNum(['BedroomsCount', 'Bedrooms', 'BedCount'], rooms, chars, summary, structIn),
+    baths: firstNum(['BathCount', 'BathsTotal', 'BathTotalCalc', 'BathsFull', 'BathFullCount'], rooms, chars, summary, structIn),
+    bathsPartial: firstNum(['BathPartialCount', 'BathsPartial', 'HalfBaths'], rooms, chars, structIn),
+    stories: firstStr(['StoriesCount', 'Stories', 'StoriesDescription'], structIn, structEx, chars, summary),
+    construction: firstStr(['Construction', 'ConstructionType', 'ConstructionDescription', 'StyleDescription', 'BuildingStyle'], structEx, structIn, chars, summary),
+    exteriorWalls: firstStr(['ExteriorWalls', 'ExteriorWallsDescription', 'Exterior1Code'], structEx, structIn, chars),
+    isVacantLand: vacantByUse || (buildingSqft === 0 && yearBuilt === 0),
     transactions: transactions.slice(0, 8),
     mortgages: mortgages.slice(0, 6),
     openLienCount: ciArr(rec, 'OpenLienRecords').length,
@@ -4272,6 +4342,9 @@ export async function fetchGoogleDistanceMatrixComps(
   _countyName: string,
   onStageChange?: (stage: string) => void,
   maxRadiusMiles = 5,
+  /** true = skip the deterministic comps cache and run a FRESH search (used by
+   *  the 3/5/10-mile radius pills so every click re-runs the comps). */
+  bypassCache = false,
 ): Promise<CompRunResult> {
   onStageChange?.("Searching sold listings...");
 
@@ -4290,12 +4363,15 @@ export async function fetchGoogleDistanceMatrixComps(
   // Permitted use category (drives the Realtor search property type).
   const category = getPermittedCategory(zoningCode, zoningDesc);
 
-  // Same address+radius searched again? Return the EXACT same verified comp set.
+  // Same address+radius searched again? Return the EXACT same verified comp set
+  // — unless the caller asked for a fresh run (radius-pill clicks).
   const cacheKey = compsCacheKey(lat, lng, category, EXPANDED_RADIUS_MILES);
-  const cached = readCompsCache(cacheKey);
-  if (cached && cached.comps.length > 0) {
-    console.log(`Returning ${cached.comps.length} cached comps for this parcel (deterministic re-run).`);
-    return cached;
+  if (!bypassCache) {
+    const cached = readCompsCache(cacheKey);
+    if (cached && cached.comps.length > 0) {
+      console.log(`Returning ${cached.comps.length} cached comps for this parcel (deterministic re-run).`);
+      return cached;
+    }
   }
 
   // Straight-line (haversine-approx) miles from the subject to a candidate.
@@ -4554,17 +4630,24 @@ async function groundedGeminiText(geminiKey: string, prompt: string, systemText:
     systemInstruction: { parts: [{ text: systemText }] },
     tools: [{ google_search: {} }],
   });
-  for (let attempt = 0; attempt < 2; attempt++) {
+  // 3 attempts with backoff: grounded (Google Search) generations are the
+  // slowest Gemini calls and the most likely to hit a transient 429/timeout —
+  // one extra retry fixes most "keeps timing out" runs without user action.
+  for (let attempt = 0; attempt < 3; attempt++) {
     try {
       const res = await fetchWithTimeout(url, timeoutMs, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body });
       if (res.ok) {
         const data = await res.json();
-        return data.candidates?.[0]?.content?.parts?.map((p: any) => p.text).filter(Boolean).join('') || '';
+        const text = data.candidates?.[0]?.content?.parts?.map((p: any) => p.text).filter(Boolean).join('') || '';
+        if (text) return text;
+        if (attempt < 2) { await new Promise((r) => setTimeout(r, 2000)); continue; } // empty candidate — retry
+        return '';
       }
-      if ((res.status === 429 || res.status >= 500) && attempt === 0) { await new Promise((r) => setTimeout(r, 2500)); continue; }
+      if ((res.status === 429 || res.status >= 500) && attempt < 2) { await new Promise((r) => setTimeout(r, 2500 * (attempt + 1))); continue; }
       return null;
     } catch {
-      if (attempt === 0) { await new Promise((r) => setTimeout(r, 1500)); continue; }
+      // network error or per-attempt timeout abort — retry
+      if (attempt < 2) { await new Promise((r) => setTimeout(r, 1500 * (attempt + 1))); continue; }
       return null;
     }
   }
@@ -4929,27 +5012,37 @@ Estimate how many TREES would need removal to develop/build on it, by canopy siz
 - "large": big mature trees, canopy over ~45 ft
 For dense continuous forest, ESTIMATE counts from typical spacing (~80-150 trees/acre) — do NOT return 0 when there is clearly tree canopy. Also give total tree-canopy cover % and overall density.
 Return ONLY JSON: {"small":<int>,"medium":<int>,"large":<int>,"canopyCoverPct":<0-100>,"density":"light|medium|heavy"}`;
-  try {
-    const parts: any[] = [{ text: prompt }];
-    imgs.forEach((img) => parts.push({ inline_data: { mime_type: img.mimeType, data: img.data } }));
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=${geminiKey}`;
-    const res = await fetchWithTimeout(url, 40000, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ contents: [{ role: 'user', parts }], generationConfig: { temperature: 0, responseMimeType: 'application/json', maxOutputTokens: 800 } }),
-    });
-    if (!res.ok) return null;
-    const data = await res.json();
-    const t = data.candidates?.[0]?.content?.parts?.map((p: any) => p.text).filter(Boolean).join('') || '';
-    const m = t.match(/```json\s*([\s\S]*?)\s*```/) || t.match(/\{[\s\S]*\}/);
-    if (!m) return null;
-    const o = JSON.parse((m[1] || m[0]).replace(/,\s*([}\]])/g, '$1'));
-    const n = (v: any) => Math.max(0, Math.round(Number(v) || 0));
-    const d = String(o.density || '').toLowerCase();
-    const density = (d === 'light' || d === 'heavy') ? d : 'medium';
-    const c = Number(o.canopyCoverPct);
-    return { small: n(o.small), medium: n(o.medium), large: n(o.large), canopyPct: Number.isFinite(c) ? Math.max(0, Math.min(100, Math.round(c))) : null, density };
-  } catch { return null; }
+  const parts: any[] = [{ text: prompt }];
+  imgs.forEach((img) => parts.push({ inline_data: { mime_type: img.mimeType, data: img.data } }));
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=${geminiKey}`;
+  const body = JSON.stringify({ contents: [{ role: 'user', parts }], generationConfig: { temperature: 0, responseMimeType: 'application/json', maxOutputTokens: 800 } });
+  // 3 attempts with backoff so a transient timeout / 429 doesn't kill the card.
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const res = await fetchWithTimeout(url, 45000, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body });
+      if (!res.ok) {
+        if ((res.status === 429 || res.status >= 500) && attempt < 2) { await new Promise((r) => setTimeout(r, 2500 * (attempt + 1))); continue; }
+        return null;
+      }
+      const data = await res.json();
+      const t = data.candidates?.[0]?.content?.parts?.map((p: any) => p.text).filter(Boolean).join('') || '';
+      const m = t.match(/```json\s*([\s\S]*?)\s*```/) || t.match(/\{[\s\S]*\}/);
+      if (!m) {
+        if (attempt < 2) { await new Promise((r) => setTimeout(r, 1500)); continue; } // odd answer — retry
+        return null;
+      }
+      const o = JSON.parse((m[1] || m[0]).replace(/,\s*([}\]])/g, '$1'));
+      const n = (v: any) => Math.max(0, Math.round(Number(v) || 0));
+      const d = String(o.density || '').toLowerCase();
+      const density = (d === 'light' || d === 'heavy') ? d : 'medium';
+      const c = Number(o.canopyCoverPct);
+      return { small: n(o.small), medium: n(o.medium), large: n(o.large), canopyPct: Number.isFinite(c) ? Math.max(0, Math.min(100, Math.round(c))) : null, density };
+    } catch {
+      if (attempt < 2) { await new Promise((r) => setTimeout(r, 1500 * (attempt + 1))); continue; }
+      return null;
+    }
+  }
+  return null;
 }
 
 interface TreeRates {
@@ -5051,10 +5144,10 @@ function buildClearingMethods(acres: number, treeCount: number, largeCount: numb
  */
 export async function fetchLandClearingEstimate(reportData: SiteFeasibilityData): Promise<LandClearingEstimate | null> {
   const keys = getUserKeys();
-  if (!keys.googleMaps || !keys.gemini) return null;
+  if (!keys.googleMaps || !keys.gemini) throw new Error('Add your Google Maps + Gemini API keys in Account Settings to run the tree/clearing estimate on this device.');
   const acres = Number(reportData.gisAcres);
   const lat = reportData.coordinates?.lat, lng = reportData.coordinates?.lng;
-  if (!(acres > 0) || typeof lat !== 'number' || typeof lng !== 'number') return null;
+  if (!(acres > 0) || typeof lat !== 'number' || typeof lng !== 'number') throw new Error('The parcel\'s acreage or coordinates are unavailable, so the satellite tree count can\'t run for this address.');
 
   const zoom = landZoomForAcres(acres);
   const satelliteUrl = `https://maps.googleapis.com/maps/api/staticmap?center=${lat},${lng}&zoom=${zoom}&size=600x600&scale=2&maptype=satellite&key=${keys.googleMaps}`;
@@ -5069,7 +5162,7 @@ export async function fetchLandClearingEstimate(reportData: SiteFeasibilityData)
     countTreesFromSatellite(imageUrls, acres, keys.gemini).catch(() => null),
     fetchTreeRemovalRates(reportData.countyName, zip, keys.gemini).catch(() => null),
   ]);
-  if (!vision) return null;
+  if (!vision) throw new Error('The satellite tree count didn\'t answer (a slow or rate-limited moment) — tap Retry.');
 
   const r: TreeRates = rates || { ...TREE_RATE_FALLBACK, mulchPerAcre: 0, mulchDayRate: 0, clearingPerAcre: 0, clearingDayRate: 0, haulOff: 0, sources: [] as string[] };
   const sizes = ['small', 'medium', 'large'] as const;
