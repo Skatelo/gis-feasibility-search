@@ -178,8 +178,13 @@ function pumpGeminiLane(lane: GeminiLane): void {
   next();
 }
 function queueGemini<T>(task: () => Promise<T>, priority: GeminiPriority = 'low', laneKind: 'primary' | 'background' = 'primary'): Promise<T> {
-  // Background traffic gets its own lane only when a distinct second key
-  // exists; otherwise everything shares the primary lane (one key = one gate).
+  // 'high' and 'low' requests fire IMMEDIATELY and in PARALLEL — the report,
+  // zoning, tree count, rates, utilities, cost estimate all pull at the same
+  // time (background features use Gemini key #2 when configured, so the load
+  // spreads over two quota pools; every caller has its own 429/5xx backoff).
+  // ONLY 'idle' bulk work (comp exterior-photo picks — dozens of vision calls)
+  // stays serialized so it can never eat the quota the sections need.
+  if (priority !== 'idle') return task();
   const lane = geminiLanes[laneKind === 'background' && hasSecondGeminiKey() ? 1 : 0];
   return new Promise<T>((resolve, reject) => {
     const start = () => {
@@ -5270,13 +5275,13 @@ export async function fetchLandClearingEstimate(reportData: SiteFeasibilityData)
   const streetViewUrl = await streetViewUrlIfAvailable(lat, lng, keys.googleMaps);
   const imageUrls = streetViewUrl ? [satelliteUrl, streetViewUrl] : [satelliteUrl];
 
-  // VISION FIRST — it's what the card blocks on, so it must take the request
-  // lane before the (slower, grounded) rates search. Rates are non-fatal:
-  // baseline rates cover a miss. The vision call's DISTINCT errors (e.g. the
-  // static-map image failed to load) propagate to the card.
+  // Vision + rates pull SIMULTANEOUSLY. Rates are non-fatal (baseline rates
+  // cover a miss); the vision call's DISTINCT errors (e.g. the static-map
+  // image failed to load) propagate to the card.
+  const ratesPromise = fetchTreeRemovalRates(reportData.countyName, zip, getBackgroundGeminiKey()).catch(() => null);
   const vision = await countTreesFromSatellite(imageUrls, acres, getBackgroundGeminiKey());
   if (!vision) throw new Error('The satellite tree count didn\'t answer (a slow or rate-limited moment) — tap Retry.');
-  const rates = await fetchTreeRemovalRates(reportData.countyName, zip, getBackgroundGeminiKey()).catch(() => null);
+  const rates = await ratesPromise;
 
   const r: TreeRates = rates || { ...TREE_RATE_FALLBACK, mulchPerAcre: 0, mulchDayRate: 0, clearingPerAcre: 0, clearingDayRate: 0, haulOff: 0, sources: [] as string[] };
   const sizes = ['small', 'medium', 'large'] as const;
@@ -5365,39 +5370,12 @@ STRICT PRICING RULES — REAL FIGURES ONLY:
 - If you cannot find a verifiable current local figure for a line, you MUST leave it 0. NEVER estimate, NEVER use national/regional averages, NEVER guess.`;
   const utilitiesSystem = 'You are a site-development utilities and permit-fee analyst for North Carolina — any city, town, or county. Use web search to find the LOCAL water/sewer provider for the given jurisdiction, its CURRENT published tap/connection/impact fee schedule, the jurisdiction\'s CURRENT adopted residential permit fee schedule, and current local well & septic contractor pricing. Return only the JSON. Every number must be traceable to a cited source URL; leave any unverifiable number 0 — never estimate or use regional averages.';
 
-  // TWO ENGINES IN PARALLEL — first usable JSON wins:
-  //   1. Grounded Gemini (the original engine): answers in ~20–40s when
-  //      Google's grounding is healthy — the fast path, like it always worked.
-  //   2. DeepSeek V4 Pro + web_search tool (desktop + key): covers the runs
-  //      where grounding is slow or throwing 5xx storms. Hard 2-min deadline.
-  // LAST RESORT: DeepSeek without web — strict rules force unverifiable
-  // figures to 0, so the card still renders availability (from the Census
-  // jurisdiction) + which fees to confirm, instead of erroring.
-  const looksUsable = (t: string | null): t is string => !!t && (/```json/.test(t) || /\{[\s\S]*\}/.test(t));
-  const deepSeekKey = getDeepSeekKey();
-  const engines: (() => Promise<string | null>)[] = [
-    () => groundedGeminiText(getBackgroundGeminiKey(), prompt, utilitiesSystem, 45000),
-  ];
-  if (deepSeekKey && !isMobileDevice()) {
-    engines.push(() => Promise.race([
-      fetchDeepSeekDraft(utilitiesSystem, prompt, deepSeekKey, getBackgroundGeminiKey(), { maxRounds: 3, maxSearches: 3 }),
-      new Promise<null>((r) => setTimeout(() => r(null), 120000)),
-    ]).catch(() => null));
-  }
-  let text = await new Promise<string | null>((resolve) => {
-    let pending = engines.length;
-    let settled = false;
-    const done = (t: string | null) => {
-      if (settled) return;
-      if (looksUsable(t)) { settled = true; resolve(t); return; }
-      if (--pending === 0) { settled = true; resolve(null); }
-    };
-    engines.forEach((run) => run().then(done, () => done(null)));
-  });
-  if (!text && deepSeekKey) {
-    text = await fetchDeepSeekDraft(utilitiesSystem, prompt, deepSeekKey, undefined, { maxRounds: 1 }).catch(() => null);
-    if (!looksUsable(text)) text = null;
-  }
+  // ONE ENGINE — grounded Gemini (Google Search), the original accurate path:
+  // one generation with the strict verified-prices-only prompt, generous 90s
+  // per attempt with internal retries. Runs IMMEDIATELY (no queue wait), in
+  // parallel with the tree count and the other section lookups. The card's
+  // automatic retry covers a transient miss.
+  const text = await groundedGeminiText(getBackgroundGeminiKey(), prompt, utilitiesSystem, 90000);
   if (!text) throw new Error('The live fee-schedule search did not answer (a slow or rate-limited moment) — tap Retry.');
   const m = text.match(/```json\s*([\s\S]*?)\s*```/) || text.match(/\{[\s\S]*\}/);
   if (!m) throw new Error('The live search answered in an unexpected format — tap Retry.');
