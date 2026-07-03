@@ -4724,6 +4724,16 @@ async function groundedGeminiText(geminiKey: string, prompt: string, systemText:
         return '';
       }
       if ((res.status === 429 || res.status >= 500) && attempt < 2) { await new Promise((r) => setTimeout(r, 2500 * (attempt + 1))); continue; }
+      // Auth/permission rejection (invalid key, Generative Language API not
+      // enabled on that project): when this was the SECOND key, transparently
+      // fall back to the primary key so the section still generates.
+      {
+        const primary = (getUserKeys().gemini || '').trim();
+        if ((res.status === 400 || res.status === 401 || res.status === 403) && primary && geminiKey !== primary) {
+          console.warn(`Gemini key #2 was rejected (HTTP ${res.status}) — running this lookup on the primary key instead. Check that key #2 is valid and its Google project has the Generative Language API enabled.`);
+          return groundedGeminiText(primary, prompt, systemText, timeoutMs);
+        }
+      }
       return null;
     } catch {
       // network error or per-attempt timeout abort — retry
@@ -5108,6 +5118,14 @@ Return ONLY JSON: {"small":<int>,"medium":<int>,"large":<int>,"canopyCoverPct":<
       if (!res.ok) {
         if (attempt < LAST && res.status === 429) { await new Promise((r) => setTimeout(r, [8000, 16000, 28000][attempt])); continue; }
         if (attempt < LAST && res.status >= 500) { await new Promise((r) => setTimeout(r, 2500 * (attempt + 1))); continue; }
+        // Second key rejected (invalid / API not enabled) → primary key fallback.
+        {
+          const primary = (getUserKeys().gemini || '').trim();
+          if ((res.status === 400 || res.status === 401 || res.status === 403) && primary && geminiKey !== primary) {
+            console.warn(`Gemini key #2 was rejected (HTTP ${res.status}) — running the tree count on the primary key instead.`);
+            return countTreesFromSatellite(imageUrls, acres, primary);
+          }
+        }
         return null;
       }
       const data = await res.json();
