@@ -5365,35 +5365,38 @@ STRICT PRICING RULES — REAL FIGURES ONLY:
 - If you cannot find a verifiable current local figure for a line, you MUST leave it 0. NEVER estimate, NEVER use national/regional averages, NEVER guess.`;
   const utilitiesSystem = 'You are a site-development utilities and permit-fee analyst for North Carolina — any city, town, or county. Use web search to find the LOCAL water/sewer provider for the given jurisdiction, its CURRENT published tap/connection/impact fee schedule, the jurisdiction\'s CURRENT adopted residential permit fee schedule, and current local well & septic contractor pricing. Return only the JSON. Every number must be traceable to a cited source URL; leave any unverifiable number 0 — never estimate or use regional averages.';
 
-  // ENGINE 1 — DeepSeek V4 Pro with the web_search tool (desktop + key
-  // configured): DeepSeek does the reasoning and calls short, targeted web
-  // searches (Gemini grounding) for the fee schedules. This moves the heavy
-  // generation OFF the Gemini quota and answers in quick bounded steps instead
-  // of one long grounded call that can hang the request lane for minutes.
-  // ENGINE 2 — fallback: the original single grounded Gemini generation.
-  let text: string | null = null;
+  // TWO ENGINES IN PARALLEL — first usable JSON wins:
+  //   1. Grounded Gemini (the original engine): answers in ~20–40s when
+  //      Google's grounding is healthy — the fast path, like it always worked.
+  //   2. DeepSeek V4 Pro + web_search tool (desktop + key): covers the runs
+  //      where grounding is slow or throwing 5xx storms. Hard 2-min deadline.
+  // LAST RESORT: DeepSeek without web — strict rules force unverifiable
+  // figures to 0, so the card still renders availability (from the Census
+  // jurisdiction) + which fees to confirm, instead of erroring.
+  const looksUsable = (t: string | null): t is string => !!t && (/```json/.test(t) || /\{[\s\S]*\}/.test(t));
   const deepSeekKey = getDeepSeekKey();
+  const engines: (() => Promise<string | null>)[] = [
+    () => groundedGeminiText(getBackgroundGeminiKey(), prompt, utilitiesSystem, 45000),
+  ];
   if (deepSeekKey && !isMobileDevice()) {
-    // Bounded: 3 rounds / 3 searches, and a 3-minute overall deadline so the
-    // card can never sit on "Searching…" indefinitely (the Gemini + no-web
-    // fallbacks below still need room to run after it).
-    text = await Promise.race([
-      fetchDeepSeekDraft(utilitiesSystem, prompt, deepSeekKey, getBackgroundGeminiKey(), { maxRounds: 3, maxSearches: 3 }).catch(() => null),
-      new Promise<null>((r) => setTimeout(() => r(null), 180000)),
-    ]);
-    // DeepSeek must return the JSON block; anything else falls through to Gemini.
-    if (text && !(/```json/.test(text) || /\{[\s\S]*\}/.test(text))) text = null;
+    engines.push(() => Promise.race([
+      fetchDeepSeekDraft(utilitiesSystem, prompt, deepSeekKey, getBackgroundGeminiKey(), { maxRounds: 3, maxSearches: 3 }),
+      new Promise<null>((r) => setTimeout(() => r(null), 120000)),
+    ]).catch(() => null));
   }
-  if (!text) {
-    text = await groundedGeminiText(getBackgroundGeminiKey(), prompt, utilitiesSystem, 75000);
-  }
-  // LAST RESORT — DeepSeek WITHOUT web search: keeps the card alive during a
-  // grounded-search outage. The strict rules force unverifiable figures to 0,
-  // so the card still shows availability (from the Census jurisdiction) and
-  // which fees to confirm — honest content, never guessed prices.
+  let text = await new Promise<string | null>((resolve) => {
+    let pending = engines.length;
+    let settled = false;
+    const done = (t: string | null) => {
+      if (settled) return;
+      if (looksUsable(t)) { settled = true; resolve(t); return; }
+      if (--pending === 0) { settled = true; resolve(null); }
+    };
+    engines.forEach((run) => run().then(done, () => done(null)));
+  });
   if (!text && deepSeekKey) {
     text = await fetchDeepSeekDraft(utilitiesSystem, prompt, deepSeekKey, undefined, { maxRounds: 1 }).catch(() => null);
-    if (text && !(/```json/.test(text) || /\{[\s\S]*\}/.test(text))) text = null;
+    if (!looksUsable(text)) text = null;
   }
   if (!text) throw new Error('The live fee-schedule search did not answer (a slow or rate-limited moment) — tap Retry.');
   const m = text.match(/```json\s*([\s\S]*?)\s*```/) || text.match(/\{[\s\S]*\}/);
