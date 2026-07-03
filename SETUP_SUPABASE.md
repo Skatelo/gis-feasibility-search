@@ -193,3 +193,43 @@ then restart `npm run dev`.
 - *"Could not load your reports"* → the SQL in step 2 hasn't been run.
 - *Sign-up says "check your email" but nothing arrives* → check spam, or
   disable Confirm email (step 4).
+
+### REST calls fail with 520 / 400 on /rest/v1/profiles and /rest/v1/user_sync
+
+Older versions of the app could stash large sync blobs (chat history) in the
+account's **auth user-metadata**. That metadata is embedded inside every JWT
+access token, and the token rides in the Authorization header of every request
+— once it's oversized, Supabase's edge rejects requests with **520** and
+PostgREST with **400** before they ever reach your data. Because every
+authenticated call fails, the app cannot clean this up from the client; strip
+it once server-side:
+
+1. Open the Supabase dashboard → **SQL Editor**, paste and **Run**:
+
+```sql
+-- ONE-TIME FIX: remove legacy oversized sync_ blobs from all users' auth
+-- metadata (they bloat the JWT and cause the 520/400 REST failures).
+update auth.users
+set raw_user_meta_data = (
+  select coalesce(jsonb_object_agg(e.key, e.value), '{}'::jsonb)
+  from jsonb_each(raw_user_meta_data) as e(key, value)
+  where e.key not like 'sync\_%'
+)
+where exists (
+  select 1
+  from jsonb_each(raw_user_meta_data) as e(key, value)
+  where e.key like 'sync\_%'
+);
+
+-- Optional: confirm nobody's metadata is oversized anymore (should be < 2000)
+select id, email, length(raw_user_meta_data::text) as metadata_chars
+from auth.users
+order by metadata_chars desc;
+```
+
+2. In the app, **sign out and sign back in** on every device (an old session
+   keeps using its old fat token until it's replaced).
+3. Make sure you're running the current app build — it caps metadata sync at
+   8 KB, prefers the `user_sync` table, and auto-cleans leftovers, so this
+   can't happen again. If `user_sync` was never created, also run the
+   `user_sync` block from step 2 above.
