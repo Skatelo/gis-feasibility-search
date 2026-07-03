@@ -4377,7 +4377,9 @@ async function geminiPickExteriorIndex(images: { mimeType: string; data: string 
       text: `These ${images.length} images (indexed 0 to ${images.length - 1}, in order) are photos from ONE home listing. Reply with ONLY the single integer index of the image that best shows the BUILDING'S EXTERIOR — the whole house/structure seen from OUTSIDE (front facade preferred). It must NOT be an interior room (kitchen, bath, bedroom, living room), an aerial/satellite view, a map, a floor plan, a sign, a logo, or any cartoon/graphic. If NONE clearly shows a building exterior, reply -1. Reply with just the number.`,
     }];
     images.forEach((img) => parts.push({ inline_data: { mime_type: img.mimeType, data: img.data } }));
-    const res = await queueGemini(() => fetchWithTimeout(url, 30000, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ contents: [{ role: "user", parts }], generationConfig: { temperature: 0, maxOutputTokens: 256 } }) }), 'idle', 'background');
+    // Large budget: thinking tokens count against maxOutputTokens — 256 got
+    // truncated at MAX_TOKENS before the single-integer answer was emitted.
+    const res = await queueGemini(() => fetchWithTimeout(url, 30000, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ contents: [{ role: "user", parts }], generationConfig: { temperature: 0, maxOutputTokens: 4096 } }) }), 'idle', 'background');
     if (!res.ok) return null;
     const data = await res.json();
     const text = data.candidates?.[0]?.content?.parts?.map((p: any) => p.text).filter(Boolean).join("") || "";
@@ -5105,7 +5107,10 @@ Return ONLY JSON: {"small":<int>,"medium":<int>,"large":<int>,"canopyCoverPct":<
   const parts: any[] = [{ text: prompt }];
   imgs.forEach((img) => parts.push({ inline_data: { mime_type: img.mimeType, data: img.data } }));
   const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=${geminiKey}`;
-  const body = JSON.stringify({ contents: [{ role: 'user', parts }], generationConfig: { temperature: 0, responseMimeType: 'application/json', maxOutputTokens: 800 } });
+  // maxOutputTokens must be LARGE: on thinking models the internal reasoning
+  // tokens count against this budget — 800 made every answer stop at
+  // MAX_TOKENS mid-JSON ("the satellite tree count didn't answer").
+  const body = JSON.stringify({ contents: [{ role: 'user', parts }], generationConfig: { temperature: 0, responseMimeType: 'application/json', maxOutputTokens: 8192 } });
   // 4 attempts with real backoff. The tree count fires alongside the cost
   // estimate, takeoff, utilities and report generation — all on the same
   // Gemini key — so a free-tier per-minute rate limit (429) is the most common
