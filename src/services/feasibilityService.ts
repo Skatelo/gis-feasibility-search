@@ -494,15 +494,21 @@ function normalizeCountyParcelAttrs(a: Record<string, any>): Record<string, any>
 async function queryCountyParcel(baseUrl: string, lng: number, lat: number) {
   const common = `geometry=${lng},${lat}&geometryType=esriGeometryPoint&inSR=4326&spatialRel=esriSpatialRelIntersects&where=1%3D1&outFields=*&returnGeometry=true`;
   try {
-    const [resWgs, resSp] = await Promise.all([
-      fetchWithRetry(`${baseUrl}/query?${common}&outSR=4326&f=geojson`, 2, 7000),
-      fetchWithRetry(`${baseUrl}/query?${common}&f=json`, 2, 7000), // native SR (NC State Plane feet)
+    // Independent fetches: the WGS84 boundary is the critical result — don't
+    // let a failed native-SR (measurement) query discard a good parcel.
+    const [wgsRes, spRes] = await Promise.allSettled([
+      fetchWithRetry(`${baseUrl}/query?${common}&outSR=4326&f=geojson`, 2, 10000),
+      fetchWithRetry(`${baseUrl}/query?${common}&f=json`, 2, 10000), // native SR (NC State Plane feet)
     ]);
-    const wgsJson = await resWgs.json();
-    const spJson = await resSp.json();
+    if (wgsRes.status !== 'fulfilled') throw wgsRes.reason;
+    const wgsJson = await wgsRes.value.json();
+    let spJson: any = null;
+    if (spRes.status === 'fulfilled') {
+      try { spJson = await spRes.value.json(); } catch { /* optional */ }
+    }
     const wgsFeat = wgsJson.features?.[0];
     if (!wgsFeat || !wgsFeat.geometry) return null;
-    const spFeat = spJson.features?.[0] || null;
+    const spFeat = spJson?.features?.[0] || null;
 
     const norm = normalizeCountyParcelAttrs(wgsFeat.properties || {});
     if (!norm.gisacres) {
@@ -848,17 +854,25 @@ export async function executeLandAnalysis(
         `&outFields=parno` + // State Plane query only needs geometry for measurements
         `&returnGeometry=true&outSR=2264&f=json`;
 
-    try {
-      const [resWgs84, resStatePlane] = await Promise.all([
-        fetchWithRetry(parcelQueryWgs84, 1, 5000), // fail fast — the mirror host is next
-        fetchWithRetry(parcelQueryStatePlane, 1, 5000)
+    // The two projections are fetched INDEPENDENTLY (allSettled): the WGS84
+    // parcel is the critical one — a 504 on the State Plane measurement query
+    // must not throw away a good parcel and push the app to simulated bounds.
+    // 2 attempts × 12s per query: the statewide server is often slow-but-alive,
+    // and 5s single-shot was misreading "slow" as "offline".
+    {
+      const [wgsRes, spRes] = await Promise.allSettled([
+        fetchWithRetry(parcelQueryWgs84, 2, 12000),
+        fetchWithRetry(parcelQueryStatePlane, 2, 12000),
       ]);
-      if (resWgs84.ok && resStatePlane.ok) {
-        wgs84Data = await resWgs84.json();
-        statePlaneData = await resStatePlane.json();
+      if (wgsRes.status === 'fulfilled' && wgsRes.value.ok) {
+        try { wgs84Data = await wgsRes.value.json(); } catch { /* malformed body — treat as miss */ }
+        if (spRes.status === 'fulfilled' && spRes.value.ok) {
+          try { statePlaneData = await spRes.value.json(); } catch { /* optional — measurements only */ }
+        }
+      } else {
+        const err = wgsRes.status === 'rejected' ? wgsRes.reason : `HTTP ${wgsRes.value.status}`;
+        console.warn(`Direct point query failed on statewide NC MapServer (${parcelHost.includes('nconemap') ? 'mirror' : 'primary'} host):`, err);
       }
-    } catch (err) {
-      console.warn(`Direct point query failed on statewide NC MapServer (${parcelHost.includes('nconemap') ? 'mirror' : 'primary'} host):`, err);
     }
 
     // If no direct point intersection is found, retry with a spatial envelope tolerance (e.g. 50 feet buffer)
@@ -870,16 +884,16 @@ export async function executeLandAnalysis(
       parcelQueryWgs84 = `${parcelHost}?geometry=${envGeometry}&geometryType=esriGeometryEnvelope&inSR=4326&spatialRel=esriSpatialRelIntersects&where=1%3D1&outFields=${NC_PARCEL_FIELDS}&returnGeometry=true&outSR=4326&f=geojson`;
       parcelQueryStatePlane = `${parcelHost}?geometry=${envGeometry}&geometryType=esriGeometryEnvelope&inSR=4326&spatialRel=esriSpatialRelIntersects&where=1%3D1&outFields=parno&returnGeometry=true&outSR=2264&f=json`;
 
-      try {
-        const [resWgs84, resStatePlane] = await Promise.all([
-          fetchWithTimeout(parcelQueryWgs84, 4000),
-          fetchWithTimeout(parcelQueryStatePlane, 4000),
-        ]);
-        if (resWgs84.ok && resStatePlane.ok) {
-          wgs84Data = await resWgs84.json();
-          statePlaneData = await resStatePlane.json();
+      const [wgsRes, spRes] = await Promise.allSettled([
+        fetchWithTimeout(parcelQueryWgs84, 10000),
+        fetchWithTimeout(parcelQueryStatePlane, 10000),
+      ]);
+      if (wgsRes.status === 'fulfilled' && wgsRes.value.ok) {
+        try { wgs84Data = await wgsRes.value.json(); } catch { /* malformed body */ }
+        if (spRes.status === 'fulfilled' && spRes.value.ok) {
+          try { statePlaneData = await spRes.value.json(); } catch { /* optional */ }
         }
-      } catch {
+      } else {
         console.warn("Parcel envelope-buffer retry timed out.");
       }
     }
@@ -5002,7 +5016,7 @@ async function streetViewUrlIfAvailable(lat: number, lng: number, key: string): 
  *  crop PLUS (when available) a ground-level street-view to gauge tree size. */
 async function countTreesFromSatellite(imageUrls: string[], acres: number, geminiKey: string): Promise<{ small: number; medium: number; large: number; canopyPct: number | null; density: 'light' | 'medium' | 'heavy' } | null> {
   const imgs = (await Promise.all(imageUrls.map((u) => imageUrlToInline(u)))).filter((x): x is { mimeType: string; data: string } => !!x);
-  if (!imgs.length) return null;
+  if (!imgs.length) throw new Error('Couldn\'t load the parcel satellite image (Google Static Maps) — check that the Google Maps key has Static Maps enabled with billing, then tap Retry.');
   const multi = imgs.length > 1;
   const prompt = `You are estimating TREE REMOVAL for a ~${acres.toFixed(2)}-acre raw land parcel.
 ${multi ? 'The FIRST image is a top-down SATELLITE view — use it to COUNT the trees and read canopy. The SECOND image is a ground-level STREET VIEW — use it to gauge tree SIZE/maturity and species.' : 'This is a top-down SATELLITE view of the parcel — count the trees and read canopy.'}
@@ -5016,19 +5030,25 @@ Return ONLY JSON: {"small":<int>,"medium":<int>,"large":<int>,"canopyCoverPct":<
   imgs.forEach((img) => parts.push({ inline_data: { mime_type: img.mimeType, data: img.data } }));
   const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=${geminiKey}`;
   const body = JSON.stringify({ contents: [{ role: 'user', parts }], generationConfig: { temperature: 0, responseMimeType: 'application/json', maxOutputTokens: 800 } });
-  // 3 attempts with backoff so a transient timeout / 429 doesn't kill the card.
-  for (let attempt = 0; attempt < 3; attempt++) {
+  // 4 attempts with real backoff. The tree count fires alongside the cost
+  // estimate, takeoff, utilities and report generation — all on the same
+  // Gemini key — so a free-tier per-minute rate limit (429) is the most common
+  // failure. Waiting through the rate window (rather than three quick retries
+  // inside it) is what makes the card reliably appear like it used to.
+  const LAST = 3;
+  for (let attempt = 0; attempt <= LAST; attempt++) {
     try {
       const res = await fetchWithTimeout(url, 45000, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body });
       if (!res.ok) {
-        if ((res.status === 429 || res.status >= 500) && attempt < 2) { await new Promise((r) => setTimeout(r, 2500 * (attempt + 1))); continue; }
+        if (attempt < LAST && res.status === 429) { await new Promise((r) => setTimeout(r, [8000, 16000, 28000][attempt])); continue; }
+        if (attempt < LAST && res.status >= 500) { await new Promise((r) => setTimeout(r, 2500 * (attempt + 1))); continue; }
         return null;
       }
       const data = await res.json();
       const t = data.candidates?.[0]?.content?.parts?.map((p: any) => p.text).filter(Boolean).join('') || '';
       const m = t.match(/```json\s*([\s\S]*?)\s*```/) || t.match(/\{[\s\S]*\}/);
       if (!m) {
-        if (attempt < 2) { await new Promise((r) => setTimeout(r, 1500)); continue; } // odd answer — retry
+        if (attempt < LAST) { await new Promise((r) => setTimeout(r, 1500)); continue; } // odd answer — retry
         return null;
       }
       const o = JSON.parse((m[1] || m[0]).replace(/,\s*([}\]])/g, '$1'));
@@ -5038,7 +5058,8 @@ Return ONLY JSON: {"small":<int>,"medium":<int>,"large":<int>,"canopyCoverPct":<
       const c = Number(o.canopyCoverPct);
       return { small: n(o.small), medium: n(o.medium), large: n(o.large), canopyPct: Number.isFinite(c) ? Math.max(0, Math.min(100, Math.round(c))) : null, density };
     } catch {
-      if (attempt < 2) { await new Promise((r) => setTimeout(r, 1500 * (attempt + 1))); continue; }
+      // network error or per-attempt timeout abort — retry
+      if (attempt < LAST) { await new Promise((r) => setTimeout(r, 1500 * (attempt + 1))); continue; }
       return null;
     }
   }
@@ -5158,10 +5179,12 @@ export async function fetchLandClearingEstimate(reportData: SiteFeasibilityData)
   const streetViewUrl = await streetViewUrlIfAvailable(lat, lng, keys.googleMaps);
   const imageUrls = streetViewUrl ? [satelliteUrl, streetViewUrl] : [satelliteUrl];
 
-  const [vision, rates] = await Promise.all([
-    countTreesFromSatellite(imageUrls, acres, keys.gemini).catch(() => null),
-    fetchTreeRemovalRates(reportData.countyName, zip, keys.gemini).catch(() => null),
-  ]);
+  // Rates are non-fatal (baseline rates cover a miss); the vision count is the
+  // critical piece — let its DISTINCT errors (e.g. the static-map image failed
+  // to load) propagate to the card instead of collapsing them to a generic one.
+  const ratesPromise = fetchTreeRemovalRates(reportData.countyName, zip, keys.gemini).catch(() => null);
+  const vision = await countTreesFromSatellite(imageUrls, acres, keys.gemini);
+  const rates = await ratesPromise;
   if (!vision) throw new Error('The satellite tree count didn\'t answer (a slow or rate-limited moment) — tap Retry.');
 
   const r: TreeRates = rates || { ...TREE_RATE_FALLBACK, mulchPerAcre: 0, mulchDayRate: 0, clearingPerAcre: 0, clearingDayRate: 0, haulOff: 0, sources: [] as string[] };

@@ -959,7 +959,7 @@ export const FeasibilitySearch: FC = () => {
   // Land clearing / tree-cost lookup. Like the utilities card, the tree card
   // NEVER silently disappears: failures land in landClearingError with the real
   // reason and a Retry button re-runs just this lookup.
-  const runLandClearingLookup = (reportData: SiteFeasibilityData, seq: number) => {
+  const runLandClearingLookup = (reportData: SiteFeasibilityData, seq: number, attempt = 0) => {
     setLandClearing(null);
     setLandClearingError('');
     setLandClearingLoading(true);
@@ -969,7 +969,20 @@ export const FeasibilitySearch: FC = () => {
         if (lc) setLandClearing(lc);
         else setLandClearingError('The tree/clearing estimate returned nothing — tap Retry.');
       })
-      .catch((e) => { if (seq === searchSeqRef.current) setLandClearingError(e?.message || 'Tree/clearing estimate failed — tap Retry.'); })
+      .catch((e) => {
+        if (seq !== searchSeqRef.current) return;
+        const msg = e?.message || 'Tree/clearing estimate failed — tap Retry.';
+        // Transient (slow/rate-limited) failure on the FIRST run: retry once
+        // automatically after the rate window clears — no tap needed.
+        if (attempt === 0 && /didn't answer|slow|rate-?limit/i.test(msg)) {
+          setLandClearingError(`${msg} Retrying automatically in ~20 s…`);
+          setTimeout(() => {
+            if (seq === searchSeqRef.current) runLandClearingLookup(reportData, seq, 1);
+          }, 20000);
+        } else {
+          setLandClearingError(msg);
+        }
+      })
       .finally(() => { if (seq === searchSeqRef.current) setLandClearingLoading(false); });
   };
 
