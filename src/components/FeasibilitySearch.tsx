@@ -903,7 +903,7 @@ export const FeasibilitySearch: FC = () => {
   // Utilities + connection costs + permit fees lookup. The card NEVER silently
   // disappears: failures land in utilitiesError with the real reason and a
   // Retry button re-runs just this lookup.
-  const runUtilitiesLookup = (reportData: SiteFeasibilityData, seq: number) => {
+  const runUtilitiesLookup = (reportData: SiteFeasibilityData, seq: number, attempt = 0) => {
     setUtilities(null);
     setUtilitiesError('');
     setUtilitiesLoading(true);
@@ -913,7 +913,20 @@ export const FeasibilitySearch: FC = () => {
         if (u) setUtilities(u);
         else setUtilitiesError('The utilities lookup returned nothing — tap Retry.');
       })
-      .catch((e) => { if (seq === searchSeqRef.current) setUtilitiesError(e?.message || 'Utilities lookup failed — tap Retry.'); })
+      .catch((e) => {
+        if (seq !== searchSeqRef.current) return;
+        const msg = e?.message || 'Utilities lookup failed — tap Retry.';
+        // Transient (slow/rate-limited/outage) failure on the FIRST run: retry
+        // once automatically after the moment passes — no tap needed.
+        if (attempt === 0 && /did not answer|slow|rate-?limit/i.test(msg)) {
+          setUtilitiesError(`${msg} Retrying automatically in ~30 s…`);
+          setTimeout(() => {
+            if (seq === searchSeqRef.current) runUtilitiesLookup(reportData, seq, 1);
+          }, 30000);
+        } else {
+          setUtilitiesError(msg);
+        }
+      })
       .finally(() => { if (seq === searchSeqRef.current) setUtilitiesLoading(false); });
   };
 
