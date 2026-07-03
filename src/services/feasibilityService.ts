@@ -5,6 +5,11 @@ import { getSupabase, isSupabaseConfigured } from './supabaseClient';
 export interface UserKeys {
   googleMaps?: string;
   gemini?: string;
+  /** OPTIONAL second Gemini key. When set, background lookups (cost estimate,
+   *  takeoff, tree count/rates, utilities, comp photos) run on THIS key in
+   *  their own parallel lane while the report/chat/zoning stay on the primary
+   *  key — doubling the per-minute quota so sections finish faster. */
+  gemini2?: string;
   realtyApi?: string;
   deepSeek?: string;
   rentCast?: string;
@@ -140,25 +145,50 @@ async function fetchWithRetry(url: string, attempts = 3, timeoutMs = 8000, init?
 // the REQUEST itself (rate limits count requests), not for long SSE streams.
 // ---------------------------------------------------------------------------
 const GEMINI_SPACING_MS = 800;
-const geminiQueueHigh: (() => void)[] = [];
-const geminiQueueLow: (() => void)[] = [];
-let geminiGateBusy = false;
-function pumpGeminiQueue(): void {
-  if (geminiGateBusy) return;
-  const next = geminiQueueHigh.shift() || geminiQueueLow.shift();
+
+/** The key BACKGROUND lookups run on: the optional second Gemini key when
+ *  configured (its own quota + its own queue lane), else the primary key. */
+export function getBackgroundGeminiKey(): string {
+  const k = getUserKeys();
+  return ((k.gemini2 || '').trim() || (k.gemini || '').trim());
+}
+/** True when a DISTINCT second Gemini key is configured — unlocks the second
+ *  parallel request lane (each key has its own per-minute quota). */
+function hasSecondGeminiKey(): boolean {
+  const k = getUserKeys();
+  const k2 = (k.gemini2 || '').trim();
+  return !!k2 && k2 !== (k.gemini || '').trim();
+}
+
+// Priorities: 'high' = report/chat/zoning (user-facing, blocking) · 'low' =
+// section lookups (cost, takeoff, trees, utilities) · 'idle' = cosmetic bulk
+// work (comp exterior-photo picks) that must NEVER starve the sections — a
+// low-priority retry re-enters ahead of every queued idle task.
+type GeminiPriority = 'high' | 'low' | 'idle';
+interface GeminiLane { high: (() => void)[]; low: (() => void)[]; idle: (() => void)[]; busy: boolean }
+const geminiLanes: [GeminiLane, GeminiLane] = [
+  { high: [], low: [], idle: [], busy: false }, // primary key lane
+  { high: [], low: [], idle: [], busy: false }, // second key lane (when configured)
+];
+function pumpGeminiLane(lane: GeminiLane): void {
+  if (lane.busy) return;
+  const next = lane.high.shift() || lane.low.shift() || lane.idle.shift();
   if (!next) return;
-  geminiGateBusy = true;
+  lane.busy = true;
   next();
 }
-function queueGemini<T>(task: () => Promise<T>, priority: 'high' | 'low' = 'low'): Promise<T> {
+function queueGemini<T>(task: () => Promise<T>, priority: GeminiPriority = 'low', laneKind: 'primary' | 'background' = 'primary'): Promise<T> {
+  // Background traffic gets its own lane only when a distinct second key
+  // exists; otherwise everything shares the primary lane (one key = one gate).
+  const lane = geminiLanes[laneKind === 'background' && hasSecondGeminiKey() ? 1 : 0];
   return new Promise<T>((resolve, reject) => {
     const start = () => {
       task().then(resolve, reject).finally(() => {
-        setTimeout(() => { geminiGateBusy = false; pumpGeminiQueue(); }, GEMINI_SPACING_MS);
+        setTimeout(() => { lane.busy = false; pumpGeminiLane(lane); }, GEMINI_SPACING_MS);
       });
     };
-    (priority === 'high' ? geminiQueueHigh : geminiQueueLow).push(start);
-    pumpGeminiQueue();
+    lane[priority].push(start);
+    pumpGeminiLane(lane);
   });
 }
 
@@ -3395,7 +3425,7 @@ Output ONLY a JSON array inside a markdown code block:
         generationConfig: { temperature: 0 }
       }),
     },
-  ), 'low');
+  ), 'idle', 'background');
   if (!res.ok) return [];
   const text = (await res.json()).candidates?.[0]?.content?.parts?.[0]?.text || '';
   const parsed = parseCompsFromJsonText(text);
@@ -4347,7 +4377,7 @@ async function geminiPickExteriorIndex(images: { mimeType: string; data: string 
       text: `These ${images.length} images (indexed 0 to ${images.length - 1}, in order) are photos from ONE home listing. Reply with ONLY the single integer index of the image that best shows the BUILDING'S EXTERIOR — the whole house/structure seen from OUTSIDE (front facade preferred). It must NOT be an interior room (kitchen, bath, bedroom, living room), an aerial/satellite view, a map, a floor plan, a sign, a logo, or any cartoon/graphic. If NONE clearly shows a building exterior, reply -1. Reply with just the number.`,
     }];
     images.forEach((img) => parts.push({ inline_data: { mime_type: img.mimeType, data: img.data } }));
-    const res = await queueGemini(() => fetchWithTimeout(url, 30000, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ contents: [{ role: "user", parts }], generationConfig: { temperature: 0, maxOutputTokens: 256 } }) }), 'low');
+    const res = await queueGemini(() => fetchWithTimeout(url, 30000, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ contents: [{ role: "user", parts }], generationConfig: { temperature: 0, maxOutputTokens: 256 } }) }), 'idle', 'background');
     if (!res.ok) return null;
     const data = await res.json();
     const text = data.candidates?.[0]?.content?.parts?.map((p: any) => p.text).filter(Boolean).join("") || "";
@@ -4362,7 +4392,9 @@ async function geminiPickExteriorIndex(images: { mimeType: string; data: string 
  *  an interior / graphic. Bounded concurrency; never throws. */
 async function selectExteriorComps(comps: CompProperty[], geminiKey: string): Promise<void> {
   if (!geminiKey) return;
-  const targets = comps.filter((c) => Array.isArray(c.photoUrls) && c.photoUrls.length).slice(0, 40);
+  // Cap the vision picks (idle-priority queue work) so a big comp set can't
+  // occupy the request lane for many minutes.
+  const targets = comps.filter((c) => Array.isArray(c.photoUrls) && c.photoUrls.length).slice(0, 20);
   if (!targets.length) return;
   let i = 0;
   const worker = async () => {
@@ -4661,7 +4693,7 @@ export async function fetchGoogleDistanceMatrixComps(
   // shot from the listing's photos (new-construction covers are often interiors,
   // renderings, or marketing graphics). Clears the photo when none is an exterior.
   onStageChange?.('Selecting exterior photos…');
-  await selectExteriorComps(result, getUserKeys().gemini || '');
+  await selectExteriorComps(result, getBackgroundGeminiKey());
 
   console.log(`Returning ${result.length} verified new-construction comps.`);
   if (result.length > 0) writeCompsCache(cacheKey, result, summary);
@@ -4683,7 +4715,7 @@ async function groundedGeminiText(geminiKey: string, prompt: string, systemText:
   // one extra retry fixes most "keeps timing out" runs without user action.
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      const res = await queueGemini(() => fetchWithTimeout(url, timeoutMs, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body }), 'low');
+      const res = await queueGemini(() => fetchWithTimeout(url, timeoutMs, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body }), 'low', 'background');
       if (res.ok) {
         const data = await res.json();
         const text = data.candidates?.[0]?.content?.parts?.map((p: any) => p.text).filter(Boolean).join('') || '';
@@ -4799,7 +4831,7 @@ async function fetchBlsLocalWages(county: string): Promise<BlsLocalWages | null>
  * never fabricates (cites sources).
  */
 export async function fetchConstructionCostEstimate(reportData: SiteFeasibilityData): Promise<ConstructionCostEstimate | null> {
-  const geminiKey = getUserKeys().gemini || "";
+  const geminiKey = getBackgroundGeminiKey(); // second key when configured — own quota lane
   if (!geminiKey) return null;
 
   // Size the planned home to the local new-construction comps (median GLA).
@@ -4949,7 +4981,7 @@ const MATERIAL_RECIPE: RecipeItem[] = [
  * Null on failure; never invents prices (cites sources).
  */
 export async function fetchMaterialTakeoff(reportData: SiteFeasibilityData): Promise<MaterialTakeoff | null> {
-  const geminiKey = getUserKeys().gemini || "";
+  const geminiKey = getBackgroundGeminiKey(); // second key when configured — own quota lane
   if (!geminiKey) return null;
 
   const zip = (String(reportData.inputAddress || "").match(/\b(\d{5})(?:-\d{4})?\b/) || [])[1] || "";
@@ -5072,7 +5104,7 @@ Return ONLY JSON: {"small":<int>,"medium":<int>,"large":<int>,"canopyCoverPct":<
   const LAST = 3;
   for (let attempt = 0; attempt <= LAST; attempt++) {
     try {
-      const res = await queueGemini(() => fetchWithTimeout(url, 45000, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body }), 'low');
+      const res = await queueGemini(() => fetchWithTimeout(url, 45000, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body }), 'low', 'background');
       if (!res.ok) {
         if (attempt < LAST && res.status === 429) { await new Promise((r) => setTimeout(r, [8000, 16000, 28000][attempt])); continue; }
         if (attempt < LAST && res.status >= 500) { await new Promise((r) => setTimeout(r, 2500 * (attempt + 1))); continue; }
@@ -5216,8 +5248,8 @@ export async function fetchLandClearingEstimate(reportData: SiteFeasibilityData)
   // Rates are non-fatal (baseline rates cover a miss); the vision count is the
   // critical piece — let its DISTINCT errors (e.g. the static-map image failed
   // to load) propagate to the card instead of collapsing them to a generic one.
-  const ratesPromise = fetchTreeRemovalRates(reportData.countyName, zip, keys.gemini).catch(() => null);
-  const vision = await countTreesFromSatellite(imageUrls, acres, keys.gemini);
+  const ratesPromise = fetchTreeRemovalRates(reportData.countyName, zip, getBackgroundGeminiKey()).catch(() => null);
+  const vision = await countTreesFromSatellite(imageUrls, acres, getBackgroundGeminiKey());
   const rates = await ratesPromise;
   if (!vision) throw new Error('The satellite tree count didn\'t answer (a slow or rate-limited moment) — tap Retry.');
 
@@ -5306,7 +5338,7 @@ STRICT PRICING RULES — REAL FIGURES ONLY:
 - Every dollar figure MUST come from a page you actually found with Google Search: the utility authority's CURRENT published fee schedule / rate ordinance for tap-connection-impact fees, the jurisdiction's CURRENT adopted permit fee schedule, or named LOCAL well-drilling & septic contractors' current pricing for this county.
 - List in "sources" the exact URLs the figures came from. A figure without a source URL is not allowed.
 - If you cannot find a verifiable current local figure for a line, you MUST leave it 0. NEVER estimate, NEVER use national/regional averages, NEVER guess.`;
-  const text = await groundedGeminiText(keys.gemini, prompt, 'You are a site-development utilities and permit-fee analyst for North Carolina — any city, town, or county. Use Google Search to find the LOCAL water/sewer provider for the given jurisdiction, its CURRENT published tap/connection/impact fee schedule, the jurisdiction\'s CURRENT adopted residential permit fee schedule, and current local well & septic contractor pricing. Return only the JSON. Every number must be traceable to a cited source URL; leave any unverifiable number 0 — never estimate or use regional averages.', 90000);
+  const text = await groundedGeminiText(getBackgroundGeminiKey(), prompt, 'You are a site-development utilities and permit-fee analyst for North Carolina — any city, town, or county. Use Google Search to find the LOCAL water/sewer provider for the given jurisdiction, its CURRENT published tap/connection/impact fee schedule, the jurisdiction\'s CURRENT adopted residential permit fee schedule, and current local well & septic contractor pricing. Return only the JSON. Every number must be traceable to a cited source URL; leave any unverifiable number 0 — never estimate or use regional averages.', 90000);
   if (!text) throw new Error('The live fee-schedule search did not answer (a slow or rate-limited moment) — tap Retry.');
   const m = text.match(/```json\s*([\s\S]*?)\s*```/) || text.match(/\{[\s\S]*\}/);
   if (!m) throw new Error('The live search answered in an unexpected format — tap Retry.');

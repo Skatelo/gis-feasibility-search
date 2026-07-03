@@ -23,6 +23,8 @@ interface SettingsDrawerProps {
 export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdateUser }: SettingsDrawerProps) {
   const [googleMapsKey, setGoogleMapsKey] = useState('');
   const [geminiKey, setGeminiKey] = useState('');
+  const [geminiKey2, setGeminiKey2] = useState('');
+  const [showGeminiKey2, setShowGeminiKey2] = useState(false);
   const [enformionName, setEnformionName] = useState('');
   const [enformionPassword, setEnformionPassword] = useState('');
   const [showEnformionPassword, setShowEnformionPassword] = useState(false);
@@ -49,6 +51,7 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
     if (isOpen && activeUser) {
       setGoogleMapsKey(activeUser.keys?.googleMaps || '');
       setGeminiKey(activeUser.keys?.gemini || '');
+      setGeminiKey2(activeUser.keys?.gemini2 || '');
       setEnformionName(activeUser.keys?.enformionApName || '');
       setEnformionPassword(activeUser.keys?.enformionApPassword || '');
       setRealtyApiKey(activeUser.keys?.realtyApi || '');
@@ -83,6 +86,7 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
     const updatedKeys = {
       googleMaps: googleMapsKey.trim(),
       gemini: geminiKey.trim(),
+      gemini2: geminiKey2.trim(),
       enformionApName: enformionName.trim(),
       enformionApPassword: enformionPassword.trim(),
       realtyApi: realtyApiKey.trim(),
@@ -224,6 +228,32 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
                 </button>
               </div>
               <p className="field-help">Powering web-search zoning lookups, comps evaluation, and the Advanced chatbot.</p>
+            </div>
+
+            {/* Gemini Key #2 — optional second quota lane for background lookups */}
+            <div className="settings-field-group">
+              <div className="field-label-row">
+                <label htmlFor="geminiKey2">Gemini API Key #2 (speed boost)</label>
+                <span className="badge optional">Optional</span>
+              </div>
+              <div className="field-input-container">
+                <Key className="input-icon" size={16} />
+                <input
+                  id="geminiKey2"
+                  type={showGeminiKey2 ? "text" : "password"}
+                  placeholder="Second key from a different Google project…"
+                  value={geminiKey2}
+                  onChange={(e) => setGeminiKey2(e.target.value)}
+                />
+                <button
+                  type="button"
+                  className="field-toggle-btn"
+                  onClick={() => setShowGeminiKey2(!showGeminiKey2)}
+                >
+                  {showGeminiKey2 ? <EyeOff size={16} /> : <Eye size={16} />}
+                </button>
+              </div>
+              <p className="field-help">Requests run one at a time per key to respect rate limits. A second key (create it in a DIFFERENT Google Cloud project so it has its own quota) runs the background lookups — cost estimate, material takeoff, tree count, utilities, comp photos — in a parallel lane while the report &amp; chat stay on key #1, so everything finishes roughly twice as fast.</p>
             </div>
 
             {/* Enformion Go — skip tracing (phones, emails, relatives) */}
