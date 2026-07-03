@@ -5179,7 +5179,7 @@ Return ONLY a JSON object in a \`\`\`json code block:
 - clearingPerAcre = TRADITIONAL excavator land clearing per acre (trees pulled by roots, debris removed); clearingDayRate = excavator crew day rate
 - haulOff = typical debris haul-off / dump fee for a small lot
 Use CURRENT LOCAL prices from credible tree-service / land-clearing / excavation sources; cite them; never invent (set unknown values to 0).`;
-  const text = await groundedGeminiText(geminiKey, prompt, 'You are a land-clearing / tree-service pricing assistant. Use Google Search for current local prices. Return only the JSON; cite sources; never invent prices.', 90000);
+  const text = await groundedGeminiText(geminiKey, prompt, 'You are a land-clearing / tree-service pricing assistant. Use Google Search for current local prices. Return only the JSON; cite sources; never invent prices.', 60000);
   if (!text) return null;
   const m = text.match(/```json\s*([\s\S]*?)\s*```/) || text.match(/\{[\s\S]*\}/);
   if (!m) return null;
@@ -5268,13 +5268,13 @@ export async function fetchLandClearingEstimate(reportData: SiteFeasibilityData)
   const streetViewUrl = await streetViewUrlIfAvailable(lat, lng, keys.googleMaps);
   const imageUrls = streetViewUrl ? [satelliteUrl, streetViewUrl] : [satelliteUrl];
 
-  // Rates are non-fatal (baseline rates cover a miss); the vision count is the
-  // critical piece — let its DISTINCT errors (e.g. the static-map image failed
-  // to load) propagate to the card instead of collapsing them to a generic one.
-  const ratesPromise = fetchTreeRemovalRates(reportData.countyName, zip, getBackgroundGeminiKey()).catch(() => null);
+  // VISION FIRST — it's what the card blocks on, so it must take the request
+  // lane before the (slower, grounded) rates search. Rates are non-fatal:
+  // baseline rates cover a miss. The vision call's DISTINCT errors (e.g. the
+  // static-map image failed to load) propagate to the card.
   const vision = await countTreesFromSatellite(imageUrls, acres, getBackgroundGeminiKey());
-  const rates = await ratesPromise;
   if (!vision) throw new Error('The satellite tree count didn\'t answer (a slow or rate-limited moment) — tap Retry.');
+  const rates = await fetchTreeRemovalRates(reportData.countyName, zip, getBackgroundGeminiKey()).catch(() => null);
 
   const r: TreeRates = rates || { ...TREE_RATE_FALLBACK, mulchPerAcre: 0, mulchDayRate: 0, clearingPerAcre: 0, clearingDayRate: 0, haulOff: 0, sources: [] as string[] };
   const sizes = ['small', 'medium', 'large'] as const;
@@ -5361,7 +5361,24 @@ STRICT PRICING RULES — REAL FIGURES ONLY:
 - Every dollar figure MUST come from a page you actually found with Google Search: the utility authority's CURRENT published fee schedule / rate ordinance for tap-connection-impact fees, the jurisdiction's CURRENT adopted permit fee schedule, or named LOCAL well-drilling & septic contractors' current pricing for this county.
 - List in "sources" the exact URLs the figures came from. A figure without a source URL is not allowed.
 - If you cannot find a verifiable current local figure for a line, you MUST leave it 0. NEVER estimate, NEVER use national/regional averages, NEVER guess.`;
-  const text = await groundedGeminiText(getBackgroundGeminiKey(), prompt, 'You are a site-development utilities and permit-fee analyst for North Carolina — any city, town, or county. Use Google Search to find the LOCAL water/sewer provider for the given jurisdiction, its CURRENT published tap/connection/impact fee schedule, the jurisdiction\'s CURRENT adopted residential permit fee schedule, and current local well & septic contractor pricing. Return only the JSON. Every number must be traceable to a cited source URL; leave any unverifiable number 0 — never estimate or use regional averages.', 90000);
+  const utilitiesSystem = 'You are a site-development utilities and permit-fee analyst for North Carolina — any city, town, or county. Use web search to find the LOCAL water/sewer provider for the given jurisdiction, its CURRENT published tap/connection/impact fee schedule, the jurisdiction\'s CURRENT adopted residential permit fee schedule, and current local well & septic contractor pricing. Return only the JSON. Every number must be traceable to a cited source URL; leave any unverifiable number 0 — never estimate or use regional averages.';
+
+  // ENGINE 1 — DeepSeek V4 Pro with the web_search tool (desktop + key
+  // configured): DeepSeek does the reasoning and calls short, targeted web
+  // searches (Gemini grounding) for the fee schedules. This moves the heavy
+  // generation OFF the Gemini quota and answers in quick bounded steps instead
+  // of one long grounded call that can hang the request lane for minutes.
+  // ENGINE 2 — fallback: the original single grounded Gemini generation.
+  let text: string | null = null;
+  const deepSeekKey = getDeepSeekKey();
+  if (deepSeekKey && !isMobileDevice()) {
+    text = await fetchDeepSeekDraft(utilitiesSystem, prompt, deepSeekKey, getBackgroundGeminiKey()).catch(() => null);
+    // DeepSeek must return the JSON block; anything else falls through to Gemini.
+    if (text && !(/```json/.test(text) || /\{[\s\S]*\}/.test(text))) text = null;
+  }
+  if (!text) {
+    text = await groundedGeminiText(getBackgroundGeminiKey(), prompt, utilitiesSystem, 75000);
+  }
   if (!text) throw new Error('The live fee-schedule search did not answer (a slow or rate-limited moment) — tap Retry.');
   const m = text.match(/```json\s*([\s\S]*?)\s*```/) || text.match(/\{[\s\S]*\}/);
   if (!m) throw new Error('The live search answered in an unexpected format — tap Retry.');
