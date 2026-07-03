@@ -5372,7 +5372,12 @@ STRICT PRICING RULES — REAL FIGURES ONLY:
   let text: string | null = null;
   const deepSeekKey = getDeepSeekKey();
   if (deepSeekKey && !isMobileDevice()) {
-    text = await fetchDeepSeekDraft(utilitiesSystem, prompt, deepSeekKey, getBackgroundGeminiKey()).catch(() => null);
+    // Bounded: 3 rounds / 3 searches, and a 4-minute overall deadline so the
+    // card can never sit on "Searching…" indefinitely.
+    text = await Promise.race([
+      fetchDeepSeekDraft(utilitiesSystem, prompt, deepSeekKey, getBackgroundGeminiKey(), { maxRounds: 3, maxSearches: 3 }).catch(() => null),
+      new Promise<null>((r) => setTimeout(() => r(null), 240000)),
+    ]);
     // DeepSeek must return the JSON block; anything else falls through to Gemini.
     if (text && !(/```json/.test(text) || /\{[\s\S]*\}/.test(text))) text = null;
   }
@@ -5671,7 +5676,7 @@ async function webSearchViaGemini(query: string, geminiKey: string): Promise<str
  *  is given a `web_search` TOOL (backed by Gemini grounding) so it can look up current
  *  facts mid-draft instead of guessing — bounded by hard round/search caps. Returns
  *  null on missing key / repeated failure / timeout (the fusion then uses Gemini only). */
-async function fetchDeepSeekDraft(systemContent: string, userContent: string, key: string, geminiKey?: string): Promise<string | null> {
+async function fetchDeepSeekDraft(systemContent: string, userContent: string, key: string, geminiKey?: string, opts?: { maxRounds?: number; maxSearches?: number }): Promise<string | null> {
   if (!key) return null;
 
   // On phones/tablets, skip DeepSeek's own web searches entirely: they add extra
@@ -5696,8 +5701,8 @@ async function fetchDeepSeekDraft(systemContent: string, userContent: string, ke
 
   // Desktop only (webEnabled is false on mobile): keep the grounding burst modest
   // so it doesn't starve the report's own Gemini calls.
-  const MAX_ROUNDS = 4;
-  const MAX_SEARCHES = 4;
+  const MAX_ROUNDS = opts?.maxRounds ?? 4;
+  const MAX_SEARCHES = opts?.maxSearches ?? 4;
   let searches = 0;
 
   for (let round = 0; round < MAX_ROUNDS; round++) {
