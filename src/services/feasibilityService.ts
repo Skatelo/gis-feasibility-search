@@ -183,14 +183,20 @@ function pumpGeminiLane(lane: GeminiLane): void {
   next();
 }
 function queueGemini<T>(task: () => Promise<T>, priority: GeminiPriority = 'low', laneKind: 'primary' | 'background' = 'primary'): Promise<T> {
-  // 'high' and 'low' requests fire IMMEDIATELY and in PARALLEL — the report,
-  // zoning, tree count, rates, utilities, cost estimate all pull at the same
-  // time (background features use Gemini key #2 when configured, so the load
-  // spreads over two quota pools; every caller has its own 429/5xx backoff).
-  // ONLY 'idle' bulk work (comp exterior-photo picks — dozens of vision calls)
-  // stays serialized so it can never eat the quota the sections need.
-  if (priority !== 'idle') return task();
-  const lane = geminiLanes[laneKind === 'background' && hasSecondGeminiKey() ? 1 : 0];
+  // Primary-key, user-facing work fires IMMEDIATELY and in PARALLEL so it stays
+  // fast: the report, chat and zoning ('high'), plus any primary-lane 'low'.
+  // Two kinds of work are SERIALIZED through a single-slot lane — one request at
+  // a time, spaced by GEMINI_SPACING_MS:
+  //  · 'idle' bulk work (comp exterior-photo picks) — must never eat the quota
+  //    the sections need; and
+  //  · BACKGROUND section lookups on key #2 ('low' + laneKind 'background') —
+  //    cost estimate, takeoff, tree count/rates and utilities otherwise hit
+  //    key #2 all at once and trip its per-minute quota (429). Running them
+  //    one-at-a-time keeps the second key under its limit.
+  const background = laneKind === 'background' && hasSecondGeminiKey();
+  const serialize = priority === 'idle' || (background && priority !== 'high');
+  if (!serialize) return task();
+  const lane = geminiLanes[background ? 1 : 0];
   return new Promise<T>((resolve, reject) => {
     const start = () => {
       task().then(resolve, reject).finally(() => {
