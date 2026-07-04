@@ -220,14 +220,15 @@ export function perplexityConfigured(): boolean {
 
 export interface PplxResult { title: string; url: string; snippet: string; date?: string }
 
-/** One POST to the Search API (one batch of up to 5 queries). Browser-direct
- *  first; transparent fall back to the Netlify proxy when CORS blocks it.
- *  2 attempts per route on transient failures. */
+/** One POST to the Search API (one batch of up to 5 queries). Same-origin proxy
+ *  FIRST — /.netlify/functions/perplexity works both in prod (Netlify function)
+ *  and in dev (Vite server proxy), and skips the CORS-doomed browser-direct
+ *  call; the direct URL stays only as a last-ditch route. 2 attempts per route. */
 async function perplexitySearchRequest(body: Record<string, unknown>, key: string): Promise<any | null> {
   const payload = JSON.stringify(body);
   const routes: { url: string; timeout: number }[] = [
-    { url: 'https://api.perplexity.ai/search', timeout: 25000 },
     { url: '/.netlify/functions/perplexity', timeout: 25000 },
+    { url: 'https://api.perplexity.ai/search', timeout: 25000 },
   ];
   for (const route of routes) {
     for (let attempt = 0; attempt < 2; attempt++) {
@@ -4886,17 +4887,21 @@ export async function fetchGoogleDistanceMatrixComps(
 /** A grounded (Google-Search) Gemini text call with ONE retry on a transient
  *  rate-limit/5xx — so the cost estimate & material takeoff don't fail (and the
  *  card doesn't vanish) when they fire alongside the report's Gemini burst. */
-async function groundedGeminiText(geminiKey: string, prompt: string, systemText: string, timeoutMs: number, searchQueries?: string[]): Promise<string | null> {
+async function groundedGeminiText(geminiKey: string, prompt: string, systemText: string, timeoutMs: number, searchQueries?: string[], diag?: { perplexityAttempted: boolean; perplexitySources: number }): Promise<string | null> {
   const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=${geminiKey}`;
   // PERPLEXITY MODE (key configured + queries provided): the live searching
   // runs on the Perplexity Search API — all queries in parallel batches, many
   // ranked sources with extracted content — and Gemini synthesizes from those
   // sources WITHOUT the google_search tool (no grounding quota, no grounding
-  // outages). Legacy Google-Search grounding remains the fallback.
+  // outages). Legacy Google-Search grounding remains the fallback. When a `diag`
+  // object is passed, it records whether Perplexity was attempted and how many
+  // sources came back, so callers can tell a Perplexity miss from a Gemini miss.
   let effectivePrompt = prompt;
   let usePerplexity = false;
   if (searchQueries && searchQueries.length && perplexityConfigured()) {
-    const { block } = await perplexityResearchBlock(searchQueries);
+    if (diag) diag.perplexityAttempted = true;
+    const { block, urls } = await perplexityResearchBlock(searchQueries);
+    if (diag) diag.perplexitySources = urls.length;
     if (block) { effectivePrompt = prompt + block; usePerplexity = true; }
   }
   const body = JSON.stringify({
@@ -5606,6 +5611,7 @@ STRICT PRICING RULES — REAL FIGURES ONLY:
   // retry covers a transient miss. (No Perplexity key → Google grounding.)
   const jur = place ? `${place} NC` : `${county} County NC`;
   const yr = new Date().getFullYear();
+  const diag = { perplexityAttempted: false, perplexitySources: 0 };
   const text = await groundedGeminiText(getBackgroundGeminiKey(), prompt, utilitiesSystem, 90000, [
     `${jur} water sewer tap connection impact fee schedule ${yr}`,
     `${jur} water sewer authority residential connection fees`,
@@ -5613,8 +5619,17 @@ STRICT PRICING RULES — REAL FIGURES ONLY:
     `${jur} zoning permit driveway permit fee`,
     `well drilling cost ${county} County NC ${yr}`,
     `septic system installation cost perc test ${county} County NC`,
-  ]);
-  if (!text) throw new Error('The live fee-schedule search did not answer (a slow or rate-limited moment) — tap Retry.');
+  ], diag);
+  if (!text) {
+    // Distinguish the two failure modes so the fix is obvious to the user:
+    if (diag.perplexityAttempted && diag.perplexitySources === 0) {
+      // Perplexity was configured but returned nothing — the search did not
+      // reach the API (bad/missing key, or the /.netlify/functions/perplexity
+      // proxy is unavailable) — and the Gemini Google-Search fallback also failed.
+      throw new Error('Live search failed: Perplexity returned no sources — check your Perplexity API key in Account Settings — and the Gemini fallback did not answer either. Tap Retry.');
+    }
+    throw new Error(`Live search failed: the Gemini synthesis step was slow or rate-limited (Perplexity ${diag.perplexityAttempted ? `returned ${diag.perplexitySources} sources` : 'not configured'}). Tap Retry — adding a second Gemini key spreads the load.`);
+  }
   const m = text.match(/```json\s*([\s\S]*?)\s*```/) || text.match(/\{[\s\S]*\}/);
   if (!m) throw new Error('The live search answered in an unexpected format — tap Retry.');
 
