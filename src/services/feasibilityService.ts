@@ -15,6 +15,8 @@ export interface UserKeys {
    *  runs on the Perplexity Search API (parallel batched queries, many ranked
    *  sources) instead of Gemini's Google-Search grounding. */
   perplexity?: string;
+  /** Mapbox public access token (pk.…) — satellite base map for the parcel aerial view. */
+  mapbox?: string;
   realtyApi?: string;
   deepSeek?: string;
   rentCast?: string;
@@ -3742,6 +3744,10 @@ function getRealtyApiKey(): string {
 function getDeepSeekKey(): string {
   return getUserKeys().deepSeek || (import.meta.env.VITE_DEEPSEEK_API_KEY as string | undefined) || "";
 }
+/** Mapbox public access token for the satellite base map (Account Settings or env). */
+export function getMapboxToken(): string {
+  return (getUserKeys().mapbox || (import.meta.env.VITE_MAPBOX_TOKEN as string | undefined) || '').trim();
+}
 
 // Per-platform property-type vocabularies (exact tokens from each platform's
 // OpenAPI spec). Land / lots are deliberately excluded — comps are completed
@@ -5566,8 +5572,7 @@ export async function fetchLandClearingEstimate(reportData: SiteFeasibilityData)
  * Returns null only when keys/address are missing.
  */
 export async function fetchUtilitiesEstimate(reportData: SiteFeasibilityData): Promise<UtilitiesEstimate | null> {
-  const keys = getUserKeys();
-  if (!keys.gemini) throw new Error('Add your Gemini API key in Account Settings to run the utilities & fees lookup on this device.');
+  if (!getDeepSeekKey()) throw new Error('Add your DeepSeek API key in Account Settings to run the utilities & fees lookup on this device.');
   const county = reportData.countyName || '';
   const zip = (String(reportData.inputAddress || '').match(/\b(\d{5})(?:-\d{4})?\b/) || [])[1] || '';
   const locality = zip ? `${reportData.inputAddress} (ZIP ${zip}, ${county} County, NC)` : `${reportData.inputAddress} (${county} County, NC)`;
@@ -5612,7 +5617,9 @@ STRICT PRICING RULES — REAL FIGURES ONLY:
   const jur = place ? `${place} NC` : `${county} County NC`;
   const yr = new Date().getFullYear();
   const diag = { perplexityAttempted: false, perplexitySources: 0 };
-  const text = await groundedGeminiText(getBackgroundGeminiKey(), prompt, utilitiesSystem, 90000, [
+  // Perplexity Search API does the live web search; DeepSeek V4 Pro synthesizes
+  // the strict verified-prices JSON from those ranked sources.
+  const text = await groundedDeepSeekText(prompt, utilitiesSystem, [
     `${jur} water sewer tap connection impact fee schedule ${yr}`,
     `${jur} water sewer authority residential connection fees`,
     `${jur} residential building permit fee schedule ${yr}`,
@@ -5625,10 +5632,10 @@ STRICT PRICING RULES — REAL FIGURES ONLY:
     if (diag.perplexityAttempted && diag.perplexitySources === 0) {
       // Perplexity was configured but returned nothing — the search did not
       // reach the API (bad/missing key, or the /.netlify/functions/perplexity
-      // proxy is unavailable) — and the Gemini Google-Search fallback also failed.
-      throw new Error('Live search failed: Perplexity returned no sources — check your Perplexity API key in Account Settings — and the Gemini fallback did not answer either. Tap Retry.');
+      // proxy is unavailable) — so DeepSeek had no sources to synthesize from.
+      throw new Error('Live search failed: Perplexity returned no sources — check your Perplexity API key in Account Settings. Tap Retry.');
     }
-    throw new Error(`Live search failed: Gemini was rate-limited or slow (Perplexity ${diag.perplexityAttempted ? `returned ${diag.perplexitySources} sources` : 'not configured'}). ${hasSecondGeminiKey() ? 'The background key (#2) hit its per-minute quota — the section lookups can burst it at once. Tap Retry; if it persists, key #2 is on a low/free-tier quota.' : 'Tap Retry — add a second Gemini key in a separate Google project to give the background lookups their own quota.'}`);
+    throw new Error(`Live search failed: DeepSeek did not answer (Perplexity ${diag.perplexityAttempted ? `returned ${diag.perplexitySources} sources` : 'not configured'}). Check your DeepSeek API key in Account Settings, then tap Retry.`);
   }
   const m = text.match(/```json\s*([\s\S]*?)\s*```/) || text.match(/\{[\s\S]*\}/);
   if (!m) throw new Error('The live search answered in an unexpected format — tap Retry.');
@@ -5885,6 +5892,37 @@ async function postDeepSeekOnce(body: string, key: string): Promise<any | null> 
     }
   }
   return null;
+}
+
+/** Utilities-style grounded synthesis on DeepSeek instead of Gemini: Perplexity
+ *  runs the live web search, DeepSeek V4 Pro synthesizes the strict JSON from
+ *  those ranked sources. Mirrors groundedGeminiText's contract — returns the
+ *  model text, or null on missing key / failure. `diag` records the Perplexity
+ *  outcome so callers can tell a search miss from a synthesis miss. */
+async function groundedDeepSeekText(prompt: string, systemText: string, searchQueries: string[], diag?: { perplexityAttempted: boolean; perplexitySources: number }): Promise<string | null> {
+  const key = getDeepSeekKey();
+  if (!key) return null;
+  let effectivePrompt = prompt;
+  if (searchQueries && searchQueries.length && perplexityConfigured()) {
+    if (diag) diag.perplexityAttempted = true;
+    const { block, urls } = await perplexityResearchBlock(searchQueries);
+    if (diag) diag.perplexitySources = urls.length;
+    if (block) effectivePrompt = prompt + block;
+  }
+  const body = JSON.stringify({
+    model: 'deepseek-v4-pro',
+    messages: [
+      { role: 'system', content: systemText },
+      { role: 'user', content: effectivePrompt },
+    ],
+    stream: false,
+    thinking: { type: 'disabled' },
+    temperature: 0.2,
+    max_tokens: 4000,
+  });
+  const msg = await postDeepSeekOnce(body, key);
+  const content = msg?.content;
+  return (typeof content === 'string' && content.trim()) ? content : null;
 }
 
 /** A single live web search. PERPLEXITY MODE (key configured): raw ranked

@@ -695,7 +695,6 @@ export const FeasibilitySearch: FC = () => {
   const [costError, setCostError] = useState(false);
   // Manual cost mode: the Development Costs estimate waits behind a
   // "Generate Cost Estimate" button (like the AI report) instead of auto-running.
-  const [costPending, setCostPending] = useState(false);
   const [materialTakeoff, setMaterialTakeoff] = useState<MaterialTakeoff | null>(null);
   const [landClearing, setLandClearing] = useState<LandClearingEstimate | null>(null);
   const [landClearingLoading, setLandClearingLoading] = useState(false);
@@ -1039,19 +1038,14 @@ export const FeasibilitySearch: FC = () => {
     // Enformion records (property/mortgage/transactions, debt, tenant history)
     // fire alongside — they render in their own card as each search resolves.
     fetchEnformionRecords(reportData, seq);
-    // The construction-cost estimate + takeoff wait behind the "Generate Cost
-    // Estimate" button (like the AI report) — this also frees the Gemini
-    // request lane so the tree & utilities lookups finish faster.
-    setCostPending(true);
-    return Promise.resolve(null);
+    // The construction-cost estimate + material takeoff run as part of the
+    // search and fold straight into the AI report's Development Cost section —
+    // there is no separate "Generate Cost Estimate" button.
+    return runCostTakeoffLookup(reportData, seq);
   };
 
-  // Manual mode: run the cost estimate + material takeoff on the user's click.
-  const startCostEstimateManually = () => {
-    if (!data) return;
-    setCostPending(false);
-    runCostTakeoffLookup(data, searchSeqRef.current);
-  };
+  // (The construction-cost estimate now runs as part of the search / AI report —
+  //  no separate "Generate Cost Estimate" button.)
 
   // Re-run the comps for the current parcel at the chosen max DRIVING-mile
   // radius (3 / 5 / 10). EVERY pill click triggers a FRESH comps run for that
@@ -2478,7 +2472,6 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
     setCostEstimate(null);
     setCostLoading(false);
     setCostError(false);
-    setCostPending(false);
     setMaterialTakeoff(null);
     setLandClearing(null);
     setLandClearingLoading(false);
@@ -2646,32 +2639,22 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
   // Material Takeoff, now rendered INSIDE the AI Feasibility Report (injected
   // at its Development Cost section) instead of as a standalone left-column
   // card. Stays visible through loading/error with its own Retry.
-  const developmentCostSection = (costPending || costEstimate || costLoading || materialTakeoff || costError) ? (
+  const developmentCostSection = (costEstimate || costLoading || materialTakeoff || costError) ? (
     <div className="report-devcost-section" style={{ margin: '12px 0', padding: '12px 14px', border: '1px solid var(--bg-card-border)', borderRadius: '10px', background: 'var(--bg-card-hover, rgba(148, 163, 184, 0.07))' }}>
       <h3 className="registry-card-header" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
         <Hammer size={16} style={{ color: 'var(--primary)' }} />
         <span>Development Costs — Instant Construction Cost Estimate</span>
-        {!costPending && (
-          <button
-            type="button"
-            className="enf-retry-btn"
-            title="Re-run the local construction-cost estimate & material takeoff"
-            disabled={costLoading}
-            onClick={() => { if (data) runCostTakeoffLookup(data, searchSeqRef.current); }}
-          >
-            {costLoading ? <Loader2 size={13} className="spinner" /> : <History size={13} />}
-            <span>{costLoading ? 'Pricing…' : 'Retry'}</span>
-          </button>
-        )}
+        <button
+          type="button"
+          className="enf-retry-btn"
+          title="Re-run the local construction-cost estimate & material takeoff"
+          disabled={costLoading}
+          onClick={() => { if (data) runCostTakeoffLookup(data, searchSeqRef.current); }}
+        >
+          {costLoading ? <Loader2 size={13} className="spinner" /> : <History size={13} />}
+          <span>{costLoading ? 'Pricing…' : 'Retry'}</span>
+        </button>
       </h3>
-      {costPending && (
-        <div className="report-manual">
-          <p className="report-manual-text">An itemized new-build budget at current LOCAL prices — labor anchored to real BLS wages, materials priced near this ZIP, plus a full material takeoff — is ready to generate for this parcel.</p>
-          <button type="button" className="report-generate-btn" onClick={startCostEstimateManually}>
-            <Hammer size={16} /> Generate Cost Estimate
-          </button>
-        </div>
-      )}
 
                   {costError && !costEstimate && !materialTakeoff ? (
                     <div className="cost-loading" style={{ flexDirection: 'column', alignItems: 'flex-start', gap: '8px' }}>

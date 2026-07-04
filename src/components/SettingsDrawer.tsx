@@ -27,6 +27,8 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
   const [showGeminiKey2, setShowGeminiKey2] = useState(false);
   const [perplexityKey, setPerplexityKey] = useState('');
   const [showPerplexityKey, setShowPerplexityKey] = useState(false);
+  const [mapboxToken, setMapboxToken] = useState('');
+  const [showMapboxToken, setShowMapboxToken] = useState(false);
   const [enformionName, setEnformionName] = useState('');
   const [enformionPassword, setEnformionPassword] = useState('');
   const [showEnformionPassword, setShowEnformionPassword] = useState(false);
@@ -55,6 +57,7 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
       setGeminiKey(activeUser.keys?.gemini || '');
       setGeminiKey2(activeUser.keys?.gemini2 || '');
       setPerplexityKey(activeUser.keys?.perplexity || '');
+      setMapboxToken(activeUser.keys?.mapbox || '');
       setEnformionName(activeUser.keys?.enformionApName || '');
       setEnformionPassword(activeUser.keys?.enformionApPassword || '');
       setRealtyApiKey(activeUser.keys?.realtyApi || '');
@@ -91,6 +94,7 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
       gemini: geminiKey.trim(),
       gemini2: geminiKey2.trim(),
       perplexity: perplexityKey.trim(),
+      mapbox: mapboxToken.trim(),
       enformionApName: enformionName.trim(),
       enformionApPassword: enformionPassword.trim(),
       realtyApi: realtyApiKey.trim(),
@@ -284,6 +288,32 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
                 </button>
               </div>
               <p className="field-help">When set, every live web lookup (utilities &amp; fee schedules, tree-service rates, construction costs, material prices, zoning web lookup, LLC skip trace, the AI report's research) runs on the Perplexity Search API — parallel batched queries returning many ranked sources — instead of Gemini's Google-Search grounding. Faster, more sources, immune to grounding outages. Get a key at perplexity.ai/settings/api.</p>
+            </div>
+
+            {/* Mapbox — satellite base map for the parcel aerial view */}
+            <div className="settings-field-group">
+              <div className="field-label-row">
+                <label htmlFor="mapboxToken">Mapbox Access Token (satellite map)</label>
+                <span className="badge optional">Optional</span>
+              </div>
+              <div className="field-input-container">
+                <Key className="input-icon" size={16} />
+                <input
+                  id="mapboxToken"
+                  type={showMapboxToken ? "text" : "password"}
+                  placeholder="pk.eyJ…"
+                  value={mapboxToken}
+                  onChange={(e) => setMapboxToken(e.target.value)}
+                />
+                <button
+                  type="button"
+                  className="field-toggle-btn"
+                  onClick={() => setShowMapboxToken(!showMapboxToken)}
+                >
+                  {showMapboxToken ? <EyeOff size={16} /> : <Eye size={16} />}
+                </button>
+              </div>
+              <p className="field-help">When set, the parcel aerial map uses Mapbox satellite imagery. Get a public token (starts with pk.) at account.mapbox.com/access-tokens. Google Street View continues to render beside it.</p>
             </div>
 
             {/* Enformion Go — skip tracing (phones, emails, relatives) */}
