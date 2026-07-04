@@ -5605,7 +5605,7 @@ Return ONLY a JSON object in a \`\`\`json code block:
 STRICT PRICING RULES — REAL FIGURES ONLY:
 - Each cost is ONE EXACT DOLLAR AMOUNT, never a range. Public taps: the exact published fee for the standard residential size. Well & septic: the single most typical current LOCAL installed cost for this county.
 - Every dollar figure MUST come from a page you actually found with Google Search: the utility authority's CURRENT published fee schedule / rate ordinance for tap-connection-impact fees, the jurisdiction's CURRENT adopted permit fee schedule, or named LOCAL well-drilling & septic contractors' current pricing for this county.
-- List in "sources" the exact URLs the figures came from. A figure without a source URL is not allowed.
+- List in "sources" EVERY distinct source URL you used across all the lines — aim for 6–12 different local sources (fee schedules, rate ordinances, contractor pages), not just one or two. A figure without a source URL is not allowed.
 - If you cannot find a verifiable current local figure for a line, you MUST leave it 0. NEVER estimate, NEVER use national/regional averages, NEVER guess.`;
   const utilitiesSystem = 'You are a site-development utilities and permit-fee analyst for North Carolina — any city, town, or county. Use web search to find the LOCAL water/sewer provider for the given jurisdiction, its CURRENT published tap/connection/impact fee schedule, the jurisdiction\'s CURRENT adopted residential permit fee schedule, and current local well & septic contractor pricing. Determine public-water and public-sewer availability SEPARATELY (a parcel may be public water + septic, well + public sewer, both, or neither) and report EACH cost as a single exact dollar amount. Return only the JSON. Every number must be traceable to a cited source URL; leave any unverifiable number 0 — never estimate or use regional averages.';
 
@@ -5725,7 +5725,7 @@ STRICT PRICING RULES — REAL FIGURES ONLY:
       ? 'No public water/sewer — this parcel needs a private well + septic.'
       : `${publicWater === 'available' ? 'Public water' : 'Well'} + ${publicSewer === 'available' ? 'public sewer' : 'septic'} required.`;
 
-  const sources = Array.isArray(o.sources) ? o.sources.map((s: any) => String(s)).filter((s: string) => /^https?:\/\//.test(s)).slice(0, 6) : [];
+  const sources = Array.isArray(o.sources) ? o.sources.map((s: any) => String(s)).filter((s: string) => /^https?:\/\//.test(s)).slice(0, 12) : [];
   return {
     locality: zip ? `ZIP ${zip} · ${county} County, NC` : `${county} County, NC`,
     jurisdiction, incorporated,
@@ -5905,7 +5905,10 @@ async function groundedDeepSeekText(prompt: string, systemText: string, searchQu
   let effectivePrompt = prompt;
   if (searchQueries && searchQueries.length && perplexityConfigured()) {
     if (diag) diag.perplexityAttempted = true;
-    const { block, urls } = await perplexityResearchBlock(searchQueries);
+    // Pull a WIDE set of sources for the utilities lookup — more results per
+    // query and a higher source cap so DeepSeek synthesizes from many fee
+    // schedules / contractor pages, not one or two.
+    const { block, urls } = await perplexityResearchBlock(searchQueries, { maxResultsPerQuery: 10, maxSources: 40 });
     if (diag) diag.perplexitySources = urls.length;
     if (block) effectivePrompt = prompt + block;
   }

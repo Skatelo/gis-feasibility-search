@@ -1038,10 +1038,10 @@ export const FeasibilitySearch: FC = () => {
     // Enformion records (property/mortgage/transactions, debt, tenant history)
     // fire alongside — they render in their own card as each search resolves.
     fetchEnformionRecords(reportData, seq);
-    // The construction-cost estimate + material takeoff run as part of the
-    // search and fold straight into the AI report's Development Cost section —
-    // there is no separate "Generate Cost Estimate" button.
-    return runCostTakeoffLookup(reportData, seq);
+    // The construction-cost estimate + material takeoff run ONLY when the
+    // "Generate AI Report" button is pressed (or with the auto-report) — a bare
+    // search produces no cost estimate until Generate AI Report is clicked.
+    return Promise.resolve(null);
   };
 
   // (The construction-cost estimate now runs as part of the search / AI report —
@@ -1135,10 +1135,19 @@ export const FeasibilitySearch: FC = () => {
 
   // Manual mode: kick off the report on the user's click, passing the cost
   // estimate (if it's finished) so Section 20 stays linked to the card.
-  const startReportManually = () => {
+  const startReportManually = async () => {
     if (!data) return;
     setReportPending(false);
-    generateInitialChatReport(data, costEstimate || undefined);
+    const seq = searchSeqRef.current;
+    // Cost estimate + material takeoff are gated behind THIS button — run them
+    // now and hand the figures to the report; if slow, generate anyway and the
+    // Development Cost card injects when it lands.
+    const est = await Promise.race([
+      runCostTakeoffLookup(data, seq),
+      new Promise<ConstructionCostEstimate | null>((r) => setTimeout(() => r(null), 45000)),
+    ]);
+    if (seq !== searchSeqRef.current) return;
+    generateInitialChatReport(data, est || costEstimate || undefined);
   };
 
   const generateInitialChatReport = async (reportData: SiteFeasibilityData, costEstimate?: ConstructionCostEstimate) => {
@@ -1646,6 +1655,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
   // Mapbox GL satellite base map — used for the parcel aerial when a Mapbox
   // access token is configured (Google Street View still renders beside it).
   const mapboxMapRef = useRef<any>(null);
+  const mapboxPopupRef = useRef<any>(null);
   const [mapboxLoaded, setMapboxLoaded] = useState(false);
 
   // Street View Refs & States
@@ -1760,9 +1770,10 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
     return () => { cancelled = true; if (timer) clearTimeout(timer); };
   }, []);
 
-  // Render/update the Mapbox satellite map + parcel polygon and auto-fit to the
-  // parcel. Active only when a Mapbox token is set (otherwise the Google aerial
-  // above renders as before). Google Street View continues to render beside it.
+  // Render/update the Mapbox satellite map: parcel polygon, per-side lot
+  // dimension labels, zoning label, a subject dot, and a PROPERTY BLUEPRINT info
+  // popup — auto-fit to the parcel at a high-res zoom. Active only when a Mapbox
+  // token is set (else the Google aerial above renders). Street View is beside it.
   useEffect(() => {
     const token = getMapboxToken();
     if (!token || !mapboxLoaded || !mapRef.current || !data) return;
@@ -1777,12 +1788,77 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
       : null;
     const parcel = rings ? { type: 'Feature', geometry: { type: 'Polygon', coordinates: rings }, properties: {} } : null;
 
+    // Per-side lot dimension labels (feet), merging near-collinear vertices into
+    // one side and dropping tiny corner chamfers — same rules as the Google map.
+    const R_FT = 20925524.9;
+    const toRad = (d: number) => (d * Math.PI) / 180;
+    const distFt = (a: number[], b: number[]) => {
+      const dLat = toRad(b[1] - a[1]), dLng = toRad(b[0] - a[0]);
+      const h = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(a[1])) * Math.cos(toRad(b[1])) * Math.sin(dLng / 2) ** 2;
+      return 2 * R_FT * Math.asin(Math.min(1, Math.sqrt(h)));
+    };
+    const bearing = (a: number[], b: number[]) => (Math.atan2(b[1] - a[1], b[0] - a[0]) * 180) / Math.PI;
+    const norm180 = (d: number) => { while (d > 180) d -= 360; while (d < -180) d += 360; return d; };
+    const COLLINEAR_TOL = 8, MIN_SIDE_FT = 12;
+    const labelFeatures: any[] = [];
+    (rings || []).forEach((ringRaw: number[][]) => {
+      if (!ringRaw || ringRaw.length < 4) return;
+      const last = ringRaw.length - 1;
+      const closed = ringRaw[0][0] === ringRaw[last][0] && ringRaw[0][1] === ringRaw[last][1];
+      const v = closed ? ringRaw.slice(0, -1) : ringRaw.slice();
+      const n = v.length;
+      if (n < 3) return;
+      const eb: number[] = [];
+      for (let i = 0; i < n; i++) eb.push(bearing(v[i], v[(i + 1) % n]));
+      let start = -1;
+      for (let i = 0; i < n; i++) if (Math.abs(norm180(eb[i] - eb[(i - 1 + n) % n])) > COLLINEAR_TOL) { start = i; break; }
+      if (start === -1) return;
+      const emit = (aIdx: number, bIdx: number) => {
+        const a = v[aIdx], b = v[bIdx];
+        const lenFt = distFt(a, b);
+        if (lenFt < MIN_SIDE_FT) return;
+        let ang = (Math.atan2(-(b[1] - a[1]), b[0] - a[0]) * 180) / Math.PI;
+        if (ang > 90) ang -= 180; else if (ang < -90) ang += 180;
+        labelFeatures.push({ type: 'Feature', geometry: { type: 'Point', coordinates: [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2] }, properties: { label: `${lenFt.toFixed(1)} ft`, angle: ang, kind: 'dim' } });
+      };
+      let sideStart = start, prev = eb[start];
+      for (let k = 0; k < n; k++) {
+        const e = (start + k) % n;
+        if (k > 0 && Math.abs(norm180(eb[e] - prev)) > COLLINEAR_TOL) { emit(sideStart, e); sideStart = e; }
+        prev = eb[e];
+      }
+      emit(sideStart, start);
+    });
+    const hasRealZoning = !!data.zoningSource && data.zoningCode !== 'N/A';
+    if (hasRealZoning) {
+      labelFeatures.push({ type: 'Feature', geometry: { type: 'Point', coordinates: [lng, lat] }, properties: { label: data.zoningSource === 'web' ? `Zoning: ${data.zoningCode} (web)` : `Zoning: ${data.zoningCode}`, angle: 0, kind: 'zoning' } });
+    }
+    const labelsFC = { type: 'FeatureCollection', features: labelFeatures };
+
+    const gr = data.gridics;
+    const infoHtml = `<div style="font-family:Arial,sans-serif;padding:6px;color:#000;font-size:12px;line-height:1.4;min-width:230px;max-width:270px;">
+        <strong style="color:#0070f3;font-size:13px;display:block;margin-bottom:4px;border-bottom:1px solid #eaeaea;padding-bottom:3px;">PROPERTY BLUEPRINT</strong>
+        <strong>County:</strong> ${data.countyName}<br>
+        <strong>Parcel PIN:</strong> ${data.parcelId}<br>
+        <strong>Address:</strong> ${data.inputAddress}<br>
+        <strong>Area:</strong> ${data.gisAcres ? data.gisAcres.toFixed(3) + ' ac (' + data.grossSf.toLocaleString() + ' SF)' : 'N/A'}<br>
+        <strong style="color:#008f5d;font-size:13px;display:block;margin-top:6px;margin-bottom:4px;border-bottom:1px solid #eaeaea;padding-bottom:3px;">ZONING &amp; STANDARDS</strong>
+        <strong>Zoning:</strong> ${data.zoningCode}<br>
+        <strong>Frontage:</strong> ${gr ? gr.frontageLengthFt.toFixed(1) + ' ft' : 'N/A'}<br>
+        <strong>Max Height (est.):</strong> ${gr ? gr.maxHeightFt + ' ft' : 'N/A'}<br>
+        <strong>FAR (est.):</strong> ${gr ? gr.floorAreaRatio : 'N/A'}<br>
+        <strong>Setbacks (est.):</strong> F ${gr ? gr.setbacks.frontFt : 0} | R ${gr ? gr.setbacks.rearFt : 0} | S ${gr ? gr.setbacks.sideFt : 0} ft<br>
+        <strong>Net Buildable (est.):</strong> ${gr ? gr.netBuildableAreaSqft.toLocaleString() + ' SF' : 'N/A'}<br>
+        <strong>Max Footprint (est.):</strong> ${gr ? gr.maxBuildingFootprintSqft.toLocaleString() + ' SF' : 'N/A'}
+      </div>`;
+
     if (!mapboxMapRef.current) {
       mapboxMapRef.current = new mapboxgl.Map({
         container: mapRef.current,
         style: 'mapbox://styles/mapbox/satellite-streets-v12',
         center: [lng, lat],
-        zoom: 17,
+        zoom: 18,
+        maxZoom: 22,
       });
       mapboxMapRef.current.addControl(new mapboxgl.NavigationControl(), 'top-right');
       mapboxMapRef.current.addControl(new mapboxgl.FullscreenControl(), 'top-right');
@@ -1791,26 +1867,46 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
     }
     const map = mapboxMapRef.current;
 
-    const applyParcel = () => {
+    const apply = () => {
       const empty = { type: 'FeatureCollection', features: [] as any[] };
-      const src = map.getSource('parcel');
-      if (src) {
-        src.setData(parcel || empty);
-      } else {
+      if (map.getSource('parcel')) map.getSource('parcel').setData(parcel || empty);
+      else {
         map.addSource('parcel', { type: 'geojson', data: parcel || empty });
         map.addLayer({ id: 'parcel-fill', type: 'fill', source: 'parcel', paint: { 'fill-color': '#00ff88', 'fill-opacity': 0.05 } });
         map.addLayer({ id: 'parcel-line', type: 'line', source: 'parcel', paint: { 'line-color': '#00ff88', 'line-width': 3 } });
       }
+      const centerFC = { type: 'FeatureCollection', features: [{ type: 'Feature', geometry: { type: 'Point', coordinates: [lng, lat] }, properties: {} }] };
+      if (map.getSource('parcel-center')) map.getSource('parcel-center').setData(centerFC);
+      else {
+        map.addSource('parcel-center', { type: 'geojson', data: centerFC });
+        map.addLayer({ id: 'parcel-center-dot', type: 'circle', source: 'parcel-center', paint: { 'circle-radius': 5, 'circle-color': '#10B981', 'circle-stroke-color': '#ffffff', 'circle-stroke-width': 2 } });
+      }
+      if (map.getSource('parcel-labels')) map.getSource('parcel-labels').setData(labelsFC);
+      else {
+        map.addSource('parcel-labels', { type: 'geojson', data: labelsFC });
+        map.addLayer({ id: 'parcel-dim-labels', type: 'symbol', source: 'parcel-labels', filter: ['==', ['get', 'kind'], 'dim'], layout: { 'text-field': ['get', 'label'], 'text-size': 12, 'text-rotate': ['get', 'angle'], 'text-rotation-alignment': 'viewport', 'text-allow-overlap': true, 'text-ignore-placement': true }, paint: { 'text-color': '#ffffff', 'text-halo-color': '#000000', 'text-halo-width': 1.4 } });
+        map.addLayer({ id: 'parcel-zoning-label', type: 'symbol', source: 'parcel-labels', filter: ['==', ['get', 'kind'], 'zoning'], layout: { 'text-field': ['get', 'label'], 'text-size': 13, 'text-offset': [0, -1.4], 'text-allow-overlap': true }, paint: { 'text-color': '#00ff88', 'text-halo-color': '#000000', 'text-halo-width': 1.6 } });
+      }
+      if (mapboxPopupRef.current) { mapboxPopupRef.current.remove(); mapboxPopupRef.current = null; }
+      mapboxPopupRef.current = new mapboxgl.Popup({ closeOnClick: false, maxWidth: '290px', offset: 10 }).setLngLat([lng, lat]).setHTML(infoHtml).addTo(map);
       if (rings) {
         const bounds = new mapboxgl.LngLatBounds();
         rings.forEach((ring: number[][]) => ring.forEach((c: number[]) => bounds.extend([c[0], c[1]])));
-        if (!bounds.isEmpty()) map.fitBounds(bounds, { padding: 40, maxZoom: 20, duration: 0 });
+        if (!bounds.isEmpty()) map.fitBounds(bounds, { padding: 60, maxZoom: 21, duration: 0 });
       }
     };
 
-    if (map.isStyleLoaded()) applyParcel();
-    else map.once('load', applyParcel);
+    if (map.isStyleLoaded()) apply();
+    else map.once('load', apply);
   }, [data, mapboxLoaded]);
+
+  // Reflow the Mapbox GL canvas when the panel width changes — Street View
+  // splitting the container would otherwise leave the map sized to the old width.
+  useEffect(() => {
+    if (!mapboxMapRef.current) return;
+    const t = setTimeout(() => { try { mapboxMapRef.current && mapboxMapRef.current.resize(); } catch { /* noop */ } }, 80);
+    return () => clearTimeout(t);
+  }, [hasStreetView, splitOrientation, mapboxLoaded, data]);
 
   // GIS toggle overlays on the Mapbox map — the same ArcGIS services the Google
   // map used, as Mapbox raster layers (WMS-style {bbox-epsg-3857} tiles). Kept
@@ -2363,16 +2459,29 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
       infoWindowInstanceRef.current.open(googleMapInstanceRef.current);
     }
 
-    // 5. Query Street View Availability
-    const svService = new google.maps.StreetViewService();
-    svService.getPanorama({ location: center, radius: 50 }, (svData: any, status: any) => {
-      if (status === 'OK' && svData && svData.location && svData.location.pano) {
-        setHasStreetView(true);
-      } else {
-        setHasStreetView(false);
-      }
-    });
+  }, [data, mapsLoaded]);
 
+  // Street View availability — runs INDEPENDENTLY of the base map. The Google
+  // aerial effect is skipped when Mapbox is active, so the panorama check can't
+  // live inside it (that's why Street View stopped appearing). Wider 200 m
+  // radius + OUTDOOR source so rural / set-back parcels still resolve a pano.
+  useEffect(() => {
+    if (!mapsLoaded || !data) { setHasStreetView(false); return; }
+    const g = (window as any).google;
+    if (!g?.maps?.StreetViewService) return;
+    const { lat, lng } = data.coordinates;
+    if (isNaN(lat) || isNaN(lng)) { setHasStreetView(false); return; }
+    let cancelled = false;
+    try {
+      const svc = new g.maps.StreetViewService();
+      const req: any = { location: { lat, lng }, radius: 200 };
+      if (g.maps.StreetViewSource && g.maps.StreetViewSource.OUTDOOR) req.source = g.maps.StreetViewSource.OUTDOOR;
+      svc.getPanorama(req, (svData: any, status: any) => {
+        if (cancelled) return;
+        setHasStreetView(status === 'OK' && !!(svData && svData.location && svData.location.pano));
+      });
+    } catch { setHasStreetView(false); }
+    return () => { cancelled = true; };
   }, [data, mapsLoaded]);
 
   // Handle Street View Panorama Initialization and updates
@@ -2712,7 +2821,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
       // Estimate" button, so estPromise resolves null immediately — if the user
       // generates it BEFORE the report, startReportManually links its figures
       // into the report's Development Cost section.
-      const estPromise = generateCostEstimates(result, seq);
+      generateCostEstimates(result, seq); // land-clearing / utilities / enformion
       // Manual mode: don't auto-run the report — show a "Generate AI Report" button.
       if (!getReportAutoGenerate()) {
         setReportPending(true);
@@ -2721,11 +2830,12 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
         // the brief wait for the estimate below.
         setChatLoading(true);
         setChatHistory([]);
-        // Give the estimate a brief head start so the report can cite it; if it
-        // isn't ready quickly, generate the report anyway (it estimates on its own
-        // and the card still fills in).
+        // Auto mode: the cost estimate + material takeoff run WITH the report.
+        // Give them a brief head start so the report can cite the figures; if not
+        // ready quickly, generate anyway and the Development Cost card injects when
+        // it lands.
         const est = await Promise.race([
-          estPromise,
+          runCostTakeoffLookup(result, seq),
           new Promise<ConstructionCostEstimate | null>((r) => setTimeout(() => r(null), 45000)),
         ]);
         if (seq !== searchSeqRef.current) return;
