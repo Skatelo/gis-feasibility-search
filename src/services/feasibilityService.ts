@@ -5576,26 +5576,28 @@ export async function fetchUtilitiesEstimate(reportData: SiteFeasibilityData): P
     ? `Inside the incorporated limits of ${place}, NC`
     : `Unincorporated ${county} County, NC (no municipal limits at this location)`;
 
-  const prompt = `For the property at ${locality}, determine UTILITIES availability and CURRENT LOCAL connection costs for building a home (${new Date().getFullYear()}).
+  const prompt = `For the property at ${locality}, determine (A) whether the address is served by PUBLIC water and PUBLIC sewer, needs a private WELL / SEPTIC, or is a MIX of the two, and (B) the CURRENT LOCAL cost of each applicable connection as a SINGLE EXACT DOLLAR AMOUNT (not a range), for building a home (${new Date().getFullYear()}).
 JURISDICTION AT THIS EXACT PARCEL (from the U.S. Census place boundaries): ${jurisdiction}.
 ${incorporated
-    ? `Because this parcel is INSIDE ${place}'s municipal limits, public water & sewer are typically available — find ${place}'s (or the county authority's) water and sewer tap/connection/impact fees.`
-    : `Because this parcel is in UNINCORPORATED county land, public sewer is usually NOT available and often no public water either — price a private well and a septic system unless you find evidence a public/community system actually reaches this specific area.`}
-1) Is PUBLIC/municipal WATER available to this parcel/area, and what is the water tap / connection / impact fee? Give the fee for the STANDARD RESIDENTIAL SERVICE SIZE and put that size in waterTapDetail (e.g. "3/4-inch service — City of Kannapolis fee schedule").
-2) Is PUBLIC/municipal SEWER available, and what is the sewer tap / connection / impact fee? Same: standard residential size in sewerTapDetail.
-3) If public water is NOT available, the CURRENT LOCAL cost to drill a private WELL (drilling + pump + connection).
-4) If public sewer is NOT available, the CURRENT LOCAL cost of a conventional SEPTIC system (perc/soil test + install).
+    ? `Because this parcel is INSIDE ${place}'s municipal limits, public water & sewer are typically available — confirm each MAIN actually reaches this street/address, then find ${place}'s (or the county authority's) EXACT water and sewer tap/connection/impact fee.`
+    : `Because this parcel is in UNINCORPORATED county land, public sewer is usually NOT available and often no public water either — treat it as private well + septic UNLESS you find evidence a public/community water or sewer main actually reaches this specific address/street. A MIX is common (e.g. a public water main on the road but a septic system for waste).`}
+DETERMINE AVAILABILITY SEPARATELY for water and for sewer — a parcel can be public water + septic, well + public sewer, both public, or well + septic. Base each call on whether a main actually serves THIS address, not merely the city limits. Then give ONE EXACT COST for each applicable line:
+1) PUBLIC/municipal WATER available at this address? If yes, the EXACT water tap / connection / impact fee for the STANDARD RESIDENTIAL SERVICE SIZE, with that size + fee-schedule name in waterTapDetail (e.g. "3/4-inch service — City of Kannapolis fee schedule"). These fees are fixed published amounts — give the exact figure, not a range.
+2) PUBLIC/municipal SEWER available at this address? If yes, the EXACT sewer tap / connection / impact fee for the standard residential size, with the size + schedule name in sewerTapDetail.
+3) If PUBLIC WATER is NOT available, the single MOST TYPICAL current LOCAL all-in cost to drill a private WELL (drilling + pump + connection) in this county.
+4) If PUBLIC SEWER is NOT available, the single MOST TYPICAL current LOCAL all-in cost of a conventional SEPTIC system (perc/soil test + install) in this county.
 5) The jurisdiction's CURRENT RESIDENTIAL PERMIT FEES from its adopted fee schedule: the flat residential ZONING permit fee, the flat DRIVEWAY permit fee (if it has one), and the typical TOTAL building + trade permits (building, electrical, plumbing, mechanical, inspections) for a NEW 1,400–1,800 sqft single-family home CALCULATED FROM the schedule's actual method (per-sqft or valuation-based). Note the calculation basis in permitNote.
 Name the local water/sewer authority if known.
 Return ONLY a JSON object in a \`\`\`json code block:
 \`\`\`json
-{ "publicWater": "available|not-available|unknown", "waterTapLow": 0, "waterTapHigh": 0, "waterTapDetail": "", "publicSewer": "available|not-available|unknown", "sewerTapLow": 0, "sewerTapHigh": 0, "sewerTapDetail": "", "wellLow": 0, "wellHigh": 0, "septicLow": 0, "septicHigh": 0, "zoningPermitFee": 0, "drivewayPermitFee": 0, "buildingPermitLow": 0, "buildingPermitHigh": 0, "permitNote": "", "provider": "", "sources": ["https://..."] }
+{ "publicWater": "available|not-available|unknown", "waterTap": 0, "waterTapDetail": "", "publicSewer": "available|not-available|unknown", "sewerTap": 0, "sewerTapDetail": "", "well": 0, "septic": 0, "zoningPermitFee": 0, "drivewayPermitFee": 0, "buildingPermitLow": 0, "buildingPermitHigh": 0, "permitNote": "", "provider": "", "sources": ["https://..."] }
 \`\`\`
 STRICT PRICING RULES — REAL FIGURES ONLY:
+- Each cost is ONE EXACT DOLLAR AMOUNT, never a range. Public taps: the exact published fee for the standard residential size. Well & septic: the single most typical current LOCAL installed cost for this county.
 - Every dollar figure MUST come from a page you actually found with Google Search: the utility authority's CURRENT published fee schedule / rate ordinance for tap-connection-impact fees, the jurisdiction's CURRENT adopted permit fee schedule, or named LOCAL well-drilling & septic contractors' current pricing for this county.
 - List in "sources" the exact URLs the figures came from. A figure without a source URL is not allowed.
 - If you cannot find a verifiable current local figure for a line, you MUST leave it 0. NEVER estimate, NEVER use national/regional averages, NEVER guess.`;
-  const utilitiesSystem = 'You are a site-development utilities and permit-fee analyst for North Carolina — any city, town, or county. Use web search to find the LOCAL water/sewer provider for the given jurisdiction, its CURRENT published tap/connection/impact fee schedule, the jurisdiction\'s CURRENT adopted residential permit fee schedule, and current local well & septic contractor pricing. Return only the JSON. Every number must be traceable to a cited source URL; leave any unverifiable number 0 — never estimate or use regional averages.';
+  const utilitiesSystem = 'You are a site-development utilities and permit-fee analyst for North Carolina — any city, town, or county. Use web search to find the LOCAL water/sewer provider for the given jurisdiction, its CURRENT published tap/connection/impact fee schedule, the jurisdiction\'s CURRENT adopted residential permit fee schedule, and current local well & septic contractor pricing. Determine public-water and public-sewer availability SEPARATELY (a parcel may be public water + septic, well + public sewer, both, or neither) and report EACH cost as a single exact dollar amount. Return only the JSON. Every number must be traceable to a cited source URL; leave any unverifiable number 0 — never estimate or use regional averages.';
 
   // Live searching on the Perplexity Search API (parallel batched queries →
   // many ranked fee-schedule sources), synthesis on Gemini with the strict
@@ -5635,13 +5637,15 @@ STRICT PRICING RULES — REAL FIGURES ONLY:
   const publicSewer = resolve(o.publicSewer);
 
   // REAL PRICES ONLY: a line is "verified" only when the grounded search
-  // returned an actual figure. Unverified lines carry NO dollar amount — no
-  // baseline ranges, no regional averages, no guesses.
-  const range = (lowRaw: any, highRaw: any): { low: number; high: number; verified: boolean } => {
-    const low = num(lowRaw), high = num(highRaw);
-    if (!low && !high) return { low: 0, high: 0, verified: false };
-    const lo = low || high, hi = Math.max(low, high);
-    return { low: lo, high: hi, verified: true };
+  // returned an actual figure. Each cost is now a SINGLE EXACT amount (low ===
+  // high) — an exact published tap fee, or the single typical local well/septic
+  // cost. Unverified lines carry NO dollar amount (no averages, no guesses). A
+  // legacy low/high pair is tolerated and collapsed to one figure for resilience.
+  const exact = (val: any, legacyLow?: any, legacyHigh?: any): { low: number; high: number; verified: boolean } => {
+    let v = num(val);
+    if (!v) { const lo = num(legacyLow), hi = num(legacyHigh); v = (lo && hi) ? Math.round((lo + hi) / 2) : (lo || hi); }
+    if (!v) return { low: 0, high: 0, verified: false };
+    return { low: v, high: v, verified: true };
   };
 
   const detailOf = (v: any) => { const s = String(v || '').trim(); return s ? s.slice(0, 120) : undefined; };
@@ -5649,19 +5653,19 @@ STRICT PRICING RULES — REAL FIGURES ONLY:
   const lines: UtilityLine[] = [];
   // WATER: public tap fee when served, else private well.
   if (publicWater === 'available') {
-    const r = range(o.waterTapLow, o.waterTapHigh);
-    lines.push({ name: 'Public water tap fee', kind: 'water', isPublic: true, status: 'available', ...r, detail: detailOf(o.waterTapDetail), note: 'municipal water tap / connection / impact fee' });
+    const r = exact(o.waterTap, o.waterTapLow, o.waterTapHigh);
+    lines.push({ name: 'Public water tap fee', kind: 'water', isPublic: true, status: 'available', ...r, detail: detailOf(o.waterTapDetail), note: 'municipal water tap / connection / impact fee (exact published fee)' });
   } else {
-    const r = range(o.wellLow, o.wellHigh);
-    lines.push({ name: 'Private well', kind: 'water', isPublic: false, status: publicWater, ...r, note: 'drill + pump + connection (no public water)' });
+    const r = exact(o.well, o.wellLow, o.wellHigh);
+    lines.push({ name: 'Private well', kind: 'water', isPublic: false, status: publicWater, ...r, note: 'drill + pump + connection — typical local cost (no public water)' });
   }
   // SEWER: public tap fee when served, else septic.
   if (publicSewer === 'available') {
-    const r = range(o.sewerTapLow, o.sewerTapHigh);
-    lines.push({ name: 'Public sewer tap fee', kind: 'sewer', isPublic: true, status: 'available', ...r, detail: detailOf(o.sewerTapDetail), note: 'municipal sewer tap / connection / impact fee' });
+    const r = exact(o.sewerTap, o.sewerTapLow, o.sewerTapHigh);
+    lines.push({ name: 'Public sewer tap fee', kind: 'sewer', isPublic: true, status: 'available', ...r, detail: detailOf(o.sewerTapDetail), note: 'municipal sewer tap / connection / impact fee (exact published fee)' });
   } else {
-    const r = range(o.septicLow, o.septicHigh);
-    lines.push({ name: 'Septic system', kind: 'sewer', isPublic: false, status: publicSewer, ...r, note: 'perc/soil test + conventional system install (no public sewer)' });
+    const r = exact(o.septic, o.septicLow, o.septicHigh);
+    lines.push({ name: 'Septic system', kind: 'sewer', isPublic: false, status: publicSewer, ...r, note: 'perc/soil test + conventional system install — typical local cost (no public sewer)' });
   }
 
   // Residential permit fees from the jurisdiction's adopted fee schedule —

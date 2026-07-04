@@ -3958,7 +3958,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                             {ln.detail && <div className="util-note util-detail">{ln.detail}</div>}
                             {ln.note && <div className="util-note">{ln.note}</div>}
                             {ln.verified ? (
-                              <div className="util-cost">{ln.low === ln.high ? `$${ln.low.toLocaleString()}` : `$${ln.low.toLocaleString()} – $${ln.high.toLocaleString()}`} <span className="util-verified-tag">verified local price</span></div>
+                              <div className="util-cost">{ln.low === ln.high ? `$${ln.low.toLocaleString()}` : `$${ln.low.toLocaleString()} – $${ln.high.toLocaleString()}`} <span className="util-verified-tag">{ln.isPublic ? 'exact published fee' : 'typical local cost'}</span></div>
                             ) : (
                               <div className="util-cost util-unpriced">No verified local price found — confirm with {utilities.provider || 'the local provider/contractor'}</div>
                             )}
@@ -3966,7 +3966,11 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                         ))}
                         {(utilities.totalLow > 0 || utilities.totalHigh > 0) && (
                           <div className="util-row util-total">
-                            <span>{utilities.totalLow === utilities.totalHigh ? 'Total tap fees (verified)' : 'Total to connect (verified items only)'}</span>
+                            <span>{utilities.publicWater === 'available' && utilities.publicSewer === 'available'
+                              ? 'Total tap fees (verified)'
+                              : utilities.publicWater !== 'available' && utilities.publicSewer !== 'available'
+                                ? 'Total well + septic (verified)'
+                                : 'Total to connect (verified)'}</span>
                             <span className="util-cost">{utilities.totalLow === utilities.totalHigh ? `$${utilities.totalLow.toLocaleString()}` : `$${utilities.totalLow.toLocaleString()} – $${utilities.totalHigh.toLocaleString()}`}</span>
                           </div>
                         )}
