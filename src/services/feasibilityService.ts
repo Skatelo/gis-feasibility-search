@@ -1993,6 +1993,11 @@ export function getLastEnformionShape(): string {
 export function getLastEnformionDetail(): string { return lastEnformionDiag.detail || ''; }
 export function enformionDiagMessage(): string {
   const d = lastEnformionDiag;
+  // "Access Denied (Code 0)" arrives as HTTP 400 with an error body — it is an
+  // ACCOUNT-side refusal (both hosts + the proxy were tried), not bad input.
+  if (/access\s*denied/i.test(d.detail || '')) {
+    return 'Enformion refused the request: Access Denied. This is account-side — verify in your Enformion dashboard (api.enformion.com) that the AP Name/Password in Account Settings are current, the access profile is ACTIVE with remaining credits, and no IP restriction is set on the profile (browser calls come from YOUR IP). Enformion support (supportgo@enformion.com) can confirm which of these tripped — then hit Retry.';
+  }
   if (d.status === 401 || d.status === 403) return 'Enformion rejected the credentials — check the AP Name / AP Password in Account Settings.';
   if (d.status === 404) return 'Enformion endpoint not found (HTTP 404) — the API host/route may have changed.';
   if (d.status === 0) {
@@ -2041,6 +2046,12 @@ async function enformionCall(path: string, searchType: string, body: any, timeou
   if (!k.enformionApName || !k.enformionApPassword) { lastEnformionDiag = { status: 0, reason: 'not configured' }; return null; }
   const payload = JSON.stringify(body);
 
+  // A refusal (400/402/403 — e.g. "Access Denied") on ONE host is NOT
+  // definitive: Enformion access profiles are frequently valid on only ONE of
+  // the two hosts (devapi vs api), so EVERY host — and then the server-side
+  // proxy — gets a chance before giving up. Remembered for the final message.
+  let refusal: typeof lastEnformionDiag | null = null;
+
   // 1. Direct browser → Enformion.
   const hosts = enfGoodHost ? [enfGoodHost, ...ENF_DIRECT_HOSTS.filter((h) => h !== enfGoodHost)] : ENF_DIRECT_HOSTS;
   for (const host of hosts) {
@@ -2062,13 +2073,13 @@ async function enformionCall(path: string, searchType: string, body: any, timeou
       try { d = text ? JSON.parse(text) : null; } catch { /* non-JSON error page */ }
       const detail = humanEnfError(d) || (!res.ok && text ? text.slice(0, 200) : undefined);
       lastEnformionDiag = { status: res.status, host, reason: res.ok ? undefined : `HTTP ${res.status}`, shape: d != null ? describeShape(d) : undefined, detail };
-      if (res.ok) { enfGoodHost = host; return d; }
+      if (res.ok) { enfGoodHost = host; return d; } // success — pin this host
       if (res.status === 400 || res.status === 402 || res.status === 403) {
-        // Definitive refusal (bad input / not permitted / auth) — the host
-        // answered, so remember it and don't hammer retries.
-        enfGoodHost = host;
-        console.warn(`Enformion ${path} via ${host}: HTTP ${res.status}.`, detail || '');
-        return null;
+        // Refusal on THIS host — remember it, but keep trying the other host
+        // and the proxy (the same credentials may be accepted there).
+        refusal = lastEnformionDiag;
+        console.warn(`Enformion ${path} via ${host}: HTTP ${res.status} — trying the next route.`, detail || '');
+        continue;
       }
       console.warn(`Enformion ${path} via ${host}: HTTP ${res.status}.`, detail || '');
       // 404 / 5xx → try the next host.
@@ -2077,7 +2088,9 @@ async function enformionCall(path: string, searchType: string, body: any, timeou
 
   // 2. Fallback: the serverless proxy (kept for environments where a direct
   //    call can't connect, e.g. if Enformion ever locks down CORS).
-  for (const host of ['dev', 'prod']) {
+  // Prod first here: the proxy sends the server-to-server header set (no
+  // galaxy-client-type), which is what api.enformion.com profiles expect.
+  for (const host of ['prod', 'dev']) {
     try {
       const res = await fetchWithTimeout('/.netlify/functions/enformion', Math.min(timeoutMs, 20000), {
         method: 'POST',
@@ -2098,10 +2111,18 @@ async function enformionCall(path: string, searchType: string, body: any, timeou
       lastEnformionDiag = { status: Number(env?.status) || 0, host: env?.host, reason: env?.error, shape: d != null ? describeShape(d) : undefined, detail };
       if (env?.ok) return d;
       const st = Number(env?.status) || 0;
-      if (st === 400 || st === 402 || st === 403) return null; // definitive refusal
+      if (st === 400 || st === 402 || st === 403) {
+        // Refusal via this route too — remember it and try the other host.
+        refusal = lastEnformionDiag;
+        console.warn(`Enformion ${path} via proxy(${host}): HTTP ${st} — trying the next route.`, detail || env?.error || '');
+        continue;
+      }
       console.warn(`Enformion ${path} via proxy(${host}): HTTP ${st}.`, detail || env?.error || '');
     } catch { lastEnformionDiag = { status: 0, reason: 'network' }; }
   }
+  // Every route failed. Surface the REFUSAL (the most informative diagnosis)
+  // rather than whatever transient error happened to come last.
+  if (refusal) lastEnformionDiag = refusal;
   return null;
 }
 
