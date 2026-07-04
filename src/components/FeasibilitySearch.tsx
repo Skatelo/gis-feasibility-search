@@ -1727,30 +1727,37 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
     return () => { cancelled = true; if (timer) clearTimeout(timer); };
   }, []);
 
-  // Load Mapbox GL JS + CSS (CDN) once when a Mapbox access token is configured.
-  // The parcel aerial then renders on Mapbox satellite instead of the Google map.
+  // Load Mapbox GL JS + CSS (CDN) when a Mapbox access token is configured, then
+  // flip mapboxLoaded so the satellite map renders. POLLS (like the Google
+  // loader) instead of trusting a one-shot 'load' event — the token/session can
+  // arrive after mount and a cached/already-present script never re-fires load,
+  // both of which left mapboxLoaded stuck false. The poll catches window.mapboxgl
+  // however it became available.
   useEffect(() => {
-    if (!getMapboxToken()) return;
-    if ((window as any).mapboxgl) { setMapboxLoaded(true); return; }
-    if (!document.getElementById('mapboxglCss')) {
-      const link = document.createElement('link');
-      link.id = 'mapboxglCss';
-      link.rel = 'stylesheet';
-      link.href = 'https://api.mapbox.com/mapbox-gl-js/v3.6.0/mapbox-gl.css';
-      document.head.appendChild(link);
-    }
-    let script = document.getElementById('mapboxglScript') as HTMLScriptElement | null;
-    if (!script) {
-      script = document.createElement('script');
-      script.id = 'mapboxglScript';
-      script.src = 'https://api.mapbox.com/mapbox-gl-js/v3.6.0/mapbox-gl.js';
-      script.async = true;
-      document.head.appendChild(script);
-    }
-    const onReady = () => { if ((window as any).mapboxgl) setMapboxLoaded(true); };
-    script.addEventListener('load', onReady);
-    if ((window as any).mapboxgl) setMapboxLoaded(true);
-    return () => { script?.removeEventListener('load', onReady); };
+    let cancelled = false;
+    let timer: number | undefined;
+    const tick = () => {
+      if (cancelled) return;
+      if (!getMapboxToken()) { timer = window.setTimeout(tick, 1000); return; }
+      if ((window as any).mapboxgl) { setMapboxLoaded(true); return; }
+      if (!document.getElementById('mapboxglCss')) {
+        const link = document.createElement('link');
+        link.id = 'mapboxglCss';
+        link.rel = 'stylesheet';
+        link.href = 'https://api.mapbox.com/mapbox-gl-js/v3.6.0/mapbox-gl.css';
+        document.head.appendChild(link);
+      }
+      if (!document.getElementById('mapboxglScript')) {
+        const script = document.createElement('script');
+        script.id = 'mapboxglScript';
+        script.src = 'https://api.mapbox.com/mapbox-gl-js/v3.6.0/mapbox-gl.js';
+        script.async = true;
+        document.head.appendChild(script);
+      }
+      timer = window.setTimeout(tick, 700);
+    };
+    tick();
+    return () => { cancelled = true; if (timer) clearTimeout(timer); };
   }, []);
 
   // Render/update the Mapbox satellite map + parcel polygon and auto-fit to the
