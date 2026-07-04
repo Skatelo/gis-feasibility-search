@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import type { FormEvent, KeyboardEvent, FC } from 'react';
 import { createRoot } from 'react-dom/client';
-import { executeLandAnalysis, chatWithGemini, chatFollowUp, getUserKeys, detectNcCounty, lookupParcelById, fetchConstructionCostEstimate, fetchMaterialTakeoff, fetchLandClearingEstimate, fetchUtilitiesEstimate, fetchGoogleDistanceMatrixComps, getCompPrefs, getReportAutoGenerate, enformionConfigured, enformionContactEnrich, enformionPersonSearch, enformionBusinessSearch, looksLikeBusiness, enformionDiagMessage, getLastEnformionShape, getLastEnformionDetail, enformionPropertySearch, ncAddressSuggestions } from '../services/feasibilityService';
+import { executeLandAnalysis, chatWithGemini, chatFollowUp, getUserKeys, getMapboxToken, detectNcCounty, lookupParcelById, fetchConstructionCostEstimate, fetchMaterialTakeoff, fetchLandClearingEstimate, fetchUtilitiesEstimate, fetchGoogleDistanceMatrixComps, getCompPrefs, getReportAutoGenerate, enformionConfigured, enformionContactEnrich, enformionPersonSearch, enformionBusinessSearch, looksLikeBusiness, enformionDiagMessage, getLastEnformionShape, getLastEnformionDetail, enformionPropertySearch, ncAddressSuggestions } from '../services/feasibilityService';
 import type { SkipTraceContact, EnformionPropertyRecord } from '../services/feasibilityService';
 import type { ChatMessage, ChatAttachment } from '../services/feasibilityService';
 import { saveReport, getReportEtaMs, recordReportDuration } from '../services/reportStore';
@@ -1643,6 +1643,10 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
   const infoWindowInstanceRef = useRef<any>(null);
   const labelsInstanceRef = useRef<any[]>([]);
   const markersInstanceRef = useRef<any[]>([]);
+  // Mapbox GL satellite base map — used for the parcel aerial when a Mapbox
+  // access token is configured (Google Street View still renders beside it).
+  const mapboxMapRef = useRef<any>(null);
+  const [mapboxLoaded, setMapboxLoaded] = useState(false);
 
   // Street View Refs & States
   const streetViewRef = useRef<HTMLDivElement>(null);
@@ -1723,6 +1727,84 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
     return () => { cancelled = true; if (timer) clearTimeout(timer); };
   }, []);
 
+  // Load Mapbox GL JS + CSS (CDN) once when a Mapbox access token is configured.
+  // The parcel aerial then renders on Mapbox satellite instead of the Google map.
+  useEffect(() => {
+    if (!getMapboxToken()) return;
+    if ((window as any).mapboxgl) { setMapboxLoaded(true); return; }
+    if (!document.getElementById('mapboxglCss')) {
+      const link = document.createElement('link');
+      link.id = 'mapboxglCss';
+      link.rel = 'stylesheet';
+      link.href = 'https://api.mapbox.com/mapbox-gl-js/v3.6.0/mapbox-gl.css';
+      document.head.appendChild(link);
+    }
+    let script = document.getElementById('mapboxglScript') as HTMLScriptElement | null;
+    if (!script) {
+      script = document.createElement('script');
+      script.id = 'mapboxglScript';
+      script.src = 'https://api.mapbox.com/mapbox-gl-js/v3.6.0/mapbox-gl.js';
+      script.async = true;
+      document.head.appendChild(script);
+    }
+    const onReady = () => { if ((window as any).mapboxgl) setMapboxLoaded(true); };
+    script.addEventListener('load', onReady);
+    if ((window as any).mapboxgl) setMapboxLoaded(true);
+    return () => { script?.removeEventListener('load', onReady); };
+  }, []);
+
+  // Render/update the Mapbox satellite map + parcel polygon and auto-fit to the
+  // parcel. Active only when a Mapbox token is set (otherwise the Google aerial
+  // above renders as before). Google Street View continues to render beside it.
+  useEffect(() => {
+    const token = getMapboxToken();
+    if (!token || !mapboxLoaded || !mapRef.current || !data) return;
+    const mapboxgl = (window as any).mapboxgl;
+    if (!mapboxgl) return;
+    const { lat, lng } = data.coordinates;
+    if (isNaN(lat) || isNaN(lng)) return;
+    mapboxgl.accessToken = token;
+
+    const rings = (data.boundaryRings && data.boundaryRings.length > 0)
+      ? data.boundaryRings.map((ring: number[][]) => ring.map((c: number[]) => [c[0], c[1]]))
+      : null;
+    const parcel = rings ? { type: 'Feature', geometry: { type: 'Polygon', coordinates: rings }, properties: {} } : null;
+
+    if (!mapboxMapRef.current) {
+      mapboxMapRef.current = new mapboxgl.Map({
+        container: mapRef.current,
+        style: 'mapbox://styles/mapbox/satellite-streets-v12',
+        center: [lng, lat],
+        zoom: 17,
+      });
+      mapboxMapRef.current.addControl(new mapboxgl.NavigationControl(), 'top-right');
+      mapboxMapRef.current.addControl(new mapboxgl.FullscreenControl(), 'top-right');
+    } else {
+      mapboxMapRef.current.setCenter([lng, lat]);
+    }
+    const map = mapboxMapRef.current;
+
+    const applyParcel = () => {
+      const empty = { type: 'FeatureCollection', features: [] as any[] };
+      const src = map.getSource('parcel');
+      if (src) {
+        src.setData(parcel || empty);
+      } else {
+        map.addSource('parcel', { type: 'geojson', data: parcel || empty });
+        map.addLayer({ id: 'parcel-fill', type: 'fill', source: 'parcel', paint: { 'fill-color': '#00ff88', 'fill-opacity': 0.05 } });
+        map.addLayer({ id: 'parcel-line', type: 'line', source: 'parcel', paint: { 'line-color': '#00ff88', 'line-width': 3 } });
+      }
+      if (rings) {
+        const bounds = new mapboxgl.LngLatBounds();
+        rings.forEach((ring: number[][]) => ring.forEach((c: number[]) => bounds.extend([c[0], c[1]])));
+        if (!bounds.isEmpty()) map.fitBounds(bounds, { padding: 40, maxZoom: 20, duration: 0 });
+      }
+    };
+
+    if (map.isStyleLoaded()) applyParcel();
+    else map.once('load', applyParcel);
+  }, [data, mapboxLoaded]);
+
   // Fetch predictions with debouncing. Three sources so suggestions ALWAYS
   // appear: 1) Places AutocompleteSuggestion (the current API — required for
   // newer Google keys where the legacy service is denied), 2) legacy
@@ -1798,6 +1880,11 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
   // Render and update Google Map with satellite aerial imagery and parcel polygon overlay
   useEffect(() => {
     if (!mapsLoaded || !mapRef.current || !data) return;
+    // When a Mapbox access token is configured, the Mapbox satellite map (see the
+    // effect below) owns the aerial view — skip creating the Google base map so
+    // the two never fight for the same container. The GIS toggle overlays follow
+    // the Google map instance and simply no-op while Mapbox is active.
+    if (getMapboxToken()) return;
 
     const { lat, lng } = data.coordinates;
     if (isNaN(lat) || isNaN(lng)) {
