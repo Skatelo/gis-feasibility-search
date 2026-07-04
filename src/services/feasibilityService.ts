@@ -4908,46 +4908,35 @@ async function groundedGeminiText(geminiKey: string, prompt: string, systemText:
     systemInstruction: { parts: [{ text: systemText }] },
     ...(usePerplexity ? {} : { tools: [{ google_search: {} }] }),
   });
-  const primaryKey = (getUserKeys().gemini || '').trim();
-  // One key's worth of attempts: 3 tries with backoff (grounded generations are
-  // the slowest Gemini calls and the likeliest to hit a transient 429/timeout).
-  // Returns a non-empty string on success, '' on an empty candidate, or null on
-  // a hard failure (rate-limit exhausted, rejected key, or network error) so the
-  // caller can fall back to the other key.
-  const runOnKey = async (key: string): Promise<string | null> => {
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=${key}`;
-    for (let attempt = 0; attempt < 3; attempt++) {
-      try {
-        const res = await queueGemini(() => fetchWithTimeout(url, timeoutMs, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body }), 'low', 'background');
-        if (res.ok) {
-          const data = await res.json();
-          const text = data.candidates?.[0]?.content?.parts?.map((p: any) => p.text).filter(Boolean).join('') || '';
-          if (text) return text;
-          if (attempt < 2) { await new Promise((r) => setTimeout(r, 2000)); continue; } // empty candidate — retry
-          return '';
-        }
-        // 5xx = Google-side overload storms that can last minutes — space the
-        // retries out (6s/12s) instead of hammering back inside the same storm.
-        if ((res.status === 429 || res.status >= 500) && attempt < 2) { await new Promise((r) => setTimeout(r, (res.status === 429 ? 2500 : 6000) * (attempt + 1))); continue; }
-        if ((res.status === 400 || res.status === 401 || res.status === 403) && primaryKey && key !== primaryKey) {
-          console.warn(`Gemini key #2 was rejected (HTTP ${res.status}) — will retry on the primary key. Check that key #2 is valid and its Google project has the Generative Language API enabled.`);
-        }
-        return null;
-      } catch {
-        // network error or per-attempt timeout abort — retry
-        if (attempt < 2) { await new Promise((r) => setTimeout(r, 1500 * (attempt + 1))); continue; }
-        return null;
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=${geminiKey}`;
+  // 3 attempts with backoff on THIS key only. Background lookups stay on the
+  // background key (#2) and the report/chat/zoning on the primary key — the two
+  // keys keep their own quota lanes and never fall through to each other.
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const res = await queueGemini(() => fetchWithTimeout(url, timeoutMs, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body }), 'low', 'background');
+      if (res.ok) {
+        const data = await res.json();
+        const text = data.candidates?.[0]?.content?.parts?.map((p: any) => p.text).filter(Boolean).join('') || '';
+        if (text) return text;
+        if (attempt < 2) { await new Promise((r) => setTimeout(r, 2000)); continue; } // empty candidate — retry
+        return '';
       }
+      // 5xx = Google-side overload storms that can last minutes — space the
+      // retries out (6s/12s) instead of hammering back inside the same storm.
+      if ((res.status === 429 || res.status >= 500) && attempt < 2) { await new Promise((r) => setTimeout(r, (res.status === 429 ? 2500 : 6000) * (attempt + 1))); continue; }
+      // Invalid key / API not enabled — surface it; no cross-key fallback.
+      if (res.status === 400 || res.status === 401 || res.status === 403) {
+        console.warn(`Gemini key rejected (HTTP ${res.status}) — check the key is valid and its Google project has the Generative Language API enabled.`);
+      }
+      return null;
+    } catch {
+      // network error or per-attempt timeout abort — retry
+      if (attempt < 2) { await new Promise((r) => setTimeout(r, 1500 * (attempt + 1))); continue; }
+      return null;
     }
-    return null;
-  };
-  // Try the given (background) key first; if it is throttled, rejected, or slow,
-  // retry ONCE on the primary key — it often still has quota when key #2 is
-  // exhausted, and it also covers a misconfigured key #2. The grounded prompt is
-  // reused, so Perplexity is not re-searched.
-  let text = await runOnKey(geminiKey);
-  if (!text && primaryKey && geminiKey !== primaryKey) text = await runOnKey(primaryKey);
-  return text;
+  }
+  return null;
 }
 
 // NC county → BLS OEWS metropolitan area code (CBSA zero-padded to 7). Counties
@@ -5633,7 +5622,7 @@ STRICT PRICING RULES — REAL FIGURES ONLY:
       // proxy is unavailable) — and the Gemini Google-Search fallback also failed.
       throw new Error('Live search failed: Perplexity returned no sources — check your Perplexity API key in Account Settings — and the Gemini fallback did not answer either. Tap Retry.');
     }
-    throw new Error(`Live search failed: Gemini was rate-limited or slow (Perplexity ${diag.perplexityAttempted ? `returned ${diag.perplexitySources} sources` : 'not configured'}). ${hasSecondGeminiKey() ? 'Both Gemini keys are exhausted right now — if your second key is in the SAME Google Cloud project as the first, they share one quota, so create key #2 in a SEPARATE project. Tap Retry.' : 'Tap Retry — add a second Gemini key (in a different Google Cloud project) to spread the load.'}`);
+    throw new Error(`Live search failed: Gemini was rate-limited or slow (Perplexity ${diag.perplexityAttempted ? `returned ${diag.perplexitySources} sources` : 'not configured'}). ${hasSecondGeminiKey() ? 'The background key (#2) hit its per-minute quota — the section lookups can burst it at once. Tap Retry; if it persists, key #2 is on a low/free-tier quota.' : 'Tap Retry — add a second Gemini key in a separate Google project to give the background lookups their own quota.'}`);
   }
   const m = text.match(/```json\s*([\s\S]*?)\s*```/) || text.match(/\{[\s\S]*\}/);
   if (!m) throw new Error('The live search answered in an unexpected format — tap Retry.');
