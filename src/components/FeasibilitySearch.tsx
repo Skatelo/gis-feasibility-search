@@ -1805,6 +1805,90 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
     else map.once('load', applyParcel);
   }, [data, mapboxLoaded]);
 
+  // GIS toggle overlays on the Mapbox map — the same ArcGIS services the Google
+  // map used, as Mapbox raster layers (WMS-style {bbox-epsg-3857} tiles). Kept
+  // below the parcel outline. Active only when the Mapbox map exists.
+  useEffect(() => {
+    if (!getMapboxToken() || !mapboxLoaded || !data) return;
+    const map = mapboxMapRef.current;
+    if (!map) return;
+    const arcgisTiles = (url: string, layers?: string | null) => {
+      const op = url.includes('ImageServer') ? 'exportImage' : 'export';
+      const lp = layers ? `&layers=${encodeURIComponent(layers)}` : '';
+      return `${url}/${op}?bbox={bbox-epsg-3857}&bboxSR=3857&size=256,256&imageSR=3857&format=png32&transparent=true${lp}&f=image`;
+    };
+    const run = () => {
+      const beforeId = map.getLayer('parcel-fill') ? 'parcel-fill' : undefined;
+      const setRaster = (id: string, on: boolean, url: string, opacity: number, layers?: string | null) => {
+        const srcId = `${id}-src`;
+        if (on) {
+          if (!map.getSource(srcId)) map.addSource(srcId, { type: 'raster', tiles: [arcgisTiles(url, layers)], tileSize: 256 });
+          if (!map.getLayer(id)) map.addLayer({ id, type: 'raster', source: srcId, paint: { 'raster-opacity': opacity } }, beforeId);
+        } else {
+          if (map.getLayer(id)) map.removeLayer(id);
+          if (map.getSource(srcId)) map.removeSource(srcId);
+        }
+      };
+      setRaster('ov-flood', showFloodplains, 'https://spartagis.ncem.org/arcgis/rest/services/Public/FRIS_FloodZones/MapServer', 0.45);
+      setRaster('ov-streams', showStreams, 'https://services.nconemap.gov/secure/rest/services/NC1Map_Hydrography/MapServer', 0.7);
+      setRaster('ov-contours', showContours, 'https://services.nconemap.gov/secure/rest/services/Elevation/DEM03_Contours2_raster/ImageServer', 0.5);
+      setRaster('ov-wetlands', showWetlands, 'https://www.fws.gov/wetlandsmapservice/rest/services/Wetlands/MapServer', 0.55);
+      // Zoning: 0+ stacked county services. Rebuild the reserved window each run.
+      for (let i = 0; i < 8; i++) {
+        const id = `ov-zoning-${i}`;
+        if (map.getLayer(id)) map.removeLayer(id);
+        if (map.getSource(`${id}-src`)) map.removeSource(`${id}-src`);
+      }
+      const zoningServices = showZoning ? getZoningServices(data.countyName) : [];
+      zoningServices.slice(0, 8).forEach((s: any, i: number) => {
+        const id = `ov-zoning-${i}`;
+        map.addSource(`${id}-src`, { type: 'raster', tiles: [arcgisTiles(s.url, s.layers || null)], tileSize: 256 });
+        map.addLayer({ id, type: 'raster', source: `${id}-src`, paint: { 'raster-opacity': 0.5 } }, beforeId);
+      });
+    };
+    if (map.isStyleLoaded()) run();
+    else map.once('load', run);
+  }, [showFloodplains, showStreams, showContours, showZoning, showWetlands, data, mapboxLoaded]);
+
+  // OSM vector features (buildings / roads / water) on the Mapbox map — same
+  // OpenStreetMap source + colors the Google Data layer used.
+  useEffect(() => {
+    if (!getMapboxToken() || !mapboxLoaded || !data) return;
+    const map = mapboxMapRef.current;
+    if (!map) return;
+    const remove = () => {
+      ['osm-building', 'osm-water-fill', 'osm-water-line', 'osm-road'].forEach((id) => { if (map.getLayer(id)) map.removeLayer(id); });
+      if (map.getSource('osm')) map.removeSource('osm');
+    };
+    if (!showOsmFeatures) { if (map.isStyleLoaded()) remove(); return; }
+    const { lat, lng } = data.coordinates;
+    if (isNaN(lat) || isNaN(lng)) return;
+    const dLat = 0.0025;
+    const dLng = dLat / Math.cos((lat * Math.PI) / 180);
+    const cacheKey = `${lat.toFixed(5)},${lng.toFixed(5)}`;
+    let cancelled = false;
+    const draw = (fc: any) => {
+      const beforeId = map.getLayer('parcel-fill') ? 'parcel-fill' : undefined;
+      remove();
+      map.addSource('osm', { type: 'geojson', data: fc });
+      map.addLayer({ id: 'osm-building', type: 'fill', source: 'osm', filter: ['==', ['get', 'feature_type'], 'building'], paint: { 'fill-color': '#f59e0b', 'fill-opacity': 0.35, 'fill-outline-color': '#f59e0b' } }, beforeId);
+      map.addLayer({ id: 'osm-water-fill', type: 'fill', source: 'osm', filter: ['==', ['get', 'feature_type'], 'water'], paint: { 'fill-color': '#3b82f6', 'fill-opacity': 0.4 } }, beforeId);
+      map.addLayer({ id: 'osm-water-line', type: 'line', source: 'osm', filter: ['==', ['get', 'feature_type'], 'water'], paint: { 'line-color': '#2563eb', 'line-width': 2 } }, beforeId);
+      map.addLayer({ id: 'osm-road', type: 'line', source: 'osm', filter: ['==', ['get', 'feature_type'], 'road'], paint: { 'line-color': '#ef4444', 'line-width': 2.5 } }, beforeId);
+    };
+    const start = () => {
+      if (osmCacheRef.current && osmCacheRef.current.key === cacheKey) { draw(osmCacheRef.current.fc); return; }
+      setOsmLoading(true);
+      fetchOsmFeatures(lat - dLat, lng - dLng, lat + dLat, lng + dLng)
+        .then((fc) => { if (cancelled) return; osmCacheRef.current = { key: cacheKey, fc }; draw(fc); })
+        .catch((err) => console.warn('OSM feature fetch failed:', err))
+        .finally(() => { if (!cancelled) setOsmLoading(false); });
+    };
+    if (map.isStyleLoaded()) start();
+    else map.once('load', start);
+    return () => { cancelled = true; };
+  }, [showOsmFeatures, data, mapboxLoaded]);
+
   // Fetch predictions with debouncing. Three sources so suggestions ALWAYS
   // appear: 1) Places AutocompleteSuggestion (the current API — required for
   // newer Google keys where the legacy service is denied), 2) legacy
