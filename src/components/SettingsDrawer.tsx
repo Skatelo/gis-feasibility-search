@@ -25,6 +25,8 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
   const [geminiKey, setGeminiKey] = useState('');
   const [geminiKey2, setGeminiKey2] = useState('');
   const [showGeminiKey2, setShowGeminiKey2] = useState(false);
+  const [perplexityKey, setPerplexityKey] = useState('');
+  const [showPerplexityKey, setShowPerplexityKey] = useState(false);
   const [enformionName, setEnformionName] = useState('');
   const [enformionPassword, setEnformionPassword] = useState('');
   const [showEnformionPassword, setShowEnformionPassword] = useState(false);
@@ -52,6 +54,7 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
       setGoogleMapsKey(activeUser.keys?.googleMaps || '');
       setGeminiKey(activeUser.keys?.gemini || '');
       setGeminiKey2(activeUser.keys?.gemini2 || '');
+      setPerplexityKey(activeUser.keys?.perplexity || '');
       setEnformionName(activeUser.keys?.enformionApName || '');
       setEnformionPassword(activeUser.keys?.enformionApPassword || '');
       setRealtyApiKey(activeUser.keys?.realtyApi || '');
@@ -87,6 +90,7 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
       googleMaps: googleMapsKey.trim(),
       gemini: geminiKey.trim(),
       gemini2: geminiKey2.trim(),
+      perplexity: perplexityKey.trim(),
       enformionApName: enformionName.trim(),
       enformionApPassword: enformionPassword.trim(),
       realtyApi: realtyApiKey.trim(),
@@ -254,6 +258,32 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
                 </button>
               </div>
               <p className="field-help">Requests run one at a time per key to respect rate limits. A second key (create it in a DIFFERENT Google Cloud project so it has its own quota) runs the background lookups — cost estimate, material takeoff, tree count, utilities, comp photos — in a parallel lane while the report &amp; chat stay on key #1, so everything finishes roughly twice as fast.</p>
+            </div>
+
+            {/* Perplexity — live web search engine for all lookups */}
+            <div className="settings-field-group">
+              <div className="field-label-row">
+                <label htmlFor="perplexityKey">Perplexity API Key (live web search)</label>
+                <span className="badge optional">Optional</span>
+              </div>
+              <div className="field-input-container">
+                <Key className="input-icon" size={16} />
+                <input
+                  id="perplexityKey"
+                  type={showPerplexityKey ? "text" : "password"}
+                  placeholder="pplx-…"
+                  value={perplexityKey}
+                  onChange={(e) => setPerplexityKey(e.target.value)}
+                />
+                <button
+                  type="button"
+                  className="field-toggle-btn"
+                  onClick={() => setShowPerplexityKey(!showPerplexityKey)}
+                >
+                  {showPerplexityKey ? <EyeOff size={16} /> : <Eye size={16} />}
+                </button>
+              </div>
+              <p className="field-help">When set, every live web lookup (utilities &amp; fee schedules, tree-service rates, construction costs, material prices, zoning web lookup, LLC skip trace, the AI report's research) runs on the Perplexity Search API — parallel batched queries returning many ranked sources — instead of Gemini's Google-Search grounding. Faster, more sources, immune to grounding outages. Get a key at perplexity.ai/settings/api.</p>
             </div>
 
             {/* Enformion Go — skip tracing (phones, emails, relatives) */}

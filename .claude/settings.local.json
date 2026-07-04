@@ -39,7 +39,19 @@
       "Bash(awk -F: '$1>=650 && $1<=985')",
       "WebFetch(domain:enformiongo.readme.io)",
       "Bash(awk -F: '$1>1560 && $1<1620')",
-      "Bash(git rm *)"
+      "Bash(git rm *)",
+      "Bash(awk -F: '$1>900 && $1<1010')",
+      "Bash(grep -n \"generateInitialChatReport\\(result\\\\|Promise.race\\\\|setChatLoading\\(true\\);\\\\s*$\\\\|reportPending\\\\|getReportAutoGenerate\" src/components/FeasibilitySearch.tsx)",
+      "Bash(awk -F: '$1>4930 && $1<5160')",
+      "Bash(grep -n \"<X size\\\\|<X /\\\\|<X classname\\\\|<X className\" src/components/FeasibilitySearch.tsx)",
+      "Bash(grep -n \"<X\\\\b\\\\|^  X,\\\\| X,\\\\|{ X \\\\|, X }\\\\|X as \" src/components/FeasibilitySearch.tsx)",
+      "Bash(git revert *)",
+      "Bash(git commit -q -m ' *)",
+      "Bash(ls public *)",
+      "Bash(git rev-list *)",
+      "Bash(curl -s \"https://tigerweb.geo.census.gov/arcgis/rest/services/TIGERweb/Places_CouSub_ConCity_SubMCD/MapServer?f=json\")",
+      "Bash(curl -s \"https://tigerweb.geo.census.gov/arcgis/rest/services/TIGERweb/Places_CouSub_ConCity_SubMCD/MapServer/4/query?geometry=-80.5795,35.4088&geometryType=esriGeometryPoint&inSR=4326&spatialRel=esriSpatialRelIntersects&outFields=NAME,BASENAME&returnGeometry=false&f=json\")",
+      "Bash(curl -s \"https://tigerweb.geo.census.gov/arcgis/rest/services/TIGERweb/Places_CouSub_ConCity_SubMCD/MapServer/4/query?geometry=-79.9,35.15&geometryType=esriGeometryPoint&inSR=4326&spatialRel=esriSpatialRelIntersects&outFields=NAME&returnGeometry=false&f=json\")"
     ]
   }
 }

@@ -10,6 +10,11 @@ export interface UserKeys {
    *  their own parallel lane while the report/chat/zoning stay on the primary
    *  key — doubling the per-minute quota so sections finish faster. */
   gemini2?: string;
+  /** Perplexity API key — when set, EVERY live web lookup (utilities, tree
+   *  rates, cost estimate, takeoff, zoning, LLC trace, the report's research)
+   *  runs on the Perplexity Search API (parallel batched queries, many ranked
+   *  sources) instead of Gemini's Google-Search grounding. */
+  perplexity?: string;
   realtyApi?: string;
   deepSeek?: string;
   rentCast?: string;
@@ -195,6 +200,127 @@ function queueGemini<T>(task: () => Promise<T>, priority: GeminiPriority = 'low'
     lane[priority].push(start);
     pumpGeminiLane(lane);
   });
+}
+
+// ---------------------------------------------------------------------------
+// PERPLEXITY SEARCH API — the live web-search engine for every lookup that
+// previously used Gemini's Google-Search grounding. Raw ranked results with
+// extracted page content, fetched in PARALLEL BATCHES (up to 5 queries per
+// request, multiple requests in flight) so each generation is grounded on MANY
+// sources. The synthesis stays on Gemini; only the SEARCHING moves here.
+// Docs: https://docs.perplexity.ai/docs/search/quickstart
+// ---------------------------------------------------------------------------
+
+export function getPerplexityKey(): string {
+  return (getUserKeys().perplexity || (import.meta.env.VITE_PERPLEXITY_API_KEY as string | undefined) || '').trim();
+}
+export function perplexityConfigured(): boolean {
+  return !!getPerplexityKey();
+}
+
+export interface PplxResult { title: string; url: string; snippet: string; date?: string }
+
+/** One POST to the Search API (one batch of up to 5 queries). Browser-direct
+ *  first; transparent fall back to the Netlify proxy when CORS blocks it.
+ *  2 attempts per route on transient failures. */
+async function perplexitySearchRequest(body: Record<string, unknown>, key: string): Promise<any | null> {
+  const payload = JSON.stringify(body);
+  const routes: { url: string; timeout: number }[] = [
+    { url: 'https://api.perplexity.ai/search', timeout: 25000 },
+    { url: '/.netlify/functions/perplexity', timeout: 25000 },
+  ];
+  for (const route of routes) {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const res = await fetchWithTimeout(route.url, route.timeout, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
+          body: payload,
+        });
+        if (res.ok) return await res.json();
+        if ((res.status === 429 || res.status >= 500) && attempt === 0) { await new Promise((r) => setTimeout(r, 1500)); continue; }
+        // 4xx (bad key, bad request): same result on the other route — stop.
+        if (res.status < 500 && res.status !== 429) {
+          console.warn(`Perplexity search HTTP ${res.status}:`, (await res.text().catch(() => '')).slice(0, 200));
+          return null;
+        }
+        break; // exhausted retries on this route — try the next route
+      } catch {
+        if (attempt === 0) { await new Promise((r) => setTimeout(r, 800)); continue; }
+        // network/CORS failure — fall through to the proxy route
+      }
+    }
+  }
+  return null;
+}
+
+/** Flatten the Search API response (single-query = flat list; multi-query =
+ *  grouped per query) into one PplxResult list. */
+function flattenPplxResults(data: any): PplxResult[] {
+  const out: PplxResult[] = [];
+  const push = (r: any) => {
+    if (r && typeof r.url === 'string' && r.url) {
+      out.push({ title: String(r.title || r.url), url: r.url, snippet: String(r.snippet || ''), date: r.date ? String(r.date) : undefined });
+    }
+  };
+  const results = data?.results;
+  if (Array.isArray(results)) {
+    for (const item of results) {
+      if (Array.isArray(item)) item.forEach(push);        // grouped per query
+      else if (Array.isArray(item?.results)) item.results.forEach(push);
+      else push(item);                                     // flat list
+    }
+  }
+  return out;
+}
+
+/**
+ * PARALLEL BATCHED web search: any number of queries, chunked into multi-query
+ * requests of up to 5, ALL chunks fired simultaneously (Promise.all), results
+ * merged + deduped by URL. Returns [] when no key / everything failed.
+ */
+export async function perplexitySearchBatch(
+  queries: string[],
+  opts?: { maxResultsPerQuery?: number; maxTokensPerPage?: number; country?: string },
+): Promise<PplxResult[]> {
+  const key = getPerplexityKey();
+  const qs = queries.map((q) => q.trim()).filter(Boolean);
+  if (!key || qs.length === 0) return [];
+  const chunks: string[][] = [];
+  for (let i = 0; i < qs.length; i += 5) chunks.push(qs.slice(i, i + 5));
+  const bodies = chunks.map((chunk) => ({
+    query: chunk.length === 1 ? chunk[0] : chunk,
+    max_results: Math.min(20, Math.max(1, opts?.maxResultsPerQuery ?? 6)),
+    max_tokens_per_page: opts?.maxTokensPerPage ?? 1024,
+    country: opts?.country ?? 'US',
+  }));
+  const responses = await Promise.all(bodies.map((b) => perplexitySearchRequest(b, key)));
+  const seen = new Set<string>();
+  const merged: PplxResult[] = [];
+  for (const resp of responses) {
+    for (const r of flattenPplxResults(resp)) {
+      if (!seen.has(r.url)) { seen.add(r.url); merged.push(r); }
+    }
+  }
+  return merged;
+}
+
+/** Format search results as a numbered source pack for a model prompt. */
+function formatPplxSources(results: PplxResult[], maxSources = 24, maxSnippetChars = 1200): string {
+  return results.slice(0, maxSources).map((r, i) =>
+    `[${i + 1}] ${r.title}${r.date ? ` (${r.date})` : ''}\nURL: ${r.url}\n${r.snippet.slice(0, maxSnippetChars)}`,
+  ).join('\n\n');
+}
+
+/** The research block injected into a Gemini prompt in place of Google-Search
+ *  grounding: many ranked sources with extracted content. '' = nothing found. */
+async function perplexityResearchBlock(queries: string[], opts?: { maxResultsPerQuery?: number; maxSources?: number }): Promise<{ block: string; urls: string[] }> {
+  const results = await perplexitySearchBatch(queries, { maxResultsPerQuery: opts?.maxResultsPerQuery ?? 6 });
+  if (!results.length) return { block: '', urls: [] };
+  return {
+    block: `\n\nLIVE WEB SEARCH RESULTS (Perplexity Search API — ranked, current, with extracted page content). Base every figure on THESE sources and cite their URLs in "sources"; do not invent anything beyond them:\n\n${formatPplxSources(results, opts?.maxSources ?? 24)}`,
+    urls: results.map((r) => r.url),
+  };
 }
 
 export interface ZoningStandards {
@@ -1723,15 +1849,28 @@ Return ONLY a JSON object inside a \`\`\`json code block:
 \`\`\`
 Rules: NEVER invent names, addresses, IDs, or dates — use null for anything no source supports, and list the source URLs you actually used. Set "confidence" by how directly a credible source states the agent/officials. Do your best to fill registeredAgentName and at least one official; leave them null only if genuinely unavailable.`;
 
+  // PERPLEXITY MODE: batched parallel searches over the SoS registry mirrors
+  // feed the synthesis (no google_search tool); else legacy grounding.
+  let llcResearch = '';
+  if (perplexityConfigured()) {
+    const { block } = await perplexityResearchBlock([
+      `"${name}" ${state} secretary of state registered agent`,
+      `"${name}" bizapedia`,
+      `"${name}" corporationwiki manager member`,
+      `"${name}" LLC ${state} annual report officers`,
+    ], { maxResultsPerQuery: 6, maxSources: 18 }).catch(() => ({ block: '', urls: [] as string[] }));
+    llcResearch = block;
+  }
+
   const callOnce = async (aggressive: boolean): Promise<LlcSkipTrace | null> => {
     try {
       const res = await queueGemini(() => fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          contents: [{ role: 'user', parts: [{ text: buildPrompt(aggressive) }] }],
+          contents: [{ role: 'user', parts: [{ text: buildPrompt(aggressive) + llcResearch }] }],
           systemInstruction: { parts: [{ text: 'You are a meticulous corporate-records skip-tracer. You find the registered agent and the managers/members behind an LLC from the Secretary of State registry and indexed public-records directories. Report only source-supported facts; never fabricate. Return the requested JSON only.' }] },
-          tools: [{ google_search: {} }],
+          ...(llcResearch ? {} : { tools: [{ google_search: {} }] }),
         }),
       }), 'high');
       if (!res.ok) return null;
@@ -3083,17 +3222,26 @@ function parseZoningResult(text: string): ZoningResult | null {
   } catch { return null; }
 }
 
-/** Gemini 3.5 Flash with Google-Search grounding → parsed zoning result. */
-async function zoningViaGemini(promptText: string, geminiKey: string): Promise<ZoningResult | null> {
+/** Zoning web lookup → parsed zoning result. PERPLEXITY MODE (key configured
+ *  + queries): the searching runs on the Perplexity Search API (parallel
+ *  batched queries over official zoning sources) and Gemini synthesizes from
+ *  those results; fallback is Google-Search grounding. */
+async function zoningViaGemini(promptText: string, geminiKey: string, searchQueries?: string[]): Promise<ZoningResult | null> {
   try {
+    let effectivePrompt = promptText;
+    let usePerplexity = false;
+    if (searchQueries && searchQueries.length && perplexityConfigured()) {
+      const { block } = await perplexityResearchBlock(searchQueries, { maxResultsPerQuery: 6, maxSources: 18 });
+      if (block) { effectivePrompt = promptText + block; usePerplexity = true; }
+    }
     const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=${geminiKey}`;
     const res = await queueGemini(() => fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        contents: [{ role: 'user', parts: [{ text: promptText }] }],
+        contents: [{ role: 'user', parts: [{ text: effectivePrompt }] }],
         systemInstruction: { parts: [{ text: ZONING_SYSTEM }] },
-        tools: [{ google_search: {} }],
+        ...(usePerplexity ? {} : { tools: [{ google_search: {} }] }),
       }),
     }), 'high');
     if (!res.ok) return null;
@@ -3101,7 +3249,7 @@ async function zoningViaGemini(promptText: string, geminiKey: string): Promise<Z
     const text = data.candidates?.[0]?.content?.parts?.map((p: any) => p.text).filter(Boolean).join('') || '';
     return parseZoningResult(text);
   } catch (e) {
-    console.warn('Gemini zoning lookup failed:', e);
+    console.warn('Zoning web lookup failed:', e);
     return null;
   }
 }
@@ -3138,7 +3286,14 @@ Return ONLY a JSON object inside a markdown code block:
 \`\`\`
 Rules: "zoningCode" must be the actual district code that jurisdiction uses for THIS parcel (e.g. R-1, RA, C-2, PUD, MX, RR). Determine the specific code — do NOT answer "see the map" or "varies". If after a genuine search you truly cannot confirm it from a credible official/government source, return {"zoningCode": null}. Never guess or fabricate a code.`;
 
-  return await zoningViaGemini(lookupPrompt, geminiApiKey);
+  // Parallel batched Perplexity searches over the official zoning sources.
+  const cityPart = (address.split(',')[1] || '').trim();
+  return await zoningViaGemini(lookupPrompt, geminiApiKey, [
+    `zoning district "${address}"`,
+    `${countyName ? `${countyName} County NC` : cityPart ? `${cityPart} NC` : 'North Carolina'} zoning map GIS parcel viewer`,
+    `${countyName ? `${countyName} County` : cityPart} NC zoning ordinance districts${gisHint ? ` ${gisHint}` : ''}`,
+    `${cityPart || countyName || ''} NC planning department zoning lookup`.trim(),
+  ]);
 }
 
 /**
@@ -4710,12 +4865,23 @@ export async function fetchGoogleDistanceMatrixComps(
 /** A grounded (Google-Search) Gemini text call with ONE retry on a transient
  *  rate-limit/5xx — so the cost estimate & material takeoff don't fail (and the
  *  card doesn't vanish) when they fire alongside the report's Gemini burst. */
-async function groundedGeminiText(geminiKey: string, prompt: string, systemText: string, timeoutMs: number): Promise<string | null> {
+async function groundedGeminiText(geminiKey: string, prompt: string, systemText: string, timeoutMs: number, searchQueries?: string[]): Promise<string | null> {
   const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=${geminiKey}`;
+  // PERPLEXITY MODE (key configured + queries provided): the live searching
+  // runs on the Perplexity Search API — all queries in parallel batches, many
+  // ranked sources with extracted content — and Gemini synthesizes from those
+  // sources WITHOUT the google_search tool (no grounding quota, no grounding
+  // outages). Legacy Google-Search grounding remains the fallback.
+  let effectivePrompt = prompt;
+  let usePerplexity = false;
+  if (searchQueries && searchQueries.length && perplexityConfigured()) {
+    const { block } = await perplexityResearchBlock(searchQueries);
+    if (block) { effectivePrompt = prompt + block; usePerplexity = true; }
+  }
   const body = JSON.stringify({
-    contents: [{ role: 'user', parts: [{ text: prompt }] }],
+    contents: [{ role: 'user', parts: [{ text: effectivePrompt }] }],
     systemInstruction: { parts: [{ text: systemText }] },
-    tools: [{ google_search: {} }],
+    ...(usePerplexity ? {} : { tools: [{ google_search: {} }] }),
   });
   // 3 attempts with backoff: grounded (Google Search) generations are the
   // slowest Gemini calls and the most likely to hit a transient 429/timeout —
@@ -4894,11 +5060,26 @@ Return ONLY a JSON object inside a \`\`\`json code block:
 Rules: every "cost" is a whole-dollar USD number for THIS home/lot from cited CURRENT LOCAL prices. Group line items by category in this order: Site Work, Foundation, Framing, Exterior, Mechanical, Interior, Permits & Fees. Put the builder fee and contingency in their OWN fields (not in lineItems). Do NOT include the land/lot purchase price. Never fabricate a number — cite the sources you used. Be EXTREMELY ACCURATE and local.`;
 
   try {
+    const county = reportData.countyName || 'North Carolina';
+    const yr = new Date().getFullYear();
     const text = await groundedGeminiText(
       geminiKey,
       prompt,
-      "You are a senior residential construction estimator. Use Google Search to price each line item at CURRENT LOCAL costs for the property's metro from multiple credible sources. Return only the requested JSON; never invent prices; cite sources.",
+      "You are a senior residential construction estimator. Use the live web search results to price each line item at CURRENT LOCAL costs for the property's metro from multiple credible sources. Return only the requested JSON; never invent prices; cite sources.",
       120000,
+      // Parallel batched Perplexity searches — many local pricing sources.
+      [
+        `cost per square foot to build a house ${county} County NC ${yr}`,
+        `new home construction cost breakdown by trade ${county} County North Carolina`,
+        `${county} County NC building permit fees new single family home`,
+        `land clearing and grading cost ${county} County NC`,
+        `foundation crawlspace slab cost ${county} County NC ${yr}`,
+        `framing roofing siding installed cost per sqft North Carolina ${yr}`,
+        `HVAC plumbing electrical rough-in cost new construction NC ${yr}`,
+        `well drilling cost per foot North Carolina ${yr}`,
+        `septic system installation cost ${county} County NC`,
+        `water sewer tap impact fees ${county} County NC`,
+      ],
     );
     if (!text) return null;
     const m = text.match(/```json\s*([\s\S]*?)\s*```/) || text.match(/\{[\s\S]*\}/);
@@ -5020,11 +5201,23 @@ ${priceLines}
 Use CURRENT LOCAL prices from credible sources; cite them; never invent a price (set a key to 0 / omit it if you cannot find it).`;
 
   try {
+    const yr = new Date().getFullYear();
+    const near = zip ? `${zip} NC` : `${reportData.countyName} County NC`;
     const text = await groundedGeminiText(
       geminiKey,
       prompt,
-      "You are a construction-material pricing assistant. Use Google Search to find CURRENT LOCAL retail unit prices near the given ZIP for a full house build. Return only the JSON; cite sources; never invent prices.",
+      "You are a construction-material pricing assistant. Use the live web search results to find CURRENT LOCAL retail unit prices near the given ZIP for a full house build. Return only the JSON; cite sources; never invent prices.",
       110000,
+      // Parallel batched Perplexity searches — local supplier price sources.
+      [
+        `framing lumber 2x4 2x10 OSB sheathing prices ${near} ${yr}`,
+        `ready mix concrete price per cubic yard ${near}`,
+        `drywall insulation shingle prices Home Depot Lowes ${near}`,
+        `windows exterior doors prices ${near} ${yr}`,
+        `siding roofing material prices ${near}`,
+        `kitchen cabinets countertops flooring material prices ${near} ${yr}`,
+        `PEX plumbing HVAC unit electrical wire prices ${near}`,
+      ],
     );
     if (!text) return null;
     const m = text.match(/```json\s*([\s\S]*?)\s*```/) || text.match(/\{[\s\S]*\}/);
@@ -5186,7 +5379,20 @@ Return ONLY a JSON object in a \`\`\`json code block:
 - clearingPerAcre = TRADITIONAL excavator land clearing per acre (trees pulled by roots, debris removed); clearingDayRate = excavator crew day rate
 - haulOff = typical debris haul-off / dump fee for a small lot
 Use CURRENT LOCAL prices from credible tree-service / land-clearing / excavation sources; cite them; never invent (set unknown values to 0).`;
-  const text = await groundedGeminiText(geminiKey, prompt, 'You are a land-clearing / tree-service pricing assistant. Use Google Search for current local prices. Return only the JSON; cite sources; never invent prices.', 60000);
+  const text = await groundedGeminiText(
+    geminiKey,
+    prompt,
+    'You are a land-clearing / tree-service pricing assistant. Use the live web search results for current local prices. Return only the JSON; cite sources; never invent prices.',
+    60000,
+    // Parallel batched Perplexity searches — local tree-service pricing sources.
+    [
+      `tree removal cost ${county} County NC ${new Date().getFullYear()}`,
+      `stump grinding cost ${zip ? `${zip} NC` : `${county} County NC`}`,
+      `forestry mulching cost per acre North Carolina`,
+      `land clearing cost per acre ${county} County NC`,
+      `excavator land clearing day rate debris haul off cost NC`,
+    ],
+  );
   if (!text) return null;
   const m = text.match(/```json\s*([\s\S]*?)\s*```/) || text.match(/\{[\s\S]*\}/);
   if (!m) return null;
@@ -5370,12 +5576,21 @@ STRICT PRICING RULES — REAL FIGURES ONLY:
 - If you cannot find a verifiable current local figure for a line, you MUST leave it 0. NEVER estimate, NEVER use national/regional averages, NEVER guess.`;
   const utilitiesSystem = 'You are a site-development utilities and permit-fee analyst for North Carolina — any city, town, or county. Use web search to find the LOCAL water/sewer provider for the given jurisdiction, its CURRENT published tap/connection/impact fee schedule, the jurisdiction\'s CURRENT adopted residential permit fee schedule, and current local well & septic contractor pricing. Return only the JSON. Every number must be traceable to a cited source URL; leave any unverifiable number 0 — never estimate or use regional averages.';
 
-  // ONE ENGINE — grounded Gemini (Google Search), the original accurate path:
-  // one generation with the strict verified-prices-only prompt, generous 90s
-  // per attempt with internal retries. Runs IMMEDIATELY (no queue wait), in
-  // parallel with the tree count and the other section lookups. The card's
-  // automatic retry covers a transient miss.
-  const text = await groundedGeminiText(getBackgroundGeminiKey(), prompt, utilitiesSystem, 90000);
+  // Live searching on the Perplexity Search API (parallel batched queries →
+  // many ranked fee-schedule sources), synthesis on Gemini with the strict
+  // verified-prices-only prompt. Runs IMMEDIATELY (no queue wait), in parallel
+  // with the tree count and the other section lookups. The card's automatic
+  // retry covers a transient miss. (No Perplexity key → Google grounding.)
+  const jur = place ? `${place} NC` : `${county} County NC`;
+  const yr = new Date().getFullYear();
+  const text = await groundedGeminiText(getBackgroundGeminiKey(), prompt, utilitiesSystem, 90000, [
+    `${jur} water sewer tap connection impact fee schedule ${yr}`,
+    `${jur} water sewer authority residential connection fees`,
+    `${jur} residential building permit fee schedule ${yr}`,
+    `${jur} zoning permit driveway permit fee`,
+    `well drilling cost ${county} County NC ${yr}`,
+    `septic system installation cost perc test ${county} County NC`,
+  ]);
   if (!text) throw new Error('The live fee-schedule search did not answer (a slow or rate-limited moment) — tap Retry.');
   const m = text.match(/```json\s*([\s\S]*?)\s*```/) || text.match(/\{[\s\S]*\}/);
   if (!m) throw new Error('The live search answered in an unexpected format — tap Retry.');
@@ -5632,10 +5847,22 @@ async function postDeepSeekOnce(body: string, key: string): Promise<any | null> 
   return null;
 }
 
-/** A single live web search backed by Gemini's Google-Search grounding. Returns a
- *  concise factual brief with source URLs — this is what gives DeepSeek real web
- *  access inside the fusion. Never throws; returns a short status string on error. */
+/** A single live web search. PERPLEXITY MODE (key configured): raw ranked
+ *  results with extracted content straight from the Search API — fast, no LLM
+ *  in the loop. Fallback: Gemini's Google-Search grounding. This is what gives
+ *  DeepSeek real web access inside the fusion. Never throws; returns a short
+ *  status string on error. */
 async function webSearchViaGemini(query: string, geminiKey: string): Promise<string> {
+  if (perplexityConfigured()) {
+    try {
+      const results = await perplexitySearchBatch([query], { maxResultsPerQuery: 8, maxTokensPerPage: 900 });
+      if (results.length) {
+        return results.slice(0, 8).map((r, i) => `[${i + 1}] ${r.title}${r.date ? ` (${r.date})` : ''} — ${r.snippet.slice(0, 700)}`).join('\n')
+          + `\nSources: ${results.slice(0, 8).map((r) => r.url).join(' | ')}`;
+      }
+      return '(no results found)';
+    } catch { /* fall through to grounding */ }
+  }
   const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=${geminiKey}`;
   const body = JSON.stringify({
     contents: [{ role: 'user', parts: [{ text: `Search the live web and report the most CURRENT, specific facts for: "${query}". Give concrete numbers/dates and a source URL for each finding. Be concise — a few bullet lines, no preamble.` }] }],
@@ -5925,12 +6152,42 @@ ${reportData.comps && reportData.comps.length > 0
 - Legal Description: ${reportData.legalDescription}
 `;
 
+  // PERPLEXITY MODE: a live research pack — parallel batched searches across
+  // costs, market, rates, fees and rezoning for THIS county — replaces the
+  // google_search grounding tool. Many ranked sources with extracted content.
+  let researchUrls: string[] = [];
+  let reportContextFull = reportContext;
+  if (perplexityConfigured()) {
+    const county = reportData.countyName || 'North Carolina';
+    const city = (String(reportData.inputAddress || '').split(',')[1] || '').trim() || county;
+    const yr = new Date().getFullYear();
+    const { block, urls } = await perplexityResearchBlock([
+      `current 30 year mortgage rate trend`,
+      `${county} County NC cost per square foot to build a house ${yr}`,
+      `${city} NC housing market inventory months of supply days on market ${yr}`,
+      `${county} County NC rezoning subdivision approvals ${yr}`,
+      `${county} County NC water sewer tap fees well septic cost`,
+      `${county} County NC residential building permit fees`,
+      `residential lot land prices ${county} County NC ${yr}`,
+      `${reportData.zoningCode ? `${reportData.zoningCode} zoning district ${county} County NC minimum lot size` : `${county} County NC zoning ordinance minimum lot size`}`,
+    ], { maxResultsPerQuery: 5, maxSources: 30 }).catch(() => ({ block: '', urls: [] as string[] }));
+    if (block) {
+      reportContextFull = `${reportContext}\n### 6. LIVE WEB RESEARCH PACK${block}`;
+      researchUrls = urls;
+    }
+  }
+  const hostOf = (u: string) => { try { return new URL(u).hostname.replace(/^www\./, ''); } catch { return u; } };
+  const finish = (r: { text: string; sources?: ChatSource[] }): { text: string; sources?: ChatSource[] } =>
+    (!r.sources || !r.sources.length) && researchUrls.length
+      ? { ...r, sources: researchUrls.slice(0, 12).map((u) => ({ title: hostOf(u), uri: u })) }
+      : r;
+
   const contents = [
     {
       role: 'user',
       parts: [
         {
-          text: `You are starting a session. Here is the compiled Land Feasibility Report for context:\n\n${reportContext}\n\nUnderstood? Let the user know you have the report loaded and are ready to chat about this parcel.`
+          text: `You are starting a session. Here is the compiled Land Feasibility Report for context:\n\n${reportContextFull}\n\nUnderstood? Let the user know you have the report loaded and are ready to chat about this parcel.`
         }
       ]
     },
@@ -5952,7 +6209,9 @@ ${reportData.comps && reportData.comps.length > 0
   }
 
   const GEN_BASE = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash`;
-  const baseBody = { contents, systemInstruction: { parts: [{ text: systemPrompt }] }, tools: [{ google_search: {} }] };
+  // With the Perplexity research pack in context, the google_search tool is
+  // dropped — the report synthesizes from the pack (faster, no grounding quota).
+  const baseBody = { contents, systemInstruction: { parts: [{ text: systemPrompt }] }, ...(researchUrls.length ? {} : { tools: [{ google_search: {} }] }) };
 
   // FUSION: when a DeepSeek key is configured, Gemini 3.5 Flash and DeepSeek V4
   // Pro draft the SAME task IN PARALLEL, then Gemini 3.5 Flash JUDGES and streams
@@ -6027,14 +6286,14 @@ ${reportData.comps && reportData.comps.length > 0
       fetchDeepSeekDraft(`${systemPrompt}\n\n# PROVIDED DATA PACKET (verified evidence)\n${reportContext}\n\n# YOUR ROLE\nProvide a substantive but CONCISE expert analytical draft — your key findings, figures, and risks per topic (zoning, REZONING/UPZONING upside, SUBDIVISION/lot-split potential, HOA/restrictions, buildability, flood, utilities, MARKET SATURATION & absorption by product type — single-family/townhome/condo/multifamily inventory, DOM, months-of-supply — the INTEREST-RATE environment and its demand effect, LOCAL itemized construction cost anchored to the Construction Cost Reference Model, and DEVELOPER ECONOMICS: ARV, residual land value = ARV − construction − site adders (trees/slope/well+septic) − 20%-of-ARV developer profit, cross-checked with the ~20%-of-ARV lot rule). A lead analyst synthesizes the final structured report from your input, so you need not format every numbered section.`, lastUser, deepSeekKey, apiKey).catch((e) => { console.warn('DeepSeek draft failed:', e); return null; }),
     ]);
     // If BOTH drafts failed, there's nothing to fuse — stream the base report.
-    if (!gDraft && !dDraft) return await streamResilient(baseBody);
+    if (!gDraft && !dDraft) return finish(await streamResilient(baseBody));
     const judgeInstruction = `Two independent senior analysts each produced the DRAFT below for the SAME task. Acting as the JUDGE, synthesize the single best response that fully follows the Operating Standards:\n- Merge the strongest, most evidence-grounded content from both drafts.\n- Resolve any conflict in favor of cited/verified evidence; where they disagree and neither is verifiable, label it Likely or Unknown.\n- Keep the required section structure and the Verified / Likely / Unknown labels.\n- Output ONLY the final report. Do NOT mention drafts, judging, or model names.\n\n===== DRAFT A (Google Gemini 3.5 Flash) =====\n${gDraft || '(unavailable)'}\n\n===== DRAFT B (DeepSeek V4 Pro) =====\n${dDraft || '(DeepSeek draft unavailable — rely on Draft A and the data packet)'}`;
     const judgeBody = { ...baseBody, contents: [...contents, { role: 'user', parts: [{ text: judgeInstruction }] }] };
     // Judge first; if it fails before emitting, fall back to the plain base stream.
-    return await streamResilient(judgeBody, baseBody);
+    return finish(await streamResilient(judgeBody, baseBody));
   }
 
-  return await streamResilient(baseBody);
+  return finish(await streamResilient(baseBody));
 }
 
 /**
@@ -6074,7 +6333,23 @@ PARCEL: ${reportData.inputAddress} · ${reportData.countyName} County, NC · ${a
     return { role: m.role === 'user' ? 'user' : 'model', parts };
   });
   const GEN_BASE = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash`;
-  const body: any = { contents, systemInstruction: { parts: [{ text: system }] }, tools: [{ google_search: {} }] };
+  // PERPLEXITY MODE: search the user's question live (question + localized
+  // variant, batched in one request) and answer from those sources instead of
+  // the google_search tool.
+  let followUpResearch = '';
+  const lastQuestion = [...messages].reverse().find((m) => m.role === 'user')?.content?.slice(0, 300) || '';
+  if (perplexityConfigured() && lastQuestion) {
+    const { block } = await perplexityResearchBlock([
+      lastQuestion,
+      `${lastQuestion} ${reportData.countyName ? `${reportData.countyName} County NC` : 'North Carolina'}`,
+    ], { maxResultsPerQuery: 5, maxSources: 10 }).catch(() => ({ block: '', urls: [] as string[] }));
+    followUpResearch = block;
+  }
+  if (followUpResearch && contents.length) {
+    const last = contents[contents.length - 1];
+    if (last.role === 'user') last.parts.push({ text: followUpResearch });
+  }
+  const body: any = { contents, systemInstruction: { parts: [{ text: system }] }, ...(followUpResearch ? {} : { tools: [{ google_search: {} }] }) };
 
   let emitted = false;
   const guarded = onToken ? (c: string) => { emitted = true; onToken(c); } : onToken;
