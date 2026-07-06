@@ -481,6 +481,74 @@ function ringAreaPlanar(rings: number[][][]): number {
   return Math.abs(total);
 }
 
+/** Area-weighted centroid of one polygon ring ([x,y][]); falls back to the
+ *  vertex mean for degenerate rings. Used to place owner labels on parcels. */
+function ringCentroid(ring: number[][]): [number, number] | null {
+  if (!ring || ring.length < 3) return null;
+  let a = 0, cx = 0, cy = 0;
+  for (let i = 0; i < ring.length - 1; i++) {
+    const cross = ring[i][0] * ring[i + 1][1] - ring[i + 1][0] * ring[i][1];
+    a += cross;
+    cx += (ring[i][0] + ring[i + 1][0]) * cross;
+    cy += (ring[i][1] + ring[i + 1][1]) * cross;
+  }
+  a /= 2;
+  if (Math.abs(a) < 1e-12) {
+    const n = ring.length;
+    return [ring.reduce((s, p) => s + p[0], 0) / n, ring.reduce((s, p) => s + p[1], 0) / n];
+  }
+  return [cx / (6 * a), cy / (6 * a)];
+}
+
+/**
+ * All parcels (with owner names) intersecting a WGS84 bounding box, from the
+ * NC OneMap statewide parcel layer — powers the LandGlide-style owner-name
+ * labels on the satellite map. Returns GeoJSON: parcel outline polygons plus
+ * one label point per parcel (owner, address, acres), or null on failure.
+ */
+export async function fetchParcelsInBbox(west: number, south: number, east: number, north: number): Promise<{ polygons: any; labels: any } | null> {
+  try {
+    const url = `${NC_PARCEL_ENGINE}?geometry=${west},${south},${east},${north}` +
+      `&geometryType=esriGeometryEnvelope&inSR=4326&spatialRel=esriSpatialRelIntersects` +
+      `&outFields=${encodeURIComponent('ownname,parno,siteadd,gisacres')}` +
+      `&returnGeometry=true&outSR=4326&resultRecordCount=400&f=json`;
+    const res = await fetchWithTimeout(url, 15000);
+    if (!res.ok) return null;
+    const data = await res.json();
+    const feats = Array.isArray(data?.features) ? data.features : [];
+    const polygons: any[] = [];
+    const labels: any[] = [];
+    for (const f of feats) {
+      const rings: number[][][] = f?.geometry?.rings;
+      if (!rings || !rings.length) continue;
+      const rawOwner = String(f.attributes?.ownname || '').trim();
+      const owner = rawOwner ? formatOwnerName(rawOwner).toUpperCase() : '';
+      const parno = String(f.attributes?.parno || '');
+      const siteadd = String(f.attributes?.siteadd || '').trim();
+      polygons.push({ type: 'Feature', geometry: { type: 'Polygon', coordinates: rings }, properties: { parno, owner, siteadd } });
+      if (!owner || owner === 'N/A') continue;
+      // Label at the centroid of the largest ring (outer boundary).
+      let biggest = rings[0], biggestArea = -1;
+      for (const r of rings) {
+        const area = ringAreaPlanar([r]);
+        if (area > biggestArea) { biggestArea = area; biggest = r; }
+      }
+      const c = ringCentroid(biggest);
+      if (!c) continue;
+      const acres = Number(f.attributes?.gisacres);
+      labels.push({
+        type: 'Feature',
+        geometry: { type: 'Point', coordinates: c },
+        properties: { owner, parno, siteadd, acres: Number.isFinite(acres) && acres > 0.005 && acres < 100000 ? Math.round(acres * 100) / 100 : null },
+      });
+    }
+    return {
+      polygons: { type: 'FeatureCollection', features: polygons },
+      labels: { type: 'FeatureCollection', features: labels },
+    };
+  } catch { return null; }
+}
+
 /** Parcel acreage computed from its polygon — State Plane feet preferred, else a
  *  local-projection of the WGS84 ring. Reliable when a county's recorded gisacres
  *  is missing/garbage (e.g. Cumberland stores a near-zero value). */

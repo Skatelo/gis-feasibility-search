@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import type { FormEvent, KeyboardEvent, FC } from 'react';
 import { createRoot } from 'react-dom/client';
-import { executeLandAnalysis, chatWithGemini, chatFollowUp, getUserKeys, getMapboxToken, detectNcCounty, lookupParcelById, fetchConstructionCostEstimate, fetchMaterialTakeoff, fetchLandClearingEstimate, fetchUtilitiesEstimate, fetchGoogleDistanceMatrixComps, getCompPrefs, getReportAutoGenerate, enformionConfigured, enformionContactEnrich, enformionPersonSearch, enformionBusinessSearch, looksLikeBusiness, enformionDiagMessage, getLastEnformionShape, getLastEnformionDetail, enformionPropertySearch, ncAddressSuggestions } from '../services/feasibilityService';
+import { executeLandAnalysis, chatWithGemini, chatFollowUp, getUserKeys, getMapboxToken, detectNcCounty, lookupParcelById, fetchConstructionCostEstimate, fetchMaterialTakeoff, fetchLandClearingEstimate, fetchUtilitiesEstimate, fetchGoogleDistanceMatrixComps, fetchParcelsInBbox, getCompPrefs, getReportAutoGenerate, enformionConfigured, enformionContactEnrich, enformionPersonSearch, enformionBusinessSearch, looksLikeBusiness, enformionDiagMessage, getLastEnformionShape, getLastEnformionDetail, enformionPropertySearch, ncAddressSuggestions } from '../services/feasibilityService';
 import type { SkipTraceContact, EnformionPropertyRecord } from '../services/feasibilityService';
 import type { ChatMessage, ChatAttachment } from '../services/feasibilityService';
 import { saveReport, getReportEtaMs, recordReportDuration } from '../services/reportStore';
@@ -1657,6 +1657,9 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
   const mapboxMapRef = useRef<any>(null);
   const mapboxPopupRef = useRef<any>(null);
   const [mapboxLoaded, setMapboxLoaded] = useState(false);
+  // Surrounding-parcel owner labels (LandGlide-style): request sequence + debounce
+  const neighborSeqRef = useRef(0);
+  const neighborTimerRef = useRef<number | null>(null);
 
   // Street View Refs & States
   const streetViewRef = useRef<HTMLDivElement>(null);
@@ -1869,6 +1872,64 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
 
     const apply = () => {
       const empty = { type: 'FeatureCollection', features: [] as any[] };
+
+      // ---- Surrounding parcels + owner-name labels (LandGlide/Regrid style) ----
+      // Every parcel in the current viewport gets its boundary + the owner's name
+      // labeled at its centroid, straight from the NC OneMap statewide layer (the
+      // same source as the subject parcel, so IDs/geometry always match). Labels
+      // are zoom-gated to avoid clutter and refresh whenever the map stops moving.
+      if (!map.getSource('neighbor-parcels')) {
+        map.addSource('neighbor-parcels', { type: 'geojson', data: empty });
+        map.addSource('neighbor-owner-labels', { type: 'geojson', data: empty });
+        map.addLayer({ id: 'neighbor-parcel-fill', type: 'fill', source: 'neighbor-parcels', paint: { 'fill-color': '#ffa726', 'fill-opacity': 0.02 } });
+        map.addLayer({ id: 'neighbor-parcel-line', type: 'line', source: 'neighbor-parcels', paint: { 'line-color': '#ffa726', 'line-width': 1.3, 'line-opacity': 0.85 } });
+        map.addLayer({
+          id: 'neighbor-owner-text', type: 'symbol', source: 'neighbor-owner-labels', minzoom: 15,
+          layout: { 'text-field': ['get', 'owner'], 'text-size': 12, 'text-max-width': 7, 'text-font': ['DIN Pro Bold', 'Arial Unicode MS Bold'] },
+          paint: { 'text-color': '#FFD54F', 'text-halo-color': '#000000', 'text-halo-width': 1.8 },
+        });
+      }
+      if (!(map as any).__neighborsWired) {
+        (map as any).__neighborsWired = true;
+        const refreshNeighbors = () => {
+          if (neighborTimerRef.current) window.clearTimeout(neighborTimerRef.current);
+          neighborTimerRef.current = window.setTimeout(async () => {
+            const seq = ++neighborSeqRef.current;
+            const src = map.getSource('neighbor-parcels');
+            if (!src) return;
+            if (map.getZoom() < 14.5) {
+              src.setData(empty);
+              map.getSource('neighbor-owner-labels')?.setData(empty);
+              return;
+            }
+            const b = map.getBounds();
+            const res = await fetchParcelsInBbox(b.getWest(), b.getSouth(), b.getEast(), b.getNorth());
+            if (!res || seq !== neighborSeqRef.current || !map.getSource('neighbor-parcels')) return;
+            map.getSource('neighbor-parcels').setData(res.polygons);
+            map.getSource('neighbor-owner-labels').setData(res.labels);
+          }, 300);
+        };
+        (map as any).__refreshNeighbors = refreshNeighbors;
+        map.on('moveend', refreshNeighbors);
+        // Tap a neighboring parcel → owner / address / acres popup.
+        map.on('click', 'neighbor-parcel-fill', (e: any) => {
+          const p = e.features?.[0]?.properties;
+          if (!p || !p.owner) return;
+          new mapboxgl.Popup({ maxWidth: '260px', offset: 6 })
+            .setLngLat(e.lngLat)
+            .setHTML(`<div style="font-family:Arial,sans-serif;padding:4px 6px;color:#000;font-size:12px;line-height:1.45;">
+                <strong style="font-size:12.5px;">${p.owner}</strong><br>
+                ${p.siteadd ? `${p.siteadd}<br>` : ''}
+                ${p.acres && p.acres !== 'null' ? `${p.acres} acres · ` : ''}PIN ${p.parno || 'N/A'}
+              </div>`)
+            .addTo(map);
+        });
+        map.on('mouseenter', 'neighbor-parcel-fill', () => { map.getCanvas().style.cursor = 'pointer'; });
+        map.on('mouseleave', 'neighbor-parcel-fill', () => { map.getCanvas().style.cursor = ''; });
+      }
+      (map as any).__refreshNeighbors?.();
+      // --------------------------------------------------------------------------
+
       if (map.getSource('parcel')) map.getSource('parcel').setData(parcel || empty);
       else {
         map.addSource('parcel', { type: 'geojson', data: parcel || empty });
