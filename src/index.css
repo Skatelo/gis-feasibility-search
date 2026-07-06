@@ -4019,3 +4019,6 @@ img, svg, video, canvas, table, pre { max-width: 100%; }
   color: var(--text-primary); padding-bottom: 5px; margin-bottom: 4px;
   border-bottom: 1px solid var(--bg-card-border);
 }
+
+/* Utilities: "typical NC estimate" tag (fallback when no verified local figure) */
+.util-verified-tag.util-estimate-tag { background: #fef3c7; color: #92400e; }

@@ -164,9 +164,11 @@ export interface UtilityLine {
   note?: string;       // e.g. "tap/impact fee", "drill + pump", "perc test + install"
   /** Fee-schedule specifics, e.g. '¾-inch service · City of Kannapolis fee schedule'. */
   detail?: string;
-  /** true only when the figure came from a live, cited local source. Unverified
-   *  lines carry NO dollar figure (never a regional baseline / guess). */
+  /** true only when the figure came from a live, cited local source. */
   verified: boolean;
+  /** true when low/high is a typical NC estimate used because no verified local
+   *  figure was found (so a price always shows). */
+  estimated?: boolean;
 }
 
 /** One residential permit fee from the jurisdiction's CURRENT fee schedule
@@ -178,6 +180,8 @@ export interface PermitFeeLine {
   high: number;
   note?: string;
   verified: boolean;
+  /** true when the figure is a typical NC estimate (no verified local schedule). */
+  estimated?: boolean;
 }
 
 /** Utilities + connection-cost estimate for a parcel: public water/sewer tap fees

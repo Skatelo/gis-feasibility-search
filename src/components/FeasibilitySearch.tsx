@@ -2802,7 +2802,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
       .catch((e) => console.error('Failed to update search history:', e));
   };
 
-  const handleSearch = async (addressToSearch: string, countyOverride?: string) => {
+  const handleSearch = async (addressToSearch: string, countyOverride?: string, knownCoords?: { lat: number; lng: number }) => {
     if (!addressToSearch.trim()) return;
     if (!hasKeys) {
       setError("Please set your personal Google Maps and Gemini API Keys in Account Settings to run feasibility analyses.");
@@ -2873,6 +2873,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
         (stage) => { if (seq === searchSeqRef.current) setLoadingStage(stage); },
         onPartial,
         compPrefs.radiusMiles,
+        knownCoords,
       );
       if (seq !== searchSeqRef.current) return;
       setData(result);
@@ -2936,7 +2937,13 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
         return;
       }
       setAddressInput(found.address);
-      await handleSearch(found.address, found.county); // county known from the parcel record
+      // Pass the parcel's own centroid so the analysis anchors to the EXACT parcel
+      // (and the map/Street View get valid coords) rather than re-geocoding an
+      // abbreviated county situs address that can miss.
+      const coords = (typeof found.lat === 'number' && typeof found.lng === 'number')
+        ? { lat: found.lat, lng: found.lng }
+        : undefined;
+      await handleSearch(found.address, found.county, coords); // county known from the parcel record
     } catch (err: any) {
       console.error(err);
       setError(err?.message || "Parcel ID lookup failed.");
@@ -4289,20 +4296,21 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                             </div>
                             {ln.detail && <div className="util-note util-detail">{ln.detail}</div>}
                             {ln.note && <div className="util-note">{ln.note}</div>}
-                            {ln.verified ? (
-                              <div className="util-cost">{ln.low === ln.high ? `$${ln.low.toLocaleString()}` : `$${ln.low.toLocaleString()} – $${ln.high.toLocaleString()}`} <span className="util-verified-tag">{ln.isPublic ? 'exact published fee' : 'typical local cost'}</span></div>
-                            ) : (
-                              <div className="util-cost util-unpriced">No verified local price found — confirm with {utilities.provider || 'the local provider/contractor'}</div>
-                            )}
+                            <div className="util-cost">
+                              {ln.low === ln.high ? `$${ln.low.toLocaleString()}` : `$${ln.low.toLocaleString()} – $${ln.high.toLocaleString()}`}{' '}
+                              {ln.verified
+                                ? <span className="util-verified-tag">{ln.isPublic ? 'exact published fee' : 'typical local cost'}</span>
+                                : <span className="util-verified-tag util-estimate-tag">typical NC estimate · confirm with {utilities.provider || 'the local provider'}</span>}
+                            </div>
                           </div>
                         ))}
                         {(utilities.totalLow > 0 || utilities.totalHigh > 0) && (
                           <div className="util-row util-total">
                             <span>{utilities.publicWater === 'available' && utilities.publicSewer === 'available'
-                              ? 'Total tap fees (verified)'
+                              ? 'Total tap fees'
                               : utilities.publicWater !== 'available' && utilities.publicSewer !== 'available'
-                                ? 'Total well + septic (verified)'
-                                : 'Total to connect (verified)'}</span>
+                                ? 'Total well + septic'
+                                : 'Total to connect'}</span>
                             <span className="util-cost">{utilities.totalLow === utilities.totalHigh ? `$${utilities.totalLow.toLocaleString()}` : `$${utilities.totalLow.toLocaleString()} – $${utilities.totalHigh.toLocaleString()}`}</span>
                           </div>
                         )}
@@ -4322,7 +4330,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                                 <span className="util-name">{p.name}</span>
                               </div>
                               {p.note && <div className="util-note">{p.note}</div>}
-                              <div className="util-cost">{p.low === p.high ? `$${p.low.toLocaleString()}` : `~$${p.low.toLocaleString()} – $${p.high.toLocaleString()}`} <span className="util-verified-tag">fee schedule</span></div>
+                              <div className="util-cost">{p.low === p.high ? `$${p.low.toLocaleString()}` : `~$${p.low.toLocaleString()} – $${p.high.toLocaleString()}`} <span className={`util-verified-tag ${p.verified ? '' : 'util-estimate-tag'}`}>{p.verified ? 'fee schedule' : 'typical NC estimate'}</span></div>
                             </div>
                           ))}
                           {(() => {

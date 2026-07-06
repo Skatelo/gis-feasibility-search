@@ -1000,7 +1000,7 @@ export async function detectNcCounty(address: string, googleKey: string): Promis
  * layer. Returns the parcel's situs address (or a reverse-geocoded one for vacant
  * land) and county so the normal analysis can run from it. Null if not found.
  */
-export async function lookupParcelById(pin: string, googleKey: string): Promise<{ address: string; county: string } | null> {
+export async function lookupParcelById(pin: string, googleKey: string): Promise<{ address: string; county: string; lat?: number; lng?: number } | null> {
   const clean = pin.trim().replace(/'/g, "''");
   if (clean.length < 3) return null;
   const where = `UPPER(parno) = '${clean.toUpperCase()}'`;
@@ -1016,24 +1016,32 @@ export async function lookupParcelById(pin: string, googleKey: string): Promise<
     const county = String(a.cntyname || '').trim();
     const situs = String(a.siteadd || '').trim();
     const scity = String(a.scity || '').trim();
-    if (situs) return { address: `${situs}${scity ? `, ${scity}` : ''}, NC`, county };
+
+    // The parcel's polygon centroid — the RELIABLE anchor. We return it so the
+    // caller can drive the analysis off the exact parcel point instead of
+    // re-geocoding an abbreviated county situs address (which often misses).
+    let lat: number | undefined, lng: number | undefined;
+    const ring: number[][] | undefined = feat.geometry?.rings?.[0];
+    if (ring?.length) {
+      const c = ringCentroid(ring);
+      if (c) { lng = c[0]; lat = c[1]; }
+    }
+
+    if (situs) return { address: `${situs}${scity ? `, ${scity}` : ''}, NC`, county, lat, lng };
 
     // Vacant parcel with no situs address — reverse-geocode the polygon centroid.
-    const ring = feat.geometry?.rings?.[0];
-    if (ring?.length && googleKey) {
-      let sx = 0, sy = 0; for (const p of ring) { sx += p[0]; sy += p[1]; }
-      const lng = sx / ring.length, lat = sy / ring.length;
+    if (typeof lat === 'number' && typeof lng === 'number' && googleKey) {
       try {
         const gr = await fetchWithTimeout(`https://maps.googleapis.com/maps/api/geocode/json?latlng=${lat},${lng}&key=${googleKey}`, 8000);
         if (gr.ok) {
           const gj = await gr.json();
           const best = gj.results?.find((r: any) => r.types?.some((t: string) => ['street_address', 'premise'].includes(t))) || gj.results?.[0];
           const addr = (best?.formatted_address || '').replace(/,?\s*USA$/i, '').trim();
-          if (addr) return { address: addr, county };
+          if (addr) return { address: addr, county, lat, lng };
         }
       } catch { /* fall through */ }
     }
-    return county ? { address: `${county} County parcel ${a.parno}`, county } : null;
+    return county ? { address: `${county} County parcel ${a.parno}`, county, lat, lng } : null;
   } catch { return null; }
 }
 
@@ -1051,6 +1059,7 @@ export async function executeLandAnalysis(
   onStageChange?: (stage: string) => void,
   onPartial?: (partial: Partial<SiteFeasibilityData>) => void,
   compRadiusMiles = 5,
+  knownCoords?: { lat: number; lng: number },
 ): Promise<SiteFeasibilityData> {
   const config = ncCountyConfig[countyName];
   if (!config) {
@@ -1059,20 +1068,30 @@ export async function executeLandAnalysis(
 
   onStageChange?.("Querying county GIS records...");
 
-  // Step A: Convert Text Address String into Lat/Long Coordinates with fallback
+  // Step A: Convert Text Address String into Lat/Long Coordinates with fallback.
+  // When the caller already knows the exact parcel point (e.g. a Parcel-ID lookup
+  // returns the polygon centroid), use it directly — skips a fragile geocode of an
+  // abbreviated county situs address that can miss the parcel entirely.
   let lng = 0;
   let lat = 0;
 
-  try {
-    const geocodeQuery = `${config.geocodeUrl}?SingleLine=${encodeURIComponent(addressString)}&outSR=4326&f=json`;
-    const geoResponse = await fetchWithRetry(geocodeQuery, 2, 5000); // fail fast
-    const geoData = await geoResponse.json();
-    if (geoData.candidates && geoData.candidates.length > 0) {
-      lng = geoData.candidates[0].location.x;
-      lat = geoData.candidates[0].location.y;
+  if (knownCoords && Number.isFinite(knownCoords.lat) && Number.isFinite(knownCoords.lng)) {
+    lat = knownCoords.lat;
+    lng = knownCoords.lng;
+  }
+
+  if (!lng || !lat) {
+    try {
+      const geocodeQuery = `${config.geocodeUrl}?SingleLine=${encodeURIComponent(addressString)}&outSR=4326&f=json`;
+      const geoResponse = await fetchWithRetry(geocodeQuery, 2, 5000); // fail fast
+      const geoData = await geoResponse.json();
+      if (geoData.candidates && geoData.candidates.length > 0) {
+        lng = geoData.candidates[0].location.x;
+        lat = geoData.candidates[0].location.y;
+      }
+    } catch (err) {
+      console.warn("NC Geocoder failed, falling back to Google Geocoding:", err);
     }
-  } catch (err) {
-    console.warn("NC Geocoder failed, falling back to Google Geocoding:", err);
   }
 
   if (!lng || !lat) {
@@ -4967,7 +4986,7 @@ export async function fetchGoogleDistanceMatrixComps(
 /** A grounded (Google-Search) Gemini text call with ONE retry on a transient
  *  rate-limit/5xx — so the cost estimate & material takeoff don't fail (and the
  *  card doesn't vanish) when they fire alongside the report's Gemini burst. */
-async function groundedGeminiText(geminiKey: string, prompt: string, systemText: string, timeoutMs: number, searchQueries?: string[], diag?: { perplexityAttempted: boolean; perplexitySources: number }): Promise<string | null> {
+async function groundedGeminiText(geminiKey: string, prompt: string, systemText: string, timeoutMs: number, searchQueries?: string[], diag?: { perplexityAttempted: boolean; perplexitySources: number; perplexityUrls?: string[] }): Promise<string | null> {
   // PERPLEXITY MODE (key configured + queries provided): the live searching
   // runs on the Perplexity Search API — all queries in parallel batches, many
   // ranked sources with extracted content — and Gemini synthesizes from those
@@ -4980,7 +4999,7 @@ async function groundedGeminiText(geminiKey: string, prompt: string, systemText:
   if (searchQueries && searchQueries.length && perplexityConfigured()) {
     if (diag) diag.perplexityAttempted = true;
     const { block, urls } = await perplexityResearchBlock(searchQueries);
-    if (diag) diag.perplexitySources = urls.length;
+    if (diag) { diag.perplexitySources = urls.length; diag.perplexityUrls = urls; }
     if (block) { effectivePrompt = prompt + block; usePerplexity = true; }
   }
   const body = JSON.stringify({
@@ -5479,19 +5498,23 @@ Return ONLY a JSON object in a \`\`\`json code block:
 - clearingPerAcre = TRADITIONAL excavator land clearing per acre (trees pulled by roots, debris removed); clearingDayRate = excavator crew day rate
 - haulOff = typical debris haul-off / dump fee for a small lot
 Use CURRENT LOCAL prices from credible tree-service / land-clearing / excavation sources; cite them; never invent (set unknown values to 0).`;
+  const zipStr = zip ? `${zip} ` : '';
+  const diag: { perplexityAttempted: boolean; perplexitySources: number; perplexityUrls?: string[] } = { perplexityAttempted: false, perplexitySources: 0 };
   const text = await groundedGeminiText(
     geminiKey,
     prompt,
     'You are a land-clearing / tree-service pricing assistant. Use the live web search results for current local prices. Return only the JSON; cite sources; never invent prices.',
     60000,
-    // Parallel batched Perplexity searches — local tree-service pricing sources.
+    // Parallel batched Perplexity searches — kept LOCAL to this county so the
+    // cited sources are relevant to the address, not national averages.
     [
-      `tree removal cost ${county} County NC ${new Date().getFullYear()}`,
+      `tree removal cost ${zipStr}${county} County NC ${new Date().getFullYear()}`,
       `stump grinding cost ${zip ? `${zip} NC` : `${county} County NC`}`,
-      `forestry mulching cost per acre North Carolina`,
+      `forestry mulching cost per acre ${county} County NC`,
       `land clearing cost per acre ${county} County NC`,
-      `excavator land clearing day rate debris haul off cost NC`,
+      `excavator land clearing day rate debris haul off ${county} County NC`,
     ],
+    diag,
   );
   if (!text) return null;
   const m = text.match(/```json\s*([\s\S]*?)\s*```/) || text.match(/\{[\s\S]*\}/);
@@ -5501,6 +5524,8 @@ Use CURRENT LOCAL prices from credible tree-service / land-clearing / excavation
     const num = (v: any) => { const n = Number(v); return Number.isFinite(n) && n > 0 ? Math.round(n) : 0; };
     const small = num(o.small), medium = num(o.medium), large = num(o.large);
     if (!small && !medium && !large) return null;
+    const modelSources = Array.isArray(o.sources) ? o.sources.map((s: any) => String(s)) : [];
+    const sources = filterLocalSources([...modelSources, ...(diag.perplexityUrls || [])], [county, `${county}county`, 'northcarolina', 'nc']);
     return {
       small: small || TREE_RATE_FALLBACK.small,
       medium: medium || TREE_RATE_FALLBACK.medium,
@@ -5511,7 +5536,7 @@ Use CURRENT LOCAL prices from credible tree-service / land-clearing / excavation
       clearingPerAcre: num(o.clearingPerAcre),
       clearingDayRate: num(o.clearingDayRate),
       haulOff: num(o.haulOff),
-      sources: Array.isArray(o.sources) ? o.sources.map((s: any) => String(s)).filter((s: string) => /^https?:\/\//.test(s)).slice(0, 6) : [],
+      sources: sources.slice(0, 6),
     };
   } catch { return null; }
 }
@@ -5639,6 +5664,57 @@ export async function fetchLandClearingEstimate(reportData: SiteFeasibilityData)
  * citable local source — there are NO baseline/fallback numbers and no guesses.
  * Returns null only when keys/address are missing.
  */
+// Typical current NC ranges used ONLY as a labeled fallback so a price always
+// shows when the live local lookup can't verify an exact figure.
+const UTIL_ESTIMATE = {
+  waterTap: [1500, 6000] as [number, number],
+  sewerTap: [3000, 9000] as [number, number],
+  well: [6000, 15000] as [number, number],
+  septic: [8000, 20000] as [number, number],
+  zoningPermit: [50, 150] as [number, number],
+  drivewayPermit: [50, 150] as [number, number],
+  buildingPermits: [1500, 4000] as [number, number],
+};
+
+// National cost-aggregator / average-price sites — never address-specific, so
+// they're the "irrelevant to the address" sources to drop from local pricing.
+const NATIONAL_AGGREGATORS = [
+  'homeadvisor', 'angi.', 'angieslist', 'thumbtack', 'homeguide', 'fixr.com', 'homewyse',
+  'lawnstarter', 'lawnlove', 'bobvila', 'forbes.com', 'thisoldhouse', 'rocketmortgage',
+  'bankrate', 'nerdwallet', 'yelp.com', 'porch.com', 'manta.com', 'buildzoom', 'houzz.com',
+  'realtor.com', 'zillow.com', 'redfin.com', 'wikipedia.org', 'reddit.com', 'quora.com',
+];
+
+/**
+ * Keep only source URLs RELEVANT to the searched locality. ALWAYS drops national
+ * cost-aggregator sites (national averages, not address-specific). Then ranks the
+ * rest so official (.gov/.us) and locality-matching (city/county/NC) sources come
+ * first, followed by any remaining local contractor pages. Never returns empty
+ * unless the input was.
+ */
+function filterLocalSources(urls: string[], tokens: string[]): string[] {
+  const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
+  const toks = tokens.map(norm).filter((t) => t.length >= 3);
+  const primary: string[] = [];   // official or locality-matching
+  const secondary: string[] = []; // other non-aggregator (likely local contractors)
+  const seen = new Set<string>();
+  for (const raw of urls) {
+    const u = String(raw);
+    if (!/^https?:\/\//i.test(u)) continue;
+    let host = '', path = '';
+    try { const p = new URL(u); host = p.hostname.toLowerCase(); path = p.pathname; } catch { host = u.toLowerCase(); }
+    const key = host + path;
+    if (seen.has(key)) continue;
+    if (NATIONAL_AGGREGATORS.some((a) => host.includes(a))) continue; // drop national averages
+    seen.add(key);
+    const hay = norm(host + path);
+    const official = /\.gov$|\.us$|\.gov\/|\.us\//i.test(host);
+    if (official || toks.some((t) => hay.includes(t))) primary.push(u);
+    else secondary.push(u);
+  }
+  return [...primary, ...secondary].slice(0, 12);
+}
+
 export async function fetchUtilitiesEstimate(reportData: SiteFeasibilityData): Promise<UtilitiesEstimate | null> {
   if (!getDeepSeekKey()) throw new Error('Add your DeepSeek API key in Account Settings to run the utilities & fees lookup on this device.');
   const county = reportData.countyName || '';
@@ -5684,7 +5760,7 @@ STRICT PRICING RULES — REAL FIGURES ONLY:
   // retry covers a transient miss. (No Perplexity key → Google grounding.)
   const jur = place ? `${place} NC` : `${county} County NC`;
   const yr = new Date().getFullYear();
-  const diag = { perplexityAttempted: false, perplexitySources: 0 };
+  const diag: { perplexityAttempted: boolean; perplexitySources: number; perplexityUrls?: string[] } = { perplexityAttempted: false, perplexitySources: 0 };
   // Perplexity Search API does the live web search; DeepSeek V4 Pro synthesizes
   // the strict verified-prices JSON from those ranked sources.
   const text = await groundedDeepSeekText(prompt, utilitiesSystem, [
@@ -5695,21 +5771,16 @@ STRICT PRICING RULES — REAL FIGURES ONLY:
     `well drilling cost ${county} County NC ${yr}`,
     `septic system installation cost perc test ${county} County NC`,
   ], diag);
-  if (!text) {
-    // Distinguish the two failure modes so the fix is obvious to the user:
-    if (diag.perplexityAttempted && diag.perplexitySources === 0) {
-      // Perplexity was configured but returned nothing — the search did not
-      // reach the API (bad/missing key, or the /.netlify/functions/perplexity
-      // proxy is unavailable) — so DeepSeek had no sources to synthesize from.
-      throw new Error('Live search failed: Perplexity returned no sources — check your Perplexity API key in Account Settings. Tap Retry.');
-    }
-    throw new Error(`Live search failed: DeepSeek did not answer (Perplexity ${diag.perplexityAttempted ? `returned ${diag.perplexitySources} sources` : 'not configured'}). Check your DeepSeek API key in Account Settings, then tap Retry.`);
+  // ALWAYS produce pricing. If the live search fails or answers oddly, fall back
+  // to a fully-estimated result (availability from the jurisdiction, prices from
+  // the typical-NC ranges) instead of erroring — the user asked to always see a
+  // price. `o` stays {} so `resolve()` uses the jurisdiction and every line takes
+  // its labeled estimate.
+  let o: any = {};
+  if (text) {
+    const m = text.match(/```json\s*([\s\S]*?)\s*```/) || text.match(/\{[\s\S]*\}/);
+    if (m) { try { o = JSON.parse((m[1] || m[0]).replace(/,\s*([}\]])/g, '$1')); } catch { o = {}; } }
   }
-  const m = text.match(/```json\s*([\s\S]*?)\s*```/) || text.match(/\{[\s\S]*\}/);
-  if (!m) throw new Error('The live search answered in an unexpected format — tap Retry.');
-
-  let o: any;
-  try { o = JSON.parse((m[1] || m[0]).replace(/,\s*([}\]])/g, '$1')); } catch { throw new Error('The live search answered in an unexpected format — tap Retry.'); }
   const num = (v: any) => { const n = Number(v); return Number.isFinite(n) && n > 0 ? Math.round(n) : 0; };
   const norm = (v: any): 'available' | 'not-available' | 'unknown' => {
     const s = String(v || '').toLowerCase();
@@ -5739,41 +5810,54 @@ STRICT PRICING RULES — REAL FIGURES ONLY:
   };
 
   const detailOf = (v: any) => { const s = String(v || '').trim(); return s ? s.slice(0, 120) : undefined; };
+  // When no verified figure exists, ALWAYS still show a price using a typical NC
+  // range, clearly labeled as an estimate (estimated:true) — never a blank line.
+  const withFallback = (r: { low: number; high: number; verified: boolean }, range: [number, number]) =>
+    r.verified ? r : { low: range[0], high: range[1], verified: false, estimated: true };
 
   const lines: UtilityLine[] = [];
   // WATER: public tap fee when served, else private well.
   if (publicWater === 'available') {
-    const r = exact(o.waterTap, o.waterTapLow, o.waterTapHigh);
-    lines.push({ name: 'Public water tap fee', kind: 'water', isPublic: true, status: 'available', ...r, detail: detailOf(o.waterTapDetail), note: 'municipal water tap / connection / impact fee (exact published fee)' });
+    const r = withFallback(exact(o.waterTap, o.waterTapLow, o.waterTapHigh), UTIL_ESTIMATE.waterTap);
+    lines.push({ name: 'Public water tap fee', kind: 'water', isPublic: true, status: 'available', ...r, detail: detailOf(o.waterTapDetail), note: 'municipal water tap / connection / impact fee' });
   } else {
-    const r = exact(o.well, o.wellLow, o.wellHigh);
-    lines.push({ name: 'Private well', kind: 'water', isPublic: false, status: publicWater, ...r, note: 'drill + pump + connection — typical local cost (no public water)' });
+    const r = withFallback(exact(o.well, o.wellLow, o.wellHigh), UTIL_ESTIMATE.well);
+    lines.push({ name: 'Private well', kind: 'water', isPublic: false, status: publicWater, ...r, note: 'drill + pump + connection (no public water)' });
   }
   // SEWER: public tap fee when served, else septic.
   if (publicSewer === 'available') {
-    const r = exact(o.sewerTap, o.sewerTapLow, o.sewerTapHigh);
-    lines.push({ name: 'Public sewer tap fee', kind: 'sewer', isPublic: true, status: 'available', ...r, detail: detailOf(o.sewerTapDetail), note: 'municipal sewer tap / connection / impact fee (exact published fee)' });
+    const r = withFallback(exact(o.sewerTap, o.sewerTapLow, o.sewerTapHigh), UTIL_ESTIMATE.sewerTap);
+    lines.push({ name: 'Public sewer tap fee', kind: 'sewer', isPublic: true, status: 'available', ...r, detail: detailOf(o.sewerTapDetail), note: 'municipal sewer tap / connection / impact fee' });
   } else {
-    const r = exact(o.septic, o.septicLow, o.septicHigh);
-    lines.push({ name: 'Septic system', kind: 'sewer', isPublic: false, status: publicSewer, ...r, note: 'perc/soil test + conventional system install — typical local cost (no public sewer)' });
+    const r = withFallback(exact(o.septic, o.septicLow, o.septicHigh), UTIL_ESTIMATE.septic);
+    lines.push({ name: 'Septic system', kind: 'sewer', isPublic: false, status: publicSewer, ...r, note: 'perc/soil test + conventional system install (no public sewer)' });
   }
 
   // Residential permit fees from the jurisdiction's adopted fee schedule —
   // verified figures only, same no-guessing rule as the tap fees.
   const permits: PermitFeeLine[] = [];
   const zp = num(o.zoningPermitFee);
-  if (zp) permits.push({ name: 'Residential zoning permit', low: zp, high: zp, verified: true });
+  permits.push(zp
+    ? { name: 'Residential zoning permit', low: zp, high: zp, verified: true }
+    : { name: 'Residential zoning permit', low: UTIL_ESTIMATE.zoningPermit[0], high: UTIL_ESTIMATE.zoningPermit[1], verified: false, estimated: true });
   const dp = num(o.drivewayPermitFee);
-  if (dp) permits.push({ name: 'Driveway permit', low: dp, high: dp, verified: true });
+  permits.push(dp
+    ? { name: 'Driveway permit', low: dp, high: dp, verified: true }
+    : { name: 'Driveway permit', low: UTIL_ESTIMATE.drivewayPermit[0], high: UTIL_ESTIMATE.drivewayPermit[1], verified: false, estimated: true });
   const bl = num(o.buildingPermitLow), bh = num(o.buildingPermitHigh);
-  if (bl || bh) {
-    permits.push({
-      name: 'Building + trade permits (new SFH, ~1,400–1,800 sqft)',
-      low: bl || bh, high: Math.max(bl, bh),
-      note: detailOf(o.permitNote) || 'calculated from square footage / construction valuation — exact amount depends on the plans',
-      verified: true,
-    });
-  }
+  permits.push((bl || bh)
+    ? {
+        name: 'Building + trade permits (new SFH, ~1,400–1,800 sqft)',
+        low: bl || bh, high: Math.max(bl, bh),
+        note: detailOf(o.permitNote) || 'calculated from square footage / construction valuation — exact amount depends on the plans',
+        verified: true,
+      }
+    : {
+        name: 'Building + trade permits (new SFH, ~1,400–1,800 sqft)',
+        low: UTIL_ESTIMATE.buildingPermits[0], high: UTIL_ESTIMATE.buildingPermits[1],
+        note: 'typical NC total for building + electrical + plumbing + mechanical permits — confirm with the jurisdiction',
+        verified: false, estimated: true,
+      });
 
   // Developer-prepaid caveat — tap fees on subdivision lots are often already
   // satisfied by the developer's infrastructure installation.
@@ -5781,10 +5865,10 @@ STRICT PRICING RULES — REAL FIGURES ONLY:
     ? 'These tap fees are not necessarily still owed: if this lot is in a subdivision where the developer already installed and paid for the taps, the fees may be satisfied. Ask the utility whether taps were purchased for this lot before budgeting — it can change the development cost by thousands.'
     : undefined;
 
-  const real = lines.some((l) => l.verified) || permits.length > 0;
-  // Totals sum ONLY verified lines (0 when nothing was verifiable).
-  const totalLow = lines.reduce((s, l) => s + (l.verified ? l.low : 0), 0);
-  const totalHigh = lines.reduce((s, l) => s + (l.verified ? l.high : 0), 0);
+  const real = lines.some((l) => l.verified) || permits.some((p) => p.verified);
+  // Totals sum every priced line (verified or estimated) so a total always shows.
+  const totalLow = lines.reduce((s, l) => s + l.low, 0);
+  const totalHigh = lines.reduce((s, l) => s + l.high, 0);
   const bothPublic = publicWater === 'available' && publicSewer === 'available';
   const neitherPublic = publicWater !== 'available' && publicSewer !== 'available';
   const summary = bothPublic
@@ -5793,7 +5877,15 @@ STRICT PRICING RULES — REAL FIGURES ONLY:
       ? 'No public water/sewer — this parcel needs a private well + septic.'
       : `${publicWater === 'available' ? 'Public water' : 'Well'} + ${publicSewer === 'available' ? 'public sewer' : 'septic'} required.`;
 
-  const sources = Array.isArray(o.sources) ? o.sources.map((s: any) => String(s)).filter((s: string) => /^https?:\/\//.test(s)).slice(0, 12) : [];
+  // Sources RELEVANT to this address only: the model's cited URLs plus the real
+  // Perplexity results, filtered to official (.gov/.us) domains or ones that
+  // mention the city/county/NC — drops off-area national pages.
+  const modelSources = Array.isArray(o.sources) ? o.sources.map((s: any) => String(s)) : [];
+  const cityTok = (String(reportData.inputAddress || '').split(',')[1] || '').trim();
+  const sources = filterLocalSources(
+    [...modelSources, ...(diag.perplexityUrls || [])],
+    [place || '', county, `${county}county`, cityTok, 'northcarolina', 'nc'].filter(Boolean),
+  );
   return {
     locality: zip ? `ZIP ${zip} · ${county} County, NC` : `${county} County, NC`,
     jurisdiction, incorporated,
@@ -5967,7 +6059,7 @@ async function postDeepSeekOnce(body: string, key: string): Promise<any | null> 
  *  those ranked sources. Mirrors groundedGeminiText's contract — returns the
  *  model text, or null on missing key / failure. `diag` records the Perplexity
  *  outcome so callers can tell a search miss from a synthesis miss. */
-async function groundedDeepSeekText(prompt: string, systemText: string, searchQueries: string[], diag?: { perplexityAttempted: boolean; perplexitySources: number }): Promise<string | null> {
+async function groundedDeepSeekText(prompt: string, systemText: string, searchQueries: string[], diag?: { perplexityAttempted: boolean; perplexitySources: number; perplexityUrls?: string[] }): Promise<string | null> {
   const key = getDeepSeekKey();
   if (!key) return null;
   let effectivePrompt = prompt;
@@ -5977,7 +6069,7 @@ async function groundedDeepSeekText(prompt: string, systemText: string, searchQu
     // query and a higher source cap so DeepSeek synthesizes from many fee
     // schedules / contractor pages, not one or two.
     const { block, urls } = await perplexityResearchBlock(searchQueries, { maxResultsPerQuery: 10, maxSources: 40 });
-    if (diag) diag.perplexitySources = urls.length;
+    if (diag) { diag.perplexitySources = urls.length; diag.perplexityUrls = urls; }
     if (block) effectivePrompt = prompt + block;
   }
   const body = JSON.stringify({
