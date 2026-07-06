@@ -6452,7 +6452,16 @@ ${reportData.comps && reportData.comps.length > 0
   const GEN_BASE = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash`;
   // With the Perplexity research pack in context, the google_search tool is
   // dropped — the report synthesizes from the pack (faster, no grounding quota).
-  const baseBody = { contents, systemInstruction: { parts: [{ text: systemPrompt }] }, ...(researchUrls.length ? {} : { tools: [{ google_search: {} }] }) };
+  // A HIGH maxOutputTokens is essential: Gemini 3.5 Flash spends "thinking" tokens
+  // from the same output budget, so without a generous cap a long 25-section
+  // report can exhaust it on reasoning and return an EMPTY candidate
+  // ("No response generated."). 32k leaves room for thinking + the full report.
+  const baseBody = {
+    contents,
+    systemInstruction: { parts: [{ text: systemPrompt }] },
+    generationConfig: { maxOutputTokens: 32768, temperature: 1 },
+    ...(researchUrls.length ? {} : { tools: [{ google_search: {} }] }),
+  };
 
   // FUSION: when a DeepSeek key is configured, Gemini 3.5 Flash and DeepSeek V4
   // Pro draft the SAME task IN PARALLEL, then Gemini 3.5 Flash JUDGES and streams
@@ -6479,19 +6488,26 @@ ${reportData.comps && reportData.comps.length > 0
   //      report in ONE non-streaming request — no long connection to lose. The
   //      caller uses the returned text as the final report, so a partial stream
   //      is cleanly replaced rather than erroring out.
+  // An EMPTY / placeholder result (no text, or Gemini returned an empty candidate)
+  // must be treated as a FAILURE so the next fallback tier runs — otherwise the
+  // user sees "No response generated." instead of the report.
+  const isEmpty = (r: { text: string } | null | undefined) => !r || !r.text || !r.text.trim() || r.text.trim() === 'No response generated.';
+
   const streamResilient = async (primaryBody: any, fallbackBody?: any): Promise<{ text: string; sources?: ChatSource[] }> => {
     // 1) Preferred: progressive streaming (with a pre-token retry + fallback body).
     try {
-      return await streamGeminiSSE(streamURL, primaryBody, guardedToken);
+      const r = await streamGeminiSSE(streamURL, primaryBody, guardedToken);
+      if (!isEmpty(r)) return r;
+      console.warn('Report stream returned empty — falling through to non-streaming.');
     } catch (e) {
       console.warn('Report stream failed:', e);
       if (!emitted) {
         await new Promise((r) => setTimeout(r, 1500));
-        try { return await streamGeminiSSE(streamURL, primaryBody, guardedToken); }
+        try { const r2 = await streamGeminiSSE(streamURL, primaryBody, guardedToken); if (!isEmpty(r2)) return r2; }
         catch (e2) {
           console.warn('Stream retry failed:', e2);
           if (fallbackBody && !emitted) {
-            try { return await streamGeminiSSE(streamURL, fallbackBody, guardedToken); } catch (e3) { console.warn('Fallback stream failed:', e3); }
+            try { const r3 = await streamGeminiSSE(streamURL, fallbackBody, guardedToken); if (!isEmpty(r3)) return r3; } catch (e3) { console.warn('Fallback stream failed:', e3); }
           }
         }
       }
@@ -6499,7 +6515,9 @@ ${reportData.comps && reportData.comps.length > 0
     const body = fallbackBody || primaryBody;
     // 2) Non-streaming with grounding — one short-lived request (mobile-safe).
     try {
-      return await geminiGenerateWithSources(nonStreamURL, body);
+      const r = await geminiGenerateWithSources(nonStreamURL, body);
+      if (!isEmpty(r)) return r;
+      console.warn('Non-streaming (grounded) returned empty — retrying WITHOUT web grounding.');
     } catch (e4) {
       console.warn('Non-streaming (grounded) failed — retrying WITHOUT web grounding:', e4);
     }
@@ -6510,7 +6528,9 @@ ${reportData.comps && reportData.comps.length > 0
     //    itself is valid. Loses live citations but never fails the whole report.
     const { tools: _drop, ...noGrounding } = body;
     try {
-      return await geminiGenerateWithSources(nonStreamURL, noGrounding);
+      const r = await geminiGenerateWithSources(nonStreamURL, noGrounding);
+      if (!isEmpty(r)) return r;
+      throw new Error('the model returned an empty response');
     } catch (e5) {
       const detail = e5 instanceof Error ? e5.message : String(e5);
       throw new Error(`The report could not be generated after several retries (last error: ${detail}). Please check your internet connection and that your Gemini API key is valid with remaining quota, then try again.`);

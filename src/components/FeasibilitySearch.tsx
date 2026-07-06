@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import type { FormEvent, KeyboardEvent, FC } from 'react';
 import { createRoot } from 'react-dom/client';
-import { executeLandAnalysis, chatWithGemini, chatFollowUp, getUserKeys, getMapboxToken, detectNcCounty, lookupParcelById, fetchConstructionCostEstimate, fetchMaterialTakeoff, fetchLandClearingEstimate, fetchUtilitiesEstimate, fetchGoogleDistanceMatrixComps, fetchParcelsInBbox, getCompPrefs, getReportAutoGenerate, enformionConfigured, enformionContactEnrich, enformionPersonSearch, enformionBusinessSearch, looksLikeBusiness, enformionDiagMessage, getLastEnformionShape, getLastEnformionDetail, enformionPropertySearch, ncAddressSuggestions } from '../services/feasibilityService';
+import { executeLandAnalysis, chatWithGemini, chatFollowUp, getUserKeys, getMapboxToken, detectNcCounty, lookupParcelById, fetchConstructionCostEstimate, fetchLandClearingEstimate, fetchUtilitiesEstimate, fetchGoogleDistanceMatrixComps, fetchParcelsInBbox, getCompPrefs, getReportAutoGenerate, enformionConfigured, enformionContactEnrich, enformionPersonSearch, enformionBusinessSearch, looksLikeBusiness, enformionDiagMessage, getLastEnformionShape, getLastEnformionDetail, enformionPropertySearch, ncAddressSuggestions } from '../services/feasibilityService';
 import type { SkipTraceContact, EnformionPropertyRecord } from '../services/feasibilityService';
 import type { ChatMessage, ChatAttachment } from '../services/feasibilityService';
 import { saveReport, getReportEtaMs, recordReportDuration } from '../services/reportStore';
@@ -1004,26 +1004,13 @@ export const FeasibilitySearch: FC = () => {
   // Cost estimate + material takeoff only (each shows as it arrives). If BOTH
   // fail (e.g. a transient Gemini rate limit), the section stays and offers a
   // retry instead of vanishing. Retry re-runs ONLY this lookup.
+  // Fetches ONLY the construction-cost estimate, which is fed INTO the AI
+  // Feasibility Report (Section 20 — Development Cost Considerations). There is no
+  // longer a standalone cost/takeoff card, so no loading/error/takeoff UI state.
   const runCostTakeoffLookup = (reportData: SiteFeasibilityData, seq: number): Promise<ConstructionCostEstimate | null> => {
-    setCostLoading(true);
-    setCostError(false);
     setCostEstimate(null);
-    setMaterialTakeoff(null);
-    let pending = 2;
-    let anySuccess = false;
-    const settle = (ok: boolean) => {
-      if (ok) anySuccess = true;
-      if (--pending === 0 && seq === searchSeqRef.current) {
-        setCostLoading(false);
-        if (!anySuccess) setCostError(true);
-      }
-    };
     const estPromise = fetchConstructionCostEstimate(reportData).catch(() => null);
-    estPromise.then((est) => { if (seq === searchSeqRef.current && est) setCostEstimate(est); settle(!!est); });
-    fetchMaterialTakeoff(reportData).then(
-      (mt) => { if (seq === searchSeqRef.current && mt) setMaterialTakeoff(mt); settle(!!mt); },
-      () => settle(false),
-    );
+    estPromise.then((est) => { if (seq === searchSeqRef.current && est) setCostEstimate(est); });
     return estPromise;
   };
 
@@ -1163,7 +1150,7 @@ export const FeasibilitySearch: FC = () => {
       // the report so Section 20 (Development Cost Considerations) is built FROM
       // it — same numbers, explicitly linked to the card.
       const costBlock = costEstimate
-        ? `\n\nINSTANT CONSTRUCTION COST ESTIMATE (already computed for THIS parcel and shown to the user in the "Instant Construction Cost Estimate" card) — USE THESE FIGURES as the authoritative basis for Section 20 (Development Cost Considerations). Present the same itemized lines and totals (you may add site-specific adders + cited sources), keep every number CONSISTENT with the card, and state that the build budget matches the Instant Construction Cost Estimate. Do NOT contradict these totals.
+        ? `\n\nINSTANT CONSTRUCTION COST ESTIMATE (already computed for THIS parcel) — USE THESE FIGURES as the authoritative basis for Section 20 (Development Cost Considerations). Present the SAME itemized lines and totals directly in Section 20 as the report's own construction budget (you may add site-specific adders + cited sources), keep every number CONSISTENT, and do NOT contradict these totals.
 Planned home: ${costEstimate.plannedSqft.toLocaleString()} sqft · Locality: ${costEstimate.locality}
 Itemized hard costs:
 ${costEstimate.lineItems.map((li) => `- ${li.category} — ${li.item}${li.detail ? ` (${li.detail})` : ''}: $${li.cost.toLocaleString()}`).join('\n')}
@@ -1240,7 +1227,7 @@ Section 17 (Market Saturation & Absorption by Product Type) must be PRECISE and 
 
 Section 18 (Interest Rate & Financing Environment) must state, in detail, the CURRENT 30-year mortgage rate and its recent trend — RISING, FALLING, or STEADY (cite a current source) — the Federal Reserve's posture, and exactly how that affects buyer demand, affordability, absorption pace, and the project's exit timing. Give a short SENSITIVITY read: what a rate move up vs. down would do to demand and to the recommended hold/sell timing.
 
-Section 20 (Development Cost Considerations) must present an ITEMIZED construction-cost TABLE that mirrors the Construction Cost Reference Model in your standards (a real ~$250k / ~1,600 sqft 3BR/2BA new-build budget incl. a $25k builder fee and a contingency), but with each line LOCALIZED to CURRENT prices near this address (cited sources) and SCALED to the planned home's size; show the scaled total hard cost and $/sqft. Search AS MANY local sources as possible for clearing/tree removal, grading, foundation, well + septic (or tap/impact fees), and per-sqft build cost — be EXTREMELY ACCURATE.${costEstimate ? ' When the INSTANT CONSTRUCTION COST ESTIMATE figures are provided below, BUILD this section from them — use the SAME line items and totals (you may add the site adders + sources), keep $/sqft and the total CONSISTENT with that card, and note that the budget matches the on-screen Instant Construction Cost Estimate.' : ''}${costBlock}
+Section 20 (Development Cost Considerations) must present an ITEMIZED construction-cost TABLE that mirrors the Construction Cost Reference Model in your standards (a real ~$250k / ~1,600 sqft 3BR/2BA new-build budget incl. a $25k builder fee and a contingency), but with each line LOCALIZED to CURRENT prices near this address (cited sources) and SCALED to the planned home's size; show the scaled total hard cost and $/sqft. Search AS MANY local sources as possible for clearing/tree removal, grading, foundation, well + septic (or tap/impact fees), and per-sqft build cost — be EXTREMELY ACCURATE.${costEstimate ? ' When the INSTANT CONSTRUCTION COST ESTIMATE figures are provided below, BUILD this section from them — use the SAME line items and totals (you may add the site adders + sources), keep $/sqft and the total CONSISTENT, and present it as the report\'s own itemized construction budget.' : ''}${costBlock}
 
 Sections 22 (Land Valuation) & 23 (Builder/Developer Profitability) must compute, in a pro-forma TABLE, what a builder would PAY FOR THE LAND: start from ARV (from the comps' median $/sqft × planned GLA), subtract the localized total construction cost, subtract SITE-SPECIFIC adders that reduce land value — TREE/lot CLEARING (if wooded), extra GRADING/engineering (if slope ≥15%), and WELL + SEPTIC (if no public water/sewer) — subtract selling/closing/financing, and subtract DEVELOPER PROFIT at THREE margins shown side by side: a little less than 20% of ARV (≈15%), EXACTLY 20% of ARV, and more than 20% of ARV (≈25%). This yields THREE residual land values (one per margin) in the table — a lower profit margin lets the builder pay MORE for the land, a higher margin less. Cross-check against the rule of thumb that builders pay ≈ 20% of ARV for a finished lot (then deduct those same site costs), and present a defensible land-value RANGE that brackets the three figures. Reflect any rezoning/subdivision upside from Sections 6–7 and the saturation/rate context from Sections 17–18 in the highest-and-best-use and valuation. This is development-feasibility "what a builder would pay" — NOT a wholesale max-allowable-offer.
 
@@ -2995,7 +2982,11 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
   // Material Takeoff, now rendered INSIDE the AI Feasibility Report (injected
   // at its Development Cost section) instead of as a standalone left-column
   // card. Stays visible through loading/error with its own Retry.
-  const developmentCostSection = (costEstimate || costLoading || materialTakeoff || costError) ? (
+  // The Instant Construction Cost Estimate is now folded INTO the AI Feasibility
+  // Report itself (Section 20 — Development Cost Considerations, built from the
+  // same figures). The standalone estimate/takeoff box was removed per request,
+  // so this renders nothing (condition pinned false).
+  const developmentCostSection = (false as boolean) ? (
     <div className="report-devcost-section" style={{ margin: '12px 0', padding: '12px 14px', border: '1px solid var(--bg-card-border)', borderRadius: '10px', background: 'var(--bg-card-hover, rgba(148, 163, 184, 0.07))' }}>
       <h3 className="registry-card-header" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
         <Hammer size={16} style={{ color: 'var(--primary)' }} />
