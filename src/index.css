@@ -4021,4 +4021,13 @@ img, svg, video, canvas, table, pre { max-width: 100%; }
 }
 
 /* Utilities: "typical NC estimate" tag (fallback when no verified local figure) */
-.util-verified-tag.util-estimate-tag { background: #fef3c7; color: #92400e; }
+.util-verified-tag.util-estimate-tag {
+  background: #fef3c7;
+  color: #92400e;
+  font-size: 0.52rem;
+  white-space: normal;
+  display: inline-block;
+  line-height: 1.25;
+  padding: 1px 6px;
+  vertical-align: middle;
+}
