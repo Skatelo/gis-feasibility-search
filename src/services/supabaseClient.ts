@@ -41,6 +41,9 @@ export function clearSupabaseConfig(): void {
 }
 
 export function isSupabaseConfigured(): boolean {
+  try {
+    if (localStorage.getItem('gis_disable_supabase') === 'true') return false;
+  } catch { /* ignore */ }
   const { url, anonKey } = getSupabaseConfig();
   return !!(url && anonKey && /^https?:\/\//.test(url));
 }

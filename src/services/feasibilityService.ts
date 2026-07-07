@@ -3371,11 +3371,42 @@ async function zoningViaGemini(promptText: string, geminiKey: string, searchQuer
   }
 }
 
+/** Zoning web lookup via DeepSeek V4 Pro using Perplexity Search API sources. */
+async function zoningViaDeepSeek(promptText: string, searchQueries?: string[]): Promise<ZoningResult | null> {
+  const key = getDeepSeekKey();
+  if (!key) return null;
+  try {
+    let effectivePrompt = promptText;
+    if (searchQueries && searchQueries.length && perplexityConfigured()) {
+      const { block } = await perplexityResearchBlock(searchQueries, { maxResultsPerQuery: 6, maxSources: 18 });
+      if (block) { effectivePrompt = promptText + block; }
+    }
+    const body = JSON.stringify({
+      model: 'deepseek-v4-pro',
+      messages: [
+        { role: 'system', content: ZONING_SYSTEM },
+        { role: 'user', content: effectivePrompt },
+      ],
+      stream: false,
+      thinking: { type: 'disabled' },
+      temperature: 0.2,
+      max_tokens: 2000,
+    });
+    const msg = await postDeepSeekOnce(body, key);
+    const content = msg?.content;
+    if (content) return parseZoningResult(content);
+    return null;
+  } catch (e) {
+    console.warn('Zoning web lookup via DeepSeek failed:', e);
+    return null;
+  }
+}
+
 /**
- * Gemini 3.5 Flash with Google-Search grounding over the official county/city
- * zoning sources. The caller COMBINES this with the county GIS layer to resolve
- * the district (see executeLandAnalysis STAGE 3). Optionally seeded with the GIS
- * code so the AI can confirm/correct the authoritative layer.
+ * Gemini 3.5 Flash or DeepSeek V4 Pro with Perplexity web search over the official
+ * county/city zoning sources. The caller COMBINES this with the county GIS layer to
+ * resolve the district (see executeLandAnalysis STAGE 3). Optionally seeded with the
+ * GIS code so the AI can confirm/correct the authoritative layer.
  */
 export async function fetchZoningViaWebSearch(
   address: string,
@@ -3384,9 +3415,10 @@ export async function fetchZoningViaWebSearch(
   lng?: number,
   gisHint?: string | null,
 ): Promise<ZoningResult | null> {
+  const deepSeekKey = getDeepSeekKey();
   const geminiApiKey = getUserKeys().gemini || "";
-  if (!geminiApiKey) {
-    console.warn("Gemini API key is not configured in Account Settings.");
+  if (!deepSeekKey && !geminiApiKey) {
+    console.warn("Neither DeepSeek nor Gemini API key is configured in Account Settings.");
     return null;
   }
 
@@ -3405,12 +3437,18 @@ Rules: "zoningCode" must be the actual district code that jurisdiction uses for 
 
   // Parallel batched Perplexity searches over the official zoning sources.
   const cityPart = (address.split(',')[1] || '').trim();
-  return await zoningViaGemini(lookupPrompt, geminiApiKey, [
+  const queries = [
     `zoning district "${address}"`,
     `${countyName ? `${countyName} County NC` : cityPart ? `${cityPart} NC` : 'North Carolina'} zoning map GIS parcel viewer`,
     `${countyName ? `${countyName} County` : cityPart} NC zoning ordinance districts${gisHint ? ` ${gisHint}` : ''}`,
     `${cityPart || countyName || ''} NC planning department zoning lookup`.trim(),
-  ]);
+  ];
+
+  if (deepSeekKey) {
+    return await zoningViaDeepSeek(lookupPrompt, queries);
+  } else {
+    return await zoningViaGemini(lookupPrompt, geminiApiKey, queries);
+  }
 }
 
 /**
@@ -5716,7 +5754,11 @@ function filterLocalSources(urls: string[], tokens: string[]): string[] {
 }
 
 export async function fetchUtilitiesEstimate(reportData: SiteFeasibilityData): Promise<UtilitiesEstimate | null> {
-  if (!getDeepSeekKey()) throw new Error('Add your DeepSeek API key in Account Settings to run the utilities & fees lookup on this device.');
+  const deepSeekKey = getDeepSeekKey();
+  const geminiKey = getBackgroundGeminiKey();
+  if (!deepSeekKey && !geminiKey) {
+    throw new Error('Add your Gemini or DeepSeek API key in Account Settings to run the utilities & fees lookup on this device.');
+  }
   const county = reportData.countyName || '';
   const zip = (String(reportData.inputAddress || '').match(/\b(\d{5})(?:-\d{4})?\b/) || [])[1] || '';
   const locality = zip ? `${reportData.inputAddress} (ZIP ${zip}, ${county} County, NC)` : `${reportData.inputAddress} (${county} County, NC)`;
@@ -5754,23 +5796,31 @@ STRICT PRICING RULES — REAL FIGURES ONLY:
   const utilitiesSystem = 'You are a site-development utilities and permit-fee analyst for North Carolina — any city, town, or county. Use web search to find the LOCAL water/sewer provider for the given jurisdiction, its CURRENT published tap/connection/impact fee schedule, the jurisdiction\'s CURRENT adopted residential permit fee schedule, and current local well & septic contractor pricing. Determine public-water and public-sewer availability SEPARATELY (a parcel may be public water + septic, well + public sewer, both, or neither) and report EACH cost as a single exact dollar amount. Return only the JSON. Every number must be traceable to a cited source URL; leave any unverifiable number 0 — never estimate or use regional averages.';
 
   // Live searching on the Perplexity Search API (parallel batched queries →
-  // many ranked fee-schedule sources), synthesis on Gemini with the strict
-  // verified-prices-only prompt. Runs IMMEDIATELY (no queue wait), in parallel
-  // with the tree count and the other section lookups. The card's automatic
-  // retry covers a transient miss. (No Perplexity key → Google grounding.)
+  // many ranked fee-schedule sources), synthesis on Gemini/DeepSeek. Runs
+  // IMMEDIATELY (no queue wait), in parallel with the tree count and the
+  // other section lookups. The card's automatic retry covers a transient miss.
   const jur = place ? `${place} NC` : `${county} County NC`;
   const yr = new Date().getFullYear();
   const diag: { perplexityAttempted: boolean; perplexitySources: number; perplexityUrls?: string[] } = { perplexityAttempted: false, perplexitySources: 0 };
-  // Perplexity Search API does the live web search; DeepSeek V4 Pro synthesizes
-  // the strict verified-prices JSON from those ranked sources.
-  const text = await groundedDeepSeekText(prompt, utilitiesSystem, [
+
+  const queries = [
+    `"${reportData.inputAddress}" utilities public water sewer septic well`,
+    `${reportData.inputAddress} water sewer well septic utilities`,
+    `water sewer mains near ${reportData.inputAddress}`,
     `${jur} water sewer tap connection impact fee schedule ${yr}`,
     `${jur} water sewer authority residential connection fees`,
     `${jur} residential building permit fee schedule ${yr}`,
     `${jur} zoning permit driveway permit fee`,
     `well drilling cost ${county} County NC ${yr}`,
     `septic system installation cost perc test ${county} County NC`,
-  ], diag);
+  ];
+
+  let text: string | null = null;
+  if (deepSeekKey) {
+    text = await groundedDeepSeekText(prompt, utilitiesSystem, queries, diag);
+  } else {
+    text = await groundedGeminiText(geminiKey, prompt, utilitiesSystem, 90000, queries, diag);
+  }
   // ALWAYS produce pricing. If the live search fails or answers oddly, fall back
   // to a fully-estimated result (availability from the jurisdiction, prices from
   // the typical-NC ranges) instead of erroring — the user asked to always see a

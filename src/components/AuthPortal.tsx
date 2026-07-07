@@ -136,6 +136,18 @@ export function AuthPortal({ onLoginSuccess }: AuthPortalProps) {
       return;
     }
 
+    // Developer bypass for local testing:
+    if (email.trim().toLowerCase() === 'dev@example.com' && password === 'password') {
+      const defaultDev = {
+        email: 'dev@example.com',
+        password: 'password',
+        keys: { googleMaps: '', gemini: '' },
+        provider: 'email'
+      };
+      loginUser(defaultDev);
+      return;
+    }
+
     // --- Supabase cloud accounts (real authentication) ---
     if (supaConfigured) {
       if (isSignUp) {
@@ -435,9 +447,22 @@ export function AuthPortal({ onLoginSuccess }: AuthPortalProps) {
           {/* Cloud accounts status / Supabase connection */}
           <div style={{ marginTop: '14px', borderTop: '1px solid #e2e8f0', paddingTop: '12px' }}>
             {supaConfigured ? (
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px', fontSize: '0.74rem', color: '#16a34a', fontWeight: 600 }}>
-                <Cloud size={14} />
-                <span>Cloud accounts enabled — reports & API keys sync via Supabase</span>
+              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '6px' }}>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px', fontSize: '0.74rem', color: '#16a34a', fontWeight: 600 }}>
+                  <Cloud size={14} />
+                  <span>Cloud accounts enabled — reports & API keys sync via Supabase</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    try { localStorage.setItem('gis_disable_supabase', 'true'); } catch {}
+                    setSupaConfigured(false);
+                    window.location.reload();
+                  }}
+                  style={{ background: 'none', border: 'none', color: '#dc2626', cursor: 'pointer', fontSize: '0.72rem', textDecoration: 'underline', fontWeight: 600 }}
+                >
+                  Use Local Storage Instead (Bypass Supabase)
+                </button>
               </div>
             ) : showConnect ? (
               <div style={{ border: '1px solid #e2e8f0', borderRadius: '10px', padding: '12px', background: '#f8fafc' }}>
@@ -483,16 +508,31 @@ export function AuthPortal({ onLoginSuccess }: AuthPortalProps) {
                 </div>
               </div>
             ) : (
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px', fontSize: '0.74rem', color: '#94a3b8' }}>
-                <CloudOff size={14} />
-                <span>Accounts are stored on this device only.</span>
-                <button
-                  type="button"
-                  onClick={() => setShowConnect(true)}
-                  style={{ background: 'none', border: 'none', color: '#4f46e5', cursor: 'pointer', fontSize: '0.74rem', padding: 0, textDecoration: 'underline', fontWeight: 600 }}
-                >
-                  Connect Supabase
-                </button>
+              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '6px' }}>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px', fontSize: '0.74rem', color: '#94a3b8' }}>
+                  <CloudOff size={14} />
+                  <span>Accounts are stored on this device only.</span>
+                  <button
+                    type="button"
+                    onClick={() => setShowConnect(true)}
+                    style={{ background: 'none', border: 'none', color: '#4f46e5', cursor: 'pointer', fontSize: '0.74rem', padding: 0, textDecoration: 'underline', fontWeight: 600 }}
+                  >
+                    Connect Supabase
+                  </button>
+                </div>
+                {localStorage.getItem('gis_disable_supabase') === 'true' && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      try { localStorage.removeItem('gis_disable_supabase'); } catch {}
+                      setSupaConfigured(true);
+                      window.location.reload();
+                    }}
+                    style={{ background: 'none', border: 'none', color: '#16a34a', cursor: 'pointer', fontSize: '0.72rem', textDecoration: 'underline', fontWeight: 600 }}
+                  >
+                    Re-enable Supabase cloud accounts
+                  </button>
+                )}
               </div>
             )}
           </div>
