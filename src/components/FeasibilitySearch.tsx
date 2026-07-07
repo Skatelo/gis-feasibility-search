@@ -1842,7 +1842,8 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
         <strong>Max Footprint (est.):</strong> ${gr ? gr.maxBuildingFootprintSqft.toLocaleString() + ' SF' : 'N/A'}
       </div>`;
 
-    if (!mapboxMapRef.current) {
+    const isContainerEmpty = mapRef.current && mapRef.current.children.length === 0;
+    if (!mapboxMapRef.current || isContainerEmpty) {
       mapboxMapRef.current = new mapboxgl.Map({
         container: mapRef.current,
         style: 'mapbox://styles/mapbox/satellite-streets-v12',
@@ -1946,6 +1947,17 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
 
     if (map.isStyleLoaded()) apply();
     else map.once('load', apply);
+
+    return () => {
+      if (mapboxMapRef.current) {
+        try { mapboxMapRef.current.remove(); } catch {}
+        mapboxMapRef.current = null;
+      }
+      if (mapboxPopupRef.current) {
+        try { mapboxPopupRef.current.remove(); } catch {}
+        mapboxPopupRef.current = null;
+      }
+    };
   }, [data, mapboxLoaded]);
 
   // Reflow the Mapbox GL canvas when the panel width changes — Street View
@@ -2128,8 +2140,9 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
     }
     const center = { lat, lng };
 
-    // 1. Initialize Map if not already created
-    if (!googleMapInstanceRef.current) {
+    // 1. Initialize Map if not already created or if the container is empty (remounted)
+    const isContainerEmpty = mapRef.current && mapRef.current.children.length === 0;
+    if (!googleMapInstanceRef.current || isContainerEmpty) {
       googleMapInstanceRef.current = new google.maps.Map(mapRef.current, {
         center,
         zoom: 18,
@@ -2507,6 +2520,29 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
       infoWindowInstanceRef.current.open(googleMapInstanceRef.current);
     }
 
+    return () => {
+      googleMapInstanceRef.current = null;
+      if (polygonInstanceRef.current) {
+        try { polygonInstanceRef.current.setMap(null); } catch {}
+        polygonInstanceRef.current = null;
+      }
+      if (infoWindowInstanceRef.current) {
+        try { infoWindowInstanceRef.current.close(); } catch {}
+        infoWindowInstanceRef.current = null;
+      }
+      if (zoningLabelOverlayRef.current) {
+        try { zoningLabelOverlayRef.current.setMap(null); } catch {}
+        zoningLabelOverlayRef.current = null;
+      }
+      if (labelsInstanceRef.current) {
+        try { labelsInstanceRef.current.forEach(label => label.setMap(null)); } catch {}
+        labelsInstanceRef.current = [];
+      }
+      if (markersInstanceRef.current) {
+        try { markersInstanceRef.current.forEach(marker => marker.setMap(null)); } catch {}
+        markersInstanceRef.current = [];
+      }
+    };
   }, [data, mapsLoaded]);
 
   // Street View availability — runs INDEPENDENTLY of the base map. The Google
