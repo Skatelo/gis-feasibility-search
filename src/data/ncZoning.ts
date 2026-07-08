@@ -153,6 +153,45 @@ export const ncZoningRegistry: ZoningRegistry = {
   },
 };
 
+const SC_COUNTY_NAMES = [
+  "Abbeville", "Aiken", "Allendale", "Anderson", "Bamberg", "Barnwell", "Beaufort", "Berkeley", "Calhoun", "Charleston",
+  "Cherokee", "Chester", "Chesterfield", "Clarendon", "Colleton", "Darlington", "Dillon", "Dorchester", "Edgefield", "Fairfield",
+  "Florence", "Georgetown", "Greenville", "Greenwood", "Hampton", "Horry", "Jasper", "Kershaw", "Lancaster", "Laurens",
+  "Lee", "Lexington", "Marion", "Marlboro", "McCormick", "Newberry", "Oconee", "Orangeburg", "Pickens", "Richland",
+  "Saluda", "Spartanburg", "Sumter", "Union", "Williamsburg", "York",
+] as const;
+
+const NC_OVERLAP_COUNTIES = new Set(["beaufort", "cherokee", "lee", "union"]);
+const scZoningKey = (name: string) => name.trim().toLowerCase().replace(/\s+/g, "_");
+const scCountyCode = (name: string, idx: number) => {
+  if (name === "McCormick") return "065";
+  if (name === "Marion") return "067";
+  if (name === "Marlboro") return "069";
+  return String(idx * 2 + 1).padStart(3, "0");
+};
+
+Object.assign(
+  ncZoningRegistry.counties,
+  Object.fromEntries(
+    SC_COUNTY_NAMES.flatMap((name, idx) => {
+      const config: CountyZoningConfig = {
+        county_id: scCountyCode(name, idx),
+        name: `${name}, SC`,
+        lat: 0,
+        lng: 0,
+        zoning_mapserver_url: null,
+        zoning_field_mapping: null,
+        description_field: null,
+        zoning_layers: null,
+        use_state_fallback: T,
+      };
+      const shortKey = scZoningKey(name);
+      const qualifiedKey = `${shortKey},_sc`;
+      return NC_OVERLAP_COUNTIES.has(shortKey) ? [[qualifiedKey, config]] : [[qualifiedKey, config], [shortKey, config]];
+    }),
+  ),
+);
+
 /** Normalize a county display name to its registry key (e.g. "New Hanover" -> "new_hanover"). */
 export function normalizeCountyKey(name: string): string {
   return name.trim().toLowerCase().replace(/\s+/g, "_");

@@ -1,22 +1,23 @@
-# Active Task List: Mortgage Button Styling & Strict Utility Sources
+# Active Task List: South Carolina GIS Integration
 
-This task list details the division of labor between Antigravity, Claude Code, and Codex.
+This task list details the division of labor between Antigravity, Claude Code, and Codex for adding all 46 South Carolina counties.
 
 ---
 
 ## 💻 [Claude Code (Lead Architect) Tasks]
-- [ ] Review the `filterLocalSources` logic and address-relevance constraints in `src/services/feasibilityService.ts` to ensure it is robust.
-- [ ] Verify that regional provider initials matching (e.g. `cfpua`, `owasa`) works correctly without false negatives.
+- [x] Review the geocoding state-determination logic in `src/services/feasibilityService.ts`.
+- [x] Verify handling of overlapping county names (Beaufort, Cherokee, Lee, Union) across both NC and SC.
+- [x] Verify that TigerWeb queries detect both FIPS 37 (NC) and FIPS 45 (SC) points correctly.
 
 ## ⚡ [Codex (Senior Software Engineer) Tasks]
-- [ ] Modify `src/components/FeasibilitySearch.tsx` to:
-  - Style the "Pull Deed, Mortgage & Transactions" button to match the "Skip Trace Owner" button exactly (using `className="owner-skip-btn"`).
-  - Adjust the layout and spacing of the `.enf-empty` container surrounding it.
-- [ ] Update `src/services/feasibilityService.ts` to:
-  - Implement the strict `filterLocalSources` logic so only URLs containing matching locality/provider tokens are returned.
-  - Exclude general state tokens (`nc`, `northcarolina`) from the search tokens list in `fetchUtilitiesEstimate`.
-  - Extract and split `provider`, `waterTapDetail`, and `sewerTapDetail` names into individual words/tokens, and generate provider initials (e.g. `cfpua`) to add to the matching tokens list.
-- [ ] Run `npm run build` to verify there are no compilation or type errors in the project.
+- [x] Add `SC_COUNTY_NAMES` array and SC county FIPS codes to `feasibilityService.ts`.
+- [x] Add the 46 SC counties to `ncCountyConfig` mapping them to the SCDOT Statewide Parcel REST MapServer.
+- [x] Add the 24 verified SC county ArcGIS servers to `countyParcelLayers` in `feasibilityService.ts`.
+- [x] Update `detectNcCounty` to geocode SC/NC addresses and return state-qualified county names (e.g. `"Richland, SC"`).
+- [x] Generalize `ncCountyAtPoint` to `countyAtPoint` supporting SC and NC state FIPS.
+- [x] Update the `ncZoningRegistry` in `src/data/ncZoning.ts` to register the SC counties.
+- [x] Modify layout/error messages in `src/components/FeasibilitySearch.tsx` to handle SC validation properly.
 
 ## 🧠 [Antigravity Tasks] (Orchestrator)
-- [ ] Coordinate execution, monitor background processes, and run final browser checks using the browser agent.
+- [x] Coordinate execution, run Vite compilation checks, commit changes, and push to GitHub.
+

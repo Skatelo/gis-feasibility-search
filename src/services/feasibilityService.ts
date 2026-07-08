@@ -80,6 +80,7 @@ const NC_PARCEL_ENGINE = "https://services.gis.nc.gov/secure/rest/services/NC1Ma
 // Same statewide layer on NC OneMap's other host — tried when the primary is
 // down (they fail independently more often than together).
 const NC_PARCEL_ENGINE_MIRROR = "https://services.nconemap.gov/secure/rest/services/NC1Map_Parcels/MapServer/1/query";
+const SC_STATEWIDE_PARCEL_LAYER = "https://smpesri.scdot.org/arcgis/rest/services/GISMapping/SC_Parcels/MapServer/0";
 
 // Only the fields the app actually uses — requesting these instead of `*` keeps
 // the response small so the (sometimes overloaded) statewide server is far less
@@ -383,12 +384,57 @@ const NC_COUNTY_NAMES = [
   "Union", "Vance", "Wake", "Warren", "Washington", "Watauga", "Wayne", "Wilkes", "Wilson", "Yadkin", "Yancey",
 ] as const;
 
+const SC_COUNTY_NAMES = [
+  "Abbeville", "Aiken", "Allendale", "Anderson", "Bamberg", "Barnwell", "Beaufort", "Berkeley", "Calhoun", "Charleston",
+  "Cherokee", "Chester", "Chesterfield", "Clarendon", "Colleton", "Darlington", "Dillon", "Dorchester", "Edgefield", "Fairfield",
+  "Florence", "Georgetown", "Greenville", "Greenwood", "Hampton", "Horry", "Jasper", "Kershaw", "Lancaster", "Laurens",
+  "Lee", "Lexington", "Marion", "Marlboro", "McCormick", "Newberry", "Oconee", "Orangeburg", "Pickens", "Richland",
+  "Saluda", "Spartanburg", "Sumter", "Union", "Williamsburg", "York",
+] as const;
+
+const SC_COUNTY_FIPS: Record<(typeof SC_COUNTY_NAMES)[number], string> = {
+  Abbeville: '45001', Aiken: '45003', Allendale: '45005', Anderson: '45007', Bamberg: '45009',
+  Barnwell: '45011', Beaufort: '45013', Berkeley: '45015', Calhoun: '45017', Charleston: '45019',
+  Cherokee: '45021', Chester: '45023', Chesterfield: '45025', Clarendon: '45027', Colleton: '45029',
+  Darlington: '45031', Dillon: '45033', Dorchester: '45035', Edgefield: '45037', Fairfield: '45039',
+  Florence: '45041', Georgetown: '45043', Greenville: '45045', Greenwood: '45047', Hampton: '45049',
+  Horry: '45051', Jasper: '45053', Kershaw: '45055', Lancaster: '45057', Laurens: '45059',
+  Lee: '45061', Lexington: '45063', Marion: '45067', Marlboro: '45069', McCormick: '45065',
+  Newberry: '45071', Oconee: '45073', Orangeburg: '45075', Pickens: '45077', Richland: '45079',
+  Saluda: '45081', Spartanburg: '45083', Sumter: '45085', Union: '45087', Williamsburg: '45089', York: '45091',
+};
+
+type SupportedState = 'NC' | 'SC';
+interface CountyAtPointResult { name: string; state: SupportedState }
+
+const countyBaseName = (countyName: string): string =>
+  String(countyName || '').split(',')[0].replace(/\s+County$/i, '').trim();
+
+const countyState = (countyName: string): SupportedState => {
+  const m = String(countyName || '').match(/,\s*(NC|SC)\s*$/i);
+  if (m) return m[1].toUpperCase() as SupportedState;
+  const base = countyBaseName(countyName);
+  if (SC_COUNTY_NAMES.some((n) => n.toLowerCase() === base.toLowerCase()) &&
+      !NC_COUNTY_NAMES.some((n) => n.toLowerCase() === base.toLowerCase())) return 'SC';
+  return 'NC';
+};
+
+const countyParcelLayerKey = (countyName: string): string => normalizeCountyKey(countyBaseName(countyName));
+
 export const ncCountyConfig: Record<string, { geocodeUrl: string; parcelUrl: string; extraWhere: string }> =
   Object.fromEntries(
-    NC_COUNTY_NAMES.map((name) => [
-      name,
-      { geocodeUrl: NC_GEOCODER, parcelUrl: NC_PARCEL_ENGINE, extraWhere: `cntyname = '${name}'` },
-    ]),
+    [
+      ...NC_COUNTY_NAMES.flatMap((name) => {
+        const config = { geocodeUrl: NC_GEOCODER, parcelUrl: NC_PARCEL_ENGINE, extraWhere: `cntyname = '${name}'` };
+        return [[name, config], [`${name}, NC`, config]] as const;
+      }),
+      ...SC_COUNTY_NAMES.flatMap((name) => {
+        const config = { geocodeUrl: "", parcelUrl: SC_STATEWIDE_PARCEL_LAYER, extraWhere: `County = '${name.toUpperCase()}'` };
+        const qualified = [`${name}, SC`, config] as const;
+        const overlapsNc = NC_COUNTY_NAMES.some((n) => n.toLowerCase() === name.toLowerCase());
+        return overlapsNc ? [qualified] : [qualified, [name, config] as const];
+      }),
+    ],
   );
 
 /**
@@ -684,6 +730,30 @@ const countyParcelLayers: Record<string, string> = {
   wilson: "https://gis.wilson-co.com/arcgis/rest/services/Open_gov/Opengov_Address_Taxparcels/FeatureServer/0",
   yadkin: "https://services1.arcgis.com/NjPxXbprfWFvge6E/arcgis/rest/services/Yadkin_VAD_Map/FeatureServer/6",
   yancey: "https://services1.arcgis.com/KUeKSLlMUcWvuPRM/arcgis/rest/services/Yancey_County_WFL1/FeatureServer/11",
+  abbeville: SC_STATEWIDE_PARCEL_LAYER,
+  berkeley: "https://services.arcgis.com/M2JiPNPcfxhLjlp7/arcgis/rest/services/ParcelsAndAddress/FeatureServer/1",
+  charleston: "https://services.arcgis.com/DN2fPfpggEPlLhP6/arcgis/rest/services/Mt_P_Way_all_data/FeatureServer/25",
+  calhoun: "https://services5.arcgis.com/B3Zo1xqTw8CidOoF/arcgis/rest/services/WebParcels/FeatureServer/0",
+  darlington: "https://services5.arcgis.com/8FJikaProY6O3ncx/arcgis/rest/services/PARCELS/FeatureServer/1",
+  colleton: "https://services1.arcgis.com/m0cnLGKdhwao8WvM/arcgis/rest/services/Public_Data/FeatureServer/2",
+  florence: "http://arc2000.florenceco.org/ArcGIS/rest/services/Florence_County_Maps_WebMercator/MapServer/5",
+  georgetown: "https://gis1.georgetowncountysc.org/portal/rest/services/GCGIS_OpenData/FeatureServer/2",
+  greenville: "https://citygis.greenvillesc.gov/arcgis/rest/services/AddressSearch/Property/MapServer/3",
+  greenwood: "https://services1.arcgis.com/x5wCko8UnSi4h0CB/arcgis/rest/services/Online_Comprehensive_Map_WFL1/FeatureServer/2",
+  hampton: "https://services8.arcgis.com/6eabNhFouHU5vuYk/arcgis/rest/services/Parcels_Published_view/FeatureServer/1",
+  horry: "https://gisportal.horrycounty.org/server/rest/services/OpenData/Parcels/FeatureServer/0",
+  jasper: "https://services6.arcgis.com/UXJOITFCLbn0Ibm0/arcgis/rest/services/Jasper_County_Parcels_View/FeatureServer/2",
+  laurens: "https://www.laurenscountygis.org/arcgis/rest/services/Pebble/TaxParcel/MapServer/5",
+  lexington: "https://maps.lex-co.com/agstserver/rest/services/Property/MapServer/4",
+  dorchester: "https://gisportal.dorchestercounty.net/hosting/rest/services/County_Basemap/MapServer/3",
+  lee: "https://services5.arcgis.com/zg6ovB2KKN8L0zFv/arcgis/rest/services/Web_Parcels/FeatureServer/0",
+  lancaster: "https://services.arcgis.com/TL5Ii4EYksDBPH1o/arcgis/rest/services/Lancaster_Parcels/FeatureServer/0",
+  pickens: "https://services1.arcgis.com/59960rq18IxUcAVI/arcgis/rest/services/Energov_AGOL/FeatureServer/7",
+  orangeburg: "https://services2.arcgis.com/bUKn95BqgpYYTnx3/arcgis/rest/services/Main_Public_Tax_Parcel_Map_WFL1/FeatureServer/0",
+  oconee: "https://arcserver2.oconeesc.com/arcgis/rest/services/PARCELDATA/MapServer/1",
+  spartanburg: "https://services9.arcgis.com/HoRra3ATPLGmyjn6/arcgis/rest/services/Spartanburg_County_Parcels_1_7_2019/FeatureServer/0",
+  richland: "https://services1.arcgis.com/Mnt8FoJcogKtoVBs/arcgis/rest/services/EnergovInformationPublic/FeatureServer/13",
+  york: "https://services1.arcgis.com/2AGLxyiJoNiVHKwq/arcgis/rest/services/Parcels/FeatureServer/0",
 };
 
 /** Shoelace area (ft²) of a State Plane ring set, to derive acreage when absent. */
@@ -916,18 +986,19 @@ function writeZoningCache(key: string, z: CachedZoning): void {
 }
 
 /**
- * Auto-detect the NC county for an address (so the user never picks one). Google
- * geocodes the address biased to North Carolina and reads the county
- * (administrative_area_level_2). Returns the canonical NC county name, or null if
- * the address isn't a resolvable NC location.
+ * Auto-detect the NC/SC county for an address (so the user never picks one).
+ * Google geocodes the address, then TIGERweb verifies the true county boundary.
+ * Returns a state-qualified county name (e.g. "Orange, NC" or "Richland, SC"),
+ * or null if the address is not a resolvable NC/SC location.
  */
 /**
  * Authoritative county for a coordinate via the U.S. Census TIGERweb county
  * boundaries (point-in-polygon). Unlike the parcel layer this has NO coverage
  * gaps (a point on a road still resolves), and unlike Google's geocoder county
- * it reflects the TRUE jurisdiction the point falls in. NC only (state FIPS 37).
+ * it reflects the TRUE jurisdiction the point falls in. Supports NC (37) and
+ * SC (45).
  */
-async function ncCountyAtPoint(lat: number, lng: number): Promise<string | null> {
+async function countyAtPoint(lat: number, lng: number): Promise<CountyAtPointResult | null> {
   try {
     const url = `https://tigerweb.geo.census.gov/arcgis/rest/services/TIGERweb/State_County/MapServer/1/query` +
       `?geometry=${lng},${lat}&geometryType=esriGeometryPoint&inSR=4326&spatialRel=esriSpatialRelIntersects` +
@@ -936,9 +1007,11 @@ async function ncCountyAtPoint(lat: number, lng: number): Promise<string | null>
     if (!res.ok) return null;
     const data = await res.json();
     const a = data?.features?.[0]?.attributes;
-    if (!a || String(a.STATE) !== '37') return null; // must be North Carolina (FIPS 37)
+    const state: SupportedState | null = String(a?.STATE) === '37' ? 'NC' : String(a?.STATE) === '45' ? 'SC' : null;
+    if (!a || !state) return null;
     const name = String(a.BASENAME || a.NAME || '').replace(/\s+County$/i, '').trim();
-    return NC_COUNTY_NAMES.find((n) => n.toLowerCase() === name.toLowerCase()) || null;
+    const canonical = (state === 'NC' ? NC_COUNTY_NAMES : SC_COUNTY_NAMES).find((n) => n.toLowerCase() === name.toLowerCase());
+    return canonical ? { name: canonical, state } : null;
   } catch { return null; }
 }
 
@@ -968,7 +1041,7 @@ export async function detectNcCounty(address: string, googleKey: string): Promis
   if (!googleKey || !address.trim()) return null;
   try {
     const url = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(address)}` +
-      `&components=${encodeURIComponent('administrative_area:NC|country:US')}&key=${googleKey}`;
+      `&key=${googleKey}`;
     const res = await fetchWithTimeout(url, 8000);
     if (!res.ok) return null;
     const data = await res.json();
@@ -976,22 +1049,25 @@ export async function detectNcCounty(address: string, googleKey: string): Promis
     const r0 = data.results[0];
     const comps = r0.address_components || [];
     const state = comps.find((c: any) => c.types?.includes('administrative_area_level_1'));
-    if (state && !/north carolina/i.test(state.long_name || '') && !/^NC$/i.test(state.short_name || '')) return null;
+    const stateCode = String(state?.short_name || '').toUpperCase();
+    if (stateCode !== 'NC' && stateCode !== 'SC') return null;
 
     // AUTHORITATIVE: the county whose boundary actually contains the geocoded
     // point. Google's administrative_area_level_2 is frequently wrong near county
     // lines or when the mailing city sits in a different county than the parcel.
     const loc = r0.geometry?.location;
     if (loc && typeof loc.lat === 'number' && typeof loc.lng === 'number') {
-      const byPoint = await ncCountyAtPoint(loc.lat, loc.lng);
-      if (byPoint) return byPoint;
+      const byPoint = await countyAtPoint(loc.lat, loc.lng);
+      if (byPoint) return `${byPoint.name}, ${byPoint.state}`;
     }
 
     // Fallback only: Google's county component.
     const countyComp = comps.find((c: any) => c.types?.includes('administrative_area_level_2'));
     if (!countyComp) return null;
     const county = String(countyComp.long_name || countyComp.short_name || '').replace(/\s+County$/i, '').trim();
-    return NC_COUNTY_NAMES.find((n) => n.toLowerCase() === county.toLowerCase()) || null;
+    const names = stateCode === 'NC' ? NC_COUNTY_NAMES : SC_COUNTY_NAMES;
+    const canonical = names.find((n) => n.toLowerCase() === county.toLowerCase());
+    return canonical ? `${canonical}, ${stateCode as SupportedState}` : null;
   } catch { return null; }
 }
 
@@ -1065,6 +1141,7 @@ export async function executeLandAnalysis(
   if (!config) {
     throw new Error(`Target county context for '${countyName}' is unconfigured.`);
   }
+  const selectedState = countyState(countyName);
 
   onStageChange?.("Querying county GIS records...");
 
@@ -1082,12 +1159,14 @@ export async function executeLandAnalysis(
 
   if (!lng || !lat) {
     try {
-      const geocodeQuery = `${config.geocodeUrl}?SingleLine=${encodeURIComponent(addressString)}&outSR=4326&f=json`;
-      const geoResponse = await fetchWithRetry(geocodeQuery, 2, 5000); // fail fast
-      const geoData = await geoResponse.json();
-      if (geoData.candidates && geoData.candidates.length > 0) {
-        lng = geoData.candidates[0].location.x;
-        lat = geoData.candidates[0].location.y;
+      if (config.geocodeUrl) {
+        const geocodeQuery = `${config.geocodeUrl}?SingleLine=${encodeURIComponent(addressString)}&outSR=4326&f=json`;
+        const geoResponse = await fetchWithRetry(geocodeQuery, 2, 5000); // fail fast
+        const geoData = await geoResponse.json();
+        if (geoData.candidates && geoData.candidates.length > 0) {
+          lng = geoData.candidates[0].location.x;
+          lat = geoData.candidates[0].location.y;
+        }
       }
     } catch (err) {
       console.warn("NC Geocoder failed, falling back to Google Geocoding:", err);
@@ -1115,35 +1194,42 @@ export async function executeLandAnalysis(
   let parcelFeature: any = null;
   let statePlaneFeature: any = null;
   let isSimulated = false;
-  const countyKeyLower = normalizeCountyKey(countyName);
+  const countyKeyLower = countyParcelLayerKey(countyName);
+  const parcelHosts = selectedState === 'NC'
+    ? [config.parcelUrl, NC_PARCEL_ENGINE_MIRROR]
+    : [config.parcelUrl];
+  const parcelWhere = config.extraWhere || '1=1';
+  const parcelOutFields = selectedState === 'NC' ? NC_PARCEL_FIELDS : '*';
+  const measurementOutSr = selectedState === 'NC' ? '2264' : '4326';
 
   // 1) Statewide NC OneMap parcel layer — primary host, then the mirror host
   //    (same layer served from services.gis.nc.gov AND services.nconemap.gov;
   //    they fail independently more often than together).
-  for (const parcelHost of [config.parcelUrl, NC_PARCEL_ENGINE_MIRROR].filter((v, i, arr) => arr.indexOf(v) === i)) {
+  for (const parcelHost of parcelHosts.filter((v, i, arr) => arr.indexOf(v) === i)) {
     if (parcelFeature) break;
-    onStageChange?.("Querying statewide NC OneMap records...");
+    onStageChange?.(selectedState === 'NC' ? "Querying statewide NC OneMap records..." : "Querying statewide SC parcel records...");
+    const parcelEndpoint = /\/query$/i.test(parcelHost) ? parcelHost : `${parcelHost}/query`;
 
     let wgs84Data: any = null;
     let statePlaneData: any = null;
 
-    let parcelQueryWgs84 = `${parcelHost}` +
+    let parcelQueryWgs84 = `${parcelEndpoint}` +
         `?geometry=${lng},${lat}` +
         `&geometryType=esriGeometryPoint` +
         `&inSR=4326` +
         `&spatialRel=esriSpatialRelIntersects` +
-        `&where=1%3D1` +
-        `&outFields=${NC_PARCEL_FIELDS}` +
+        `&where=${encodeURIComponent(parcelWhere)}` +
+        `&outFields=${encodeURIComponent(parcelOutFields)}` +
         `&returnGeometry=true&outSR=4326&f=geojson`;
 
-    let parcelQueryStatePlane = `${parcelHost}` +
+    let parcelQueryStatePlane = `${parcelEndpoint}` +
         `?geometry=${lng},${lat}` +
         `&geometryType=esriGeometryPoint` +
         `&inSR=4326` +
         `&spatialRel=esriSpatialRelIntersects` +
-        `&where=1%3D1` +
-        `&outFields=parno` + // State Plane query only needs geometry for measurements
-        `&returnGeometry=true&outSR=2264&f=json`;
+        `&where=${encodeURIComponent(parcelWhere)}` +
+        `&outFields=${selectedState === 'NC' ? 'parno' : encodeURIComponent(parcelOutFields)}` + // State Plane query only needs geometry for measurements
+        `&returnGeometry=true&outSR=${measurementOutSr}&f=json`;
 
     // The two projections are fetched INDEPENDENTLY (allSettled): the WGS84
     // parcel is the critical one — a 504 on the State Plane measurement query
@@ -1172,8 +1258,8 @@ export async function executeLandAnalysis(
       const delta = 0.00015;
       const envGeometry = `${lng - delta},${lat - delta},${lng + delta},${lat + delta}`;
 
-      parcelQueryWgs84 = `${parcelHost}?geometry=${envGeometry}&geometryType=esriGeometryEnvelope&inSR=4326&spatialRel=esriSpatialRelIntersects&where=1%3D1&outFields=${NC_PARCEL_FIELDS}&returnGeometry=true&outSR=4326&f=geojson`;
-      parcelQueryStatePlane = `${parcelHost}?geometry=${envGeometry}&geometryType=esriGeometryEnvelope&inSR=4326&spatialRel=esriSpatialRelIntersects&where=1%3D1&outFields=parno&returnGeometry=true&outSR=2264&f=json`;
+      parcelQueryWgs84 = `${parcelEndpoint}?geometry=${envGeometry}&geometryType=esriGeometryEnvelope&inSR=4326&spatialRel=esriSpatialRelIntersects&where=${encodeURIComponent(parcelWhere)}&outFields=${encodeURIComponent(parcelOutFields)}&returnGeometry=true&outSR=4326&f=geojson`;
+      parcelQueryStatePlane = `${parcelEndpoint}?geometry=${envGeometry}&geometryType=esriGeometryEnvelope&inSR=4326&spatialRel=esriSpatialRelIntersects&where=${encodeURIComponent(parcelWhere)}&outFields=${selectedState === 'NC' ? 'parno' : encodeURIComponent(parcelOutFields)}&returnGeometry=true&outSR=${measurementOutSr}&f=json`;
 
       const [wgsRes, spRes] = await Promise.allSettled([
         fetchWithTimeout(parcelQueryWgs84, 10000),
@@ -1192,7 +1278,7 @@ export async function executeLandAnalysis(
     if (wgs84Data && wgs84Data.features && wgs84Data.features.length > 0) {
       parcelFeature = wgs84Data.features[0];
       statePlaneFeature = statePlaneData && statePlaneData.features ? statePlaneData.features[0] : null;
-      console.log(`${countyName} parcel resolved via statewide NC OneMap.`);
+      console.log(`${countyName} parcel resolved via statewide ${selectedState === 'NC' ? 'NC OneMap' : 'SC parcel service'}.`);
     }
   }
 
@@ -1231,9 +1317,10 @@ export async function executeLandAnalysis(
   if (!isSimulated && info?.cntyname) {
     const parcelCnty = String(info.cntyname).replace(/\s+County$/i, '').trim();
     const corrected = NC_COUNTY_NAMES.find((n) => n.toLowerCase() === parcelCnty.toLowerCase());
-    if (corrected && corrected.toLowerCase() !== countyName.toLowerCase()) {
-      console.log(`County corrected "${countyName}" -> "${corrected}" from parcel cntyname.`);
-      countyName = corrected;
+    if (corrected && corrected.toLowerCase() !== countyBaseName(countyName).toLowerCase()) {
+      const qualified = `${corrected}, NC`;
+      console.log(`County corrected "${countyName}" -> "${qualified}" from parcel cntyname.`);
+      countyName = qualified;
     }
   }
 
@@ -1662,6 +1749,18 @@ const ncCountyFips: Record<string, string> = {
   Wayne: '37191', Wilkes: '37193', Wilson: '37195', Yadkin: '37197', Yancey: '37199',
 };
 
+Object.assign(
+  ncCountyFips,
+  Object.fromEntries(
+    SC_COUNTY_NAMES.flatMap((name) => {
+      const fips = SC_COUNTY_FIPS[name];
+      const qualified = [`${name}, SC`, fips] as const;
+      const overlapsNc = NC_COUNTY_NAMES.some((n) => n.toLowerCase() === name.toLowerCase());
+      return overlapsNc ? [qualified] : [qualified, [name, fips] as const];
+    }),
+  ),
+);
+
 export interface MarketMetric { value: number; date: string; prev3?: number | null; prevYear?: number | null; }
 export interface CountyMarketStats {
   fips: string;
@@ -1678,7 +1777,10 @@ export interface CountyMarketStats {
  * unavailable so the report falls back to a Google-Search market read.
  */
 export async function fetchCountyMarketStats(countyName: string): Promise<CountyMarketStats | null> {
-  const fips = ncCountyFips[countyName?.trim()];
+  const rawCountyName = countyName?.trim() || '';
+  const baseCountyName = countyBaseName(rawCountyName);
+  const state = countyState(rawCountyName);
+  const fips = ncCountyFips[rawCountyName] || ncCountyFips[`${baseCountyName}, ${state}`] || ncCountyFips[baseCountyName];
   if (!fips) return null;
   const ck = `gisfs:mktstats:v1:${fips}`;
   try {

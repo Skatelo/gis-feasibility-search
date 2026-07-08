@@ -2874,7 +2874,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
     };
 
     try {
-      // The county is determined AUTOMATICALLY from the NC address — no manual
+      // The county is determined AUTOMATICALLY from the NC/SC address — no manual
       // selection. (countyOverride comes from a parcel-ID lookup or history.)
       let county = countyOverride;
       if (!county) {
@@ -2882,7 +2882,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
         county = (await detectNcCounty(addressToSearch, getUserKeys().googleMaps || '')) || undefined;
         if (seq !== searchSeqRef.current) return;
         if (!county) {
-          setError("Couldn't determine the North Carolina county for that address. Please confirm it's a valid NC address.");
+          setError("Couldn't determine the NC or SC county for that address. Please confirm it's a valid NC or SC address.");
           setLoading(false); setLoadingStage(null);
           return;
         }
@@ -3194,7 +3194,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
             </button>
           </div>
           <p className="card-subtitle">
-            Enter any North Carolina property address to instantly query parcel boundaries, state plane projections, and local zoning classifications.
+            Enter any North Carolina or South Carolina property address to instantly query parcel boundaries, state plane projections, and local zoning classifications.
           </p>
 
           {!hasKeys && (
@@ -3233,7 +3233,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                   <Search className="input-icon" size={20} />
                   <input
                     type="text"
-                    placeholder="Search any NC address — county is detected automatically…"
+                    placeholder="Search any NC or SC address — county is detected automatically…"
                     value={addressInput}
                     onChange={(e) => setAddressInput(e.target.value)}
                     onKeyDown={handleKeyDown}
@@ -4799,7 +4799,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
               </div>
               <h3>Site Feasibility Dashboard</h3>
               <p>
-                Awaiting query instructions. Type in a North Carolina address to pull spatial boundaries, state-plane coordinates, size computations, and zoning classifications.
+                Awaiting query instructions. Type in a North Carolina or South Carolina address to pull spatial boundaries, state-plane coordinates, size computations, and zoning classifications.
               </p>
             </div>
           )}
@@ -4890,7 +4890,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                       </div>
                       <div className="model-message-wrapper" style={{ flex: 1 }}>
                         <div className="message-content model-text">
-                          Search for a North Carolina address to load the parcel details and automatically generate a custom, investor-style land feasibility report.
+                          Search for a North Carolina or South Carolina address to load the parcel details and automatically generate a custom, investor-style land feasibility report.
                         </div>
                       </div>
                     </div>
