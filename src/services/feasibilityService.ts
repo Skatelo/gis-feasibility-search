@@ -1216,7 +1216,7 @@ export async function executeLandAnalysis(
     : [config.parcelUrl];
   const parcelWhere = config.extraWhere || '1=1';
   const parcelOutFields = selectedState === 'NC' ? NC_PARCEL_FIELDS : '*';
-  const measurementOutSr = selectedState === 'NC' ? '2264' : '4326';
+  const measurementOutSr = selectedState === 'NC' ? '2264' : '2273';
 
   // 1) Statewide NC OneMap parcel layer — primary host, then the mirror host
   //    (same layer served from services.gis.nc.gov AND services.nconemap.gov;
@@ -5652,7 +5652,7 @@ async function fetchTreeRemovalRates(county: string, zip: string, geminiKey: str
   const baseCounty = countyBaseName(county);
 
   const locality = zip ? `ZIP ${zip} (${baseCounty} County, ${state})` : `${baseCounty} County, ${state}`;
-  const prompt = `Find CURRENT LOCAL land-clearing prices near ${locality} (	extsl{${new Date().getFullYear()}}).
+  const prompt = `Find CURRENT LOCAL land-clearing prices near ${locality} (${new Date().getFullYear()}).
 Return ONLY a JSON object in a \`\`\`json code block:
 \`\`\`json
 { "small": 0, "medium": 0, "large": 0, "stumpGrind": 0, "mulchPerAcre": 0, "mulchDayRate": 0, "clearingPerAcre": 0, "clearingDayRate": 0, "haulOff": 0, "sources": ["https://..."] }
@@ -5682,7 +5682,7 @@ Use CURRENT LOCAL prices from credible tree-service / land-clearing / excavation
     diag,
   );
   if (!text) return null;
-  const m = text.match(new RegExp('```json\\\\s*([\\\\s\\\\S]*?)\\\\s*```')) || text.match(new RegExp('\\\\{[\\\\s\\\\S]*\\\\}'));
+  const m = text.match(/```json\s*([\s\S]*?)\s*```/) || text.match(/\{[\s\S]*\}/);
   if (!m) return null;
   try {
     const o = JSON.parse((m[1] || m[0]).replace(/,\\s*([}\\]])/g, '$1'));
@@ -6038,7 +6038,7 @@ STRICT PRICING RULES — REAL FIGURES ONLY:
     : {
         name: 'Building + trade permits (new SFH, ~1,400–1,800 sqft)',
         low: UTIL_ESTIMATE.buildingPermits[0], high: UTIL_ESTIMATE.buildingPermits[1],
-        note: 'typical NC total for building + electrical + plumbing + mechanical permits — confirm with the jurisdiction',
+        note: `typical ${state} total for building + electrical + plumbing + mechanical permits — confirm with the jurisdiction`,
         verified: false, estimated: true,
       });
 
