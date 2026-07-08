@@ -808,24 +808,25 @@ function normalizeCountyParcelAttrs(a: Record<string, any>): Record<string, any>
     if (book) sourceref = page ? `${book}/${page}` : String(book);
   }
   return {
-    parno: get(/^pin_?num$/i, /^parno$/i, /parcel_?id/i, /^pid$/i, /^pin$/i, /^pin14$/i, /^nad83_?pin$/i, /parcel_?num/i, /^gis_?pin$/i, /gpin/i, /nc_?pin/i, /^newpin$/i, /^geo_?pin/i, /^par_?code$/i, /^tms$/i, /^pin/i) ?? "N/A",
+    parno: get(/^pin_?num$/i, /^parno$/i, /parcel_?id/i, /^pid$/i, /^pin$/i, /^pin14$/i, /^nad83_?pin$/i, /parcel_?num/i, /^gis_?pin$/i, /gpin/i, /nc_?pin/i, /^newpin$/i, /^geo_?pin$/i, /^par_?code$/i, /^tms$/i, /^pin/i, /t_map_number/i, /tax_?map_?number/i) ?? "N/A",
     gisacres: get(/gis_?acres/i, /calc.*acre/i, /calculated_?acreage/i, /^calc_?ac(re)?$/i, /^cacres$/i, /acres_?gis/i, /deed_?ac(res?|re)/i, /^acres$/i, /acreage/i, /legal_?acres/i, /tax_?acres/i, /total_?acres/i, /poly_?acres/i, /map_?acres/i, /assessed_?ac$/i, /^total_?calc/i, /land_?area/i, /^pacrea$/i, /^calculated$/i, /gross.*acres/i),
-    ownname: ownname ?? "N/A",
+    ownname: ownname ?? get(/ownership/i, /owner_?ship/i) ?? "N/A",
     ownname2: ownname2 ?? "",
-    siteadd,
-    mailadd: get(/mailaddr?1/i, /^addr1$/i, /curr_?addr1/i, /mailing/i, /mail_?add/i, /^address_?1$/i, /^address$/i, /taxpayer_?addr(ess)?_?1?/i, /^owadr1$/i, /^current_?ad$/i, /postal_?address/i, /owner_?addr(ess)?_?1?$/i, /acct_?addr$/i),
-    mcity: get(/mail.*city/i, /^mcity$/i, /curr_?city/i, /loccity/i, /^city$/i),
-    mstate: get(/mail.*state/i, /^mstate$/i, /curr_?state/i, /^state$/i),
-    mzip: get(/mail.*zip/i, /^mzip$/i, /curr_?zip/i, /zipnum/i, /^zip(code)?$/i),
-    scity: get(/^scity$/i, /loccity/i, /^city$/i),
-    parval: get(/^parval$/i, /total_?value_?assd/i, /assessed_?value/i, /total_?value/i, /total_?prop_?value/i, /^totval$/i, /tot_?mark_?val/i, /market_?value/i, /appraised/i, /^totmkt$/i, /mkt_?total/i, /^tax_?value$/i, /^netval/i, /^par_?value$/i, /^adj_?value$/i, /^mkt_?value$/i, /total_?asses/i, /^assessed_?va?/i, /^cost_?tot/i, /^tot_?val/i, /^cur_?tot_?tot$/i),
-    landval: get(/^landval$/i, /land_?val(ue)?/i, /tot_?land_?val/i),
+    siteadd: siteadd ?? get(/mailing_?add/i),
+    mailadd: get(/mailaddr?1/i, /^addr1$/i, /curr_?addr1/i, /mailing/i, /mail_?add/i, /^address_?1$/i, /^address$/i, /taxpayer_?addr(ess)?_?1?/i, /^owadr1$/i, /^current_?ad$/i, /postal_?address/i, /owner_?addr(ess)?_?1?$/i, /acct_?addr$/i, /mailing_?add/i),
+    mcity: get(/mail.*city/i, /^mcity$/i, /curr_?city/i, /loccity/i, /^city$/i, /mailing_?city/i),
+    mstate: get(/mail.*state/i, /^mstate$/i, /curr_?state/i, /^state$/i, /mailing_?st/i, /mailing_?state/i),
+    mzip: get(/mail.*zip/i, /^mzip$/i, /curr_?zip/i, /zipnum/i, /^zip(code)?$/i, /mailing_?zip/i),
+    scity: get(/^scity$/i, /loccity/i, /^city$/i, /mailing_?city/i),
+    parval: get(/^parval$/i, /total_?value_?assd/i, /assessed_?value/i, /total_?value/i, /total_?prop_?value/i, /^totval$/i, /tot_?mark_?val/i, /market_?value/i, /appraised/i, /^totmkt$/i, /mkt_?total/i, /^tax_?value$/i, /^netval/i, /^par_?value$/i, /^adj_?value$/i, /^mkt_?value$/i, /total_?asses/i, /^assessed_?va?/i, /^cost_?tot/i, /^tot_?val/i, /^cur_?tot_?tot$/i, /m_value/i),
+    landval: get(/^landval$/i, /land_?val(ue)?/i, /tot_?land_?val/i, /l_value/i),
     saledate: get(/^sale_?date$/i, /^saledate$/i, /deed_?date/i, /transfer_?date/i),
     reviseyear: get(/revis.*year/i, /^yearid$/i, /parcel_?year/i, /tax_?year/i, /^year_?$/i),
     sourceref: sourceref ?? "N/A",
-    legdecfull: get(/legal_?desc/i, /^legdec/i, /prop_?desc/i, /^legaldesc$/i) ?? "County Parcel",
+    legdecfull: get(/legal_?desc/i, /^legdec/i, /prop_?desc/i, /^legaldesc$/i, /land_?use/i) ?? "County Parcel",
     structyear: get(/year_?built/i, /yearblt/i, /struct.*year/i, /yrbuilt/i),
-  };
+    cntyname: get(/^cntyname$/i, /^county$/i, /county_?name/i),
+  }
 }
 
 /**
@@ -1308,7 +1309,7 @@ export async function executeLandAnalysis(
     isSimulated = true;
   }
 
-  const info = parcelFeature.properties;
+  const info = normalizeCountyParcelAttrs(parcelFeature.properties || {});
 
   // Self-correct the county from the ACTUAL parcel record (authoritative). The
   // parcel point query is county-agnostic, so even if the county was mis-detected
