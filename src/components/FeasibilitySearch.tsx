@@ -68,6 +68,7 @@ import {
   Droplets,
   Plus,
   Trash2,
+  Database,
   X
 } from 'lucide-react';
 
@@ -707,6 +708,7 @@ export const FeasibilitySearch: FC = () => {
   const [enfProperty, setEnfProperty] = useState<EnformionPropertyRecord | null>(null);
   const [enfLoading, setEnfLoading] = useState(false);
   const [enfErrors, setEnfErrors] = useState<{ property?: string }>({});
+  const enfIdle = !enfProperty && !enfErrors.property && !enfLoading;
   // Manual report mode: report awaits the "Generate AI Report" button
   const [reportPending, setReportPending] = useState(false);
   // Owner skip trace (Enformion) — phones/emails for the parcel owner
@@ -1022,9 +1024,6 @@ export const FeasibilitySearch: FC = () => {
     runLandClearingLookup(reportData, seq);
     // Utilities + connection costs (public water/sewer tap fees, or well/septic).
     runUtilitiesLookup(reportData, seq);
-    // Enformion records (property/mortgage/transactions, debt, tenant history)
-    // fire alongside — they render in their own card as each search resolves.
-    fetchEnformionRecords(reportData, seq);
     // The construction-cost estimate + material takeoff run ONLY when the
     // "Generate AI Report" button is pressed (or with the auto-report) — a bare
     // search produces no cost estimate until Generate AI Report is clicked.
@@ -3514,11 +3513,12 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
 
               {/* Enformion Property Search V2: deed owners, recorded mortgages
                   & sale transactions for the searched address. */}
-              {enformionConfigured() && (enfLoading || enfProperty || enfErrors.property) && (
+              {enformionConfigured() && (
                 <div className="card registry-card enf-records-card">
                   <h3 className="registry-card-header" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                     <FileText size={16} style={{ color: 'var(--primary)' }} />
                     <span>Mortgage &amp; Transactions — Enformion</span>
+                    {(enfProperty || enfErrors.property) && (
                     <button
                       type="button"
                       className="enf-retry-btn"
@@ -3529,9 +3529,23 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                       {enfLoading ? <Loader2 size={13} className="spinner" /> : <History size={13} />}
                       <span>{enfLoading ? 'Searching…' : 'Retry'}</span>
                     </button>
+                    )}
                   </h3>
                   {enfLoading && (
                     <div className="enf-loading"><Loader2 size={14} className="spinner" /><span>Pulling deed, mortgage &amp; transaction records…</span></div>
+                  )}
+                  {enfIdle && (
+                    <div className="enf-empty">
+                      <div>Deed, mortgage, and transaction records can be retrieved from Enformion for this property address.</div>
+                      <button
+                        type="button"
+                        className="enf-retry-btn"
+                        onClick={() => { if (data) fetchEnformionRecords(data, searchSeqRef.current); }}
+                      >
+                        <Database size={13} />
+                        <span>Pull Deed, Mortgage &amp; Transactions</span>
+                      </button>
+                    </div>
                   )}
 
                   {/* Deep assessor data (Property Search V2): APN & parcel
@@ -3539,6 +3553,8 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                       acreage & land sqft, and the structural characteristics —
                       the raw-land vs. improved signal straight from county
                       assessor files. */}
+                  {!enfIdle && (
+                    <>
                   {enfProperty && (
                     <div className="enf-section">
                       <div className="enf-section-head">
@@ -3654,10 +3670,10 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                       </>
                     ) : enfErrors.property ? (
                       <div className="enf-err"><AlertCircle size={12} /> {enfErrors.property}</div>
-                    ) : !enfLoading ? (
-                      <div className="enf-empty">No property record matched this address in Enformion.</div>
                     ) : null}
                   </div>
+                    </>
+                  )}
 
                   <div className="enf-foot">Live from the Enformion Property Search V2 API using your credentials. Public-record coverage varies by county.</div>
                 </div>
