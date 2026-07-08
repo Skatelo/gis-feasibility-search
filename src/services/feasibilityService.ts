@@ -5733,8 +5733,7 @@ const NATIONAL_AGGREGATORS = [
 function filterLocalSources(urls: string[], tokens: string[]): string[] {
   const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
   const toks = tokens.map(norm).filter((t) => t.length >= 3);
-  const primary: string[] = [];   // official or locality-matching
-  const secondary: string[] = []; // other non-aggregator (likely local contractors)
+  const primary: string[] = [];   // strictly locality-matching or verifiably relevant
   const seen = new Set<string>();
   for (const raw of urls) {
     const u = String(raw);
@@ -5746,11 +5745,12 @@ function filterLocalSources(urls: string[], tokens: string[]): string[] {
     if (NATIONAL_AGGREGATORS.some((a) => host.includes(a))) continue; // drop national averages
     seen.add(key);
     const hay = norm(host + path);
-    const official = /\.gov$|\.us$|\.gov\/|\.us\//i.test(host);
-    if (official || toks.some((t) => hay.includes(t))) primary.push(u);
-    else secondary.push(u);
+    // STRICT RELEVANCE RULE: The URL host or path must explicitly match one of our local/provider tokens
+    if (toks.some((t) => hay.includes(t))) {
+      primary.push(u);
+    }
   }
-  return [...primary, ...secondary].slice(0, 12);
+  return primary.slice(0, 12);
 }
 
 export async function fetchUtilitiesEstimate(reportData: SiteFeasibilityData): Promise<UtilitiesEstimate | null> {
@@ -5927,14 +5927,49 @@ STRICT PRICING RULES — REAL FIGURES ONLY:
       ? 'No public water/sewer — this parcel needs a private well + septic.'
       : `${publicWater === 'available' ? 'Public water' : 'Well'} + ${publicSewer === 'available' ? 'public sewer' : 'septic'} required.`;
 
-  // Sources RELEVANT to this address only: the model's cited URLs plus the real
-  // Perplexity results, filtered to official (.gov/.us) domains or ones that
-  // mention the city/county/NC — drops off-area national pages.
+  // Sources RELEVANT to this address only: filter strictly to domains/paths matching the city,
+  // county, zip code, or specific local utility provider name (including regional acronyms like cfpua).
   const modelSources = Array.isArray(o.sources) ? o.sources.map((s: any) => String(s)) : [];
   const cityTok = (String(reportData.inputAddress || '').split(',')[1] || '').trim();
+  
+  const extraLocalTokens: string[] = [];
+  const GENERIC_UTILITY_WORDS = new Set([
+    'water', 'sewer', 'public', 'utility', 'authority', 'service', 'fee', 'schedule', 'standard',
+    'tap', 'connection', 'residential', 'inch', 'rate', 'price', 'cost', 'estimate', 'estimated',
+    'local', 'city', 'town', 'county', 'works', 'commission', 'department', 'system', 'district',
+    'provider', 'billing', 'home', 'building', 'permit', 'zoning', 'driveway', 'development',
+    'and', 'for', 'the', 'with', 'from'
+  ]);
+  const addExtraTokens = (text: string) => {
+    if (!text) return;
+    const words = text.split(/[^a-zA-Z0-9]+/).filter(w => w.length >= 2);
+    for (const w of words) {
+      const normalizedWord = w.toLowerCase();
+      if (!GENERIC_UTILITY_WORDS.has(normalizedWord) && normalizedWord.length >= 3) {
+        extraLocalTokens.push(w);
+      }
+    }
+    if (words.length >= 3) {
+      const acronym = words.map(w => w[0]).join('').toLowerCase();
+      if (acronym.length >= 3 && !GENERIC_UTILITY_WORDS.has(acronym)) {
+        extraLocalTokens.push(acronym);
+      }
+    }
+  };
+  if (o.provider) addExtraTokens(o.provider);
+  if (o.waterTapDetail) addExtraTokens(o.waterTapDetail);
+  if (o.sewerTapDetail) addExtraTokens(o.sewerTapDetail);
+
   const sources = filterLocalSources(
     [...modelSources, ...(diag.perplexityUrls || [])],
-    [place || '', county, `${county}county`, cityTok, 'northcarolina', 'nc'].filter(Boolean),
+    [
+      place || '',
+      county,
+      `${county}county`,
+      cityTok,
+      zip,
+      ...extraLocalTokens
+    ].filter(Boolean)
   );
   return {
     locality: zip ? `ZIP ${zip} · ${county} County, NC` : `${county} County, NC`,

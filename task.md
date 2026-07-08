@@ -1,19 +1,22 @@
-# Active Task List: Put Mortgage & Sales Transactions Under a Button
+# Active Task List: Mortgage Button Styling & Strict Utility Sources
 
-This task list has been orchestrated by **Antigravity**. It details the division of labor between Antigravity, Claude Code, and Codex.
+This task list details the division of labor between Antigravity, Claude Code, and Codex.
 
 ---
 
 ## 💻 [Claude Code (Lead Architect) Tasks]
-- [ ] Review the conditional logic for rendering the Enformion card in `src/components/FeasibilitySearch.tsx`.
-- [ ] Ensure that card state transitions correctly between Not Fetched, Loading, Success (showing assessor + deed/mortgage records), and Error.
+- [ ] Review the `filterLocalSources` logic and address-relevance constraints in `src/services/feasibilityService.ts` to ensure it is robust.
+- [ ] Verify that regional provider initials matching (e.g. `cfpua`, `owasa`) works correctly without false negatives.
 
 ## ⚡ [Codex (Senior Software Engineer) Tasks]
-- [ ] Remove `fetchEnformionRecords(reportData, seq);` from `generateCostEstimates` inside `src/components/FeasibilitySearch.tsx`.
-- [ ] Modify the Enformion card visibility condition to check only `enformionConfigured()`.
-- [ ] Implement the placeholder card content with a button `Pull Deed, Mortgage & Transactions` when records are not yet fetched (`!enfProperty && !enfLoading && !enfErrors.property`).
-- [ ] Wire the button click handler to invoke `fetchEnformionRecords(data, searchSeqRef.current)`.
-- [ ] Run `npm run build` to verify compiling.
+- [ ] Modify `src/components/FeasibilitySearch.tsx` to:
+  - Style the "Pull Deed, Mortgage & Transactions" button to match the "Skip Trace Owner" button exactly (using `className="owner-skip-btn"`).
+  - Adjust the layout and spacing of the `.enf-empty` container surrounding it.
+- [ ] Update `src/services/feasibilityService.ts` to:
+  - Implement the strict `filterLocalSources` logic so only URLs containing matching locality/provider tokens are returned.
+  - Exclude general state tokens (`nc`, `northcarolina`) from the search tokens list in `fetchUtilitiesEstimate`.
+  - Extract and split `provider`, `waterTapDetail`, and `sewerTapDetail` names into individual words/tokens, and generate provider initials (e.g. `cfpua`) to add to the matching tokens list.
+- [ ] Run `npm run build` to verify there are no compilation or type errors in the project.
 
 ## 🧠 [Antigravity Tasks] (Orchestrator)
-- [ ] Oversee coordination, perform visual checks in the browser, and publish the final report.
+- [ ] Coordinate execution, monitor background processes, and run final browser checks using the browser agent.

@@ -128,3 +128,12 @@ Every completed task must include:
 4. **Remaining work**
 5. **Risks**
 6. **Recommended next step**
+
+---
+
+## 6. Installed Specialist CLI Command Details
+
+Claude Code and Codex CLIs are fully installed and authenticated on this system. In any terminal execution or delegated task:
+- **Claude Code CLI** is located at: `C:\Users\herri\.local\bin\claude.exe` (run with command prefix `claude` or its absolute path).
+- **Codex CLI** is located at: `C:\Users\herri\.codex\.sandbox-bin\codex.exe` (run with command prefix `codex` or its absolute path).
+- **Authentication**: Both CLIs are successfully logged in and authenticated. Do not run login commands unless explicitly asked.**

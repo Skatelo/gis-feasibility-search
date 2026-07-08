@@ -3535,14 +3535,15 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                     <div className="enf-loading"><Loader2 size={14} className="spinner" /><span>Pulling deed, mortgage &amp; transaction records…</span></div>
                   )}
                   {enfIdle && (
-                    <div className="enf-empty">
+                    <div className="enf-empty" style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: '8px', marginTop: '6px' }}>
                       <div>Deed, mortgage, and transaction records can be retrieved from Enformion for this property address.</div>
                       <button
                         type="button"
-                        className="enf-retry-btn"
+                        className="owner-skip-btn"
+                        disabled={enfLoading}
                         onClick={() => { if (data) fetchEnformionRecords(data, searchSeqRef.current); }}
                       >
-                        <Database size={13} />
+                        <Database size={14} />
                         <span>Pull Deed, Mortgage &amp; Transactions</span>
                       </button>
                     </div>

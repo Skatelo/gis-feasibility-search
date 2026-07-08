@@ -51,7 +51,10 @@
       "Bash(git rev-list *)",
       "Bash(curl -s \"https://tigerweb.geo.census.gov/arcgis/rest/services/TIGERweb/Places_CouSub_ConCity_SubMCD/MapServer?f=json\")",
       "Bash(curl -s \"https://tigerweb.geo.census.gov/arcgis/rest/services/TIGERweb/Places_CouSub_ConCity_SubMCD/MapServer/4/query?geometry=-80.5795,35.4088&geometryType=esriGeometryPoint&inSR=4326&spatialRel=esriSpatialRelIntersects&outFields=NAME,BASENAME&returnGeometry=false&f=json\")",
-      "Bash(curl -s \"https://tigerweb.geo.census.gov/arcgis/rest/services/TIGERweb/Places_CouSub_ConCity_SubMCD/MapServer/4/query?geometry=-79.9,35.15&geometryType=esriGeometryPoint&inSR=4326&spatialRel=esriSpatialRelIntersects&outFields=NAME&returnGeometry=false&f=json\")"
+      "Bash(curl -s \"https://tigerweb.geo.census.gov/arcgis/rest/services/TIGERweb/Places_CouSub_ConCity_SubMCD/MapServer/4/query?geometry=-79.9,35.15&geometryType=esriGeometryPoint&inSR=4326&spatialRel=esriSpatialRelIntersects&outFields=NAME&returnGeometry=false&f=json\")",
+      "Bash(curl -s \"https://services.gis.nc.gov/secure/rest/services/NC1Map_Parcels/MapServer/1/query?geometry=-80.51,35.24,-80.505,35.245&geometryType=esriGeometryEnvelope&inSR=4326&spatialRel=esriSpatialRelIntersects&outFields=ownname,parno,siteadd,gisacres&returnGeometry=true&outSR=4326&resultRecordCount=5&f=json\")",
+      "Bash(awk -F: '$1>1048 && $1<1420')",
+      "Bash(awk -F: '$1>1200 && $1<1600')"
     ]
   }
 }
