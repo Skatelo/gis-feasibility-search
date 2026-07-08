@@ -421,6 +421,15 @@ const countyState = (countyName: string): SupportedState => {
 
 const countyParcelLayerKey = (countyName: string): string => normalizeCountyKey(countyBaseName(countyName));
 
+const getStateFromCoords = (lat: number, lng: number): SupportedState => {
+  if (lat > 35.25) return 'NC';
+  if (lat < 32.0) return 'SC';
+  if (lng > -78.5) return 'NC';
+  const borderLat = 33.85 - 0.3325 * (lng + 78.54);
+  if (lat < borderLat) return 'SC';
+  return 'NC';
+};
+
 export const ncCountyConfig: Record<string, { geocodeUrl: string; parcelUrl: string; extraWhere: string }> =
   Object.fromEntries(
     [
@@ -554,9 +563,15 @@ function ringCentroid(ring: number[][]): [number, number] | null {
  */
 export async function fetchParcelsInBbox(west: number, south: number, east: number, north: number): Promise<{ polygons: any; labels: any } | null> {
   try {
-    const url = `${NC_PARCEL_ENGINE}?geometry=${west},${south},${east},${north}` +
+    const centerLat = (south + north) / 2;
+    const centerLng = (west + east) / 2;
+    const state = getStateFromCoords(centerLat, centerLng);
+    const engineUrl = state === 'NC' ? NC_PARCEL_ENGINE : `${SC_STATEWIDE_PARCEL_LAYER}/query`;
+    const outFields = state === 'NC' ? 'ownname,parno,siteadd,gisacres' : 'Ownership,T_Map_Number,Mailing_Add,Acreage';
+
+    const url = `${engineUrl}?geometry=${west},${south},${east},${north}` +
       `&geometryType=esriGeometryEnvelope&inSR=4326&spatialRel=esriSpatialRelIntersects` +
-      `&outFields=${encodeURIComponent('ownname,parno,siteadd,gisacres')}` +
+      `&outFields=${encodeURIComponent(outFields)}` +
       `&returnGeometry=true&outSR=4326&resultRecordCount=400&f=json`;
     const res = await fetchWithTimeout(url, 15000);
     if (!res.ok) return null;
@@ -567,10 +582,10 @@ export async function fetchParcelsInBbox(west: number, south: number, east: numb
     for (const f of feats) {
       const rings: number[][][] = f?.geometry?.rings;
       if (!rings || !rings.length) continue;
-      const rawOwner = String(f.attributes?.ownname || '').trim();
+      const rawOwner = String((state === 'NC' ? f.attributes?.ownname : f.attributes?.Ownership) || '').trim();
       const owner = rawOwner ? formatOwnerName(rawOwner).toUpperCase() : '';
-      const parno = String(f.attributes?.parno || '');
-      const siteadd = String(f.attributes?.siteadd || '').trim();
+      const parno = String((state === 'NC' ? f.attributes?.parno : f.attributes?.T_Map_Number) || '');
+      const siteadd = String((state === 'NC' ? f.attributes?.siteadd : f.attributes?.Mailing_Add) || '').trim();
       polygons.push({ type: 'Feature', geometry: { type: 'Polygon', coordinates: rings }, properties: { parno, owner, siteadd } });
       if (!owner || owner === 'N/A') continue;
       // Label at the centroid of the largest ring (outer boundary).
@@ -581,7 +596,7 @@ export async function fetchParcelsInBbox(west: number, south: number, east: numb
       }
       const c = ringCentroid(biggest);
       if (!c) continue;
-      const acres = Number(f.attributes?.gisacres);
+      const acres = Number(state === 'NC' ? f.attributes?.gisacres : f.attributes?.Acreage);
       labels.push({
         type: 'Feature',
         geometry: { type: 'Point', coordinates: c },
@@ -3525,7 +3540,10 @@ export async function fetchZoningViaWebSearch(
     return null;
   }
 
-  const countyLine = countyName ? ` It is in ${countyName} County, North Carolina.` : '';
+  const state = countyName ? countyState(countyName) : 'NC';
+  const stateFull = state === 'SC' ? 'South Carolina' : 'North Carolina';
+
+  const countyLine = countyName ? ` It is in ${countyBaseName(countyName)} County, ${stateFull}.` : '';
   const coordLine = (lat != null && lng != null) ? ` The parcel is at coordinates ${lat.toFixed(6)}, ${lng.toFixed(6)}.` : '';
   const hintLine = gisHint
     ? `\nThe county GIS zoning layer returns "${gisHint}" at this parcel point — this is usually authoritative. CONFIRM it against the official zoning map, and only return a different code if you find clear official evidence the parcel's actual zoning is different (e.g. it sits inside a municipality with its own zoning).`
@@ -3542,9 +3560,9 @@ Rules: "zoningCode" must be the actual district code that jurisdiction uses for 
   const cityPart = (address.split(',')[1] || '').trim();
   const queries = [
     `zoning district "${address}"`,
-    `${countyName ? `${countyName} County NC` : cityPart ? `${cityPart} NC` : 'North Carolina'} zoning map GIS parcel viewer`,
-    `${countyName ? `${countyName} County` : cityPart} NC zoning ordinance districts${gisHint ? ` ${gisHint}` : ''}`,
-    `${cityPart || countyName || ''} NC planning department zoning lookup`.trim(),
+    `${countyName ? `${countyBaseName(countyName)} County ${state}` : cityPart ? `${cityPart} ${state}` : stateFull} zoning map GIS parcel viewer`,
+    `${countyName ? `${countyBaseName(countyName)} County` : cityPart} ${state} zoning ordinance districts${gisHint ? ` ${gisHint}` : ''}`,
+    `${cityPart || countyBaseName(countyName || '') || ''} ${state} planning department zoning lookup`.trim(),
   ];
 
   if (deepSeekKey) {
@@ -5627,8 +5645,14 @@ interface TreeRates {
  *  clearing method rates (forestry mulching + traditional excavator clearing,
  *  per-acre + day-rate minimums + haul-off). */
 async function fetchTreeRemovalRates(county: string, zip: string, geminiKey: string): Promise<TreeRates | null> {
-  const locality = zip ? `ZIP ${zip} (${county} County, NC)` : `${county} County, NC`;
-  const prompt = `Find CURRENT LOCAL land-clearing prices near ${locality} (${new Date().getFullYear()}).
+  const state = countyState(county);
+  const stateFull = state === 'SC' ? 'South Carolina' : 'North Carolina';
+  const stateLower = state.toLowerCase();
+  const stateFullLower = stateFull.toLowerCase().replace(/\s+/g, '');
+  const baseCounty = countyBaseName(county);
+
+  const locality = zip ? `ZIP ${zip} (${baseCounty} County, ${state})` : `${baseCounty} County, ${state}`;
+  const prompt = `Find CURRENT LOCAL land-clearing prices near ${locality} (	extsl{${new Date().getFullYear()}}).
 Return ONLY a JSON object in a \`\`\`json code block:
 \`\`\`json
 { "small": 0, "medium": 0, "large": 0, "stumpGrind": 0, "mulchPerAcre": 0, "mulchDayRate": 0, "clearingPerAcre": 0, "clearingDayRate": 0, "haulOff": 0, "sources": ["https://..."] }
@@ -5649,24 +5673,24 @@ Use CURRENT LOCAL prices from credible tree-service / land-clearing / excavation
     // Parallel batched Perplexity searches — kept LOCAL to this county so the
     // cited sources are relevant to the address, not national averages.
     [
-      `tree removal cost ${zipStr}${county} County NC ${new Date().getFullYear()}`,
-      `stump grinding cost ${zip ? `${zip} NC` : `${county} County NC`}`,
-      `forestry mulching cost per acre ${county} County NC`,
-      `land clearing cost per acre ${county} County NC`,
-      `excavator land clearing day rate debris haul off ${county} County NC`,
+      `tree removal cost ${zipStr}${baseCounty} County ${state} ${new Date().getFullYear()}`,
+      `stump grinding cost ${zip ? `${zip} ${state}` : `${baseCounty} County ${state}`}`,
+      `forestry mulching cost per acre ${baseCounty} County ${state}`,
+      `land clearing cost per acre ${baseCounty} County ${state}`,
+      `excavator land clearing day rate debris haul off ${baseCounty} County ${state}`,
     ],
     diag,
   );
   if (!text) return null;
-  const m = text.match(/```json\s*([\s\S]*?)\s*```/) || text.match(/\{[\s\S]*\}/);
+  const m = text.match(new RegExp('```json\\\\s*([\\\\s\\\\S]*?)\\\\s*```')) || text.match(new RegExp('\\\\{[\\\\s\\\\S]*\\\\}'));
   if (!m) return null;
   try {
-    const o = JSON.parse((m[1] || m[0]).replace(/,\s*([}\]])/g, '$1'));
+    const o = JSON.parse((m[1] || m[0]).replace(/,\\s*([}\\]])/g, '$1'));
     const num = (v: any) => { const n = Number(v); return Number.isFinite(n) && n > 0 ? Math.round(n) : 0; };
     const small = num(o.small), medium = num(o.medium), large = num(o.large);
     if (!small && !medium && !large) return null;
     const modelSources = Array.isArray(o.sources) ? o.sources.map((s: any) => String(s)) : [];
-    const sources = filterLocalSources([...modelSources, ...(diag.perplexityUrls || [])], [county, `${county}county`, 'northcarolina', 'nc']);
+    const sources = filterLocalSources([...modelSources, ...(diag.perplexityUrls || [])], [baseCounty, `${baseCounty.toLowerCase()}county`, stateFullLower, stateLower]);
     return {
       small: small || TREE_RATE_FALLBACK.small,
       medium: medium || TREE_RATE_FALLBACK.medium,
@@ -5741,7 +5765,9 @@ export async function fetchLandClearingEstimate(reportData: SiteFeasibilityData)
   const zoom = landZoomForAcres(acres);
   const satelliteUrl = `https://maps.googleapis.com/maps/api/staticmap?center=${lat},${lng}&zoom=${zoom}&size=600x600&scale=2&maptype=satellite&key=${keys.googleMaps}`;
   const zip = (String(reportData.inputAddress || '').match(/\b(\d{5})(?:-\d{4})?\b/) || [])[1] || '';
-  const locality = zip ? `ZIP ${zip} · ${reportData.countyName} County, NC` : `${reportData.countyName} County, NC`;
+  const state = countyState(reportData.countyName || '');
+  const baseCounty = countyBaseName(reportData.countyName || '');
+  const locality = zip ? `ZIP ${zip} · ${baseCounty} County, ${state}` : `${baseCounty} County, ${state}`;
 
   // Add a ground-level street view (when available) so the AI can judge tree size.
   const streetViewUrl = await streetViewUrlIfAvailable(lat, lng, keys.googleMaps);
@@ -5863,8 +5889,11 @@ export async function fetchUtilitiesEstimate(reportData: SiteFeasibilityData): P
     throw new Error('Add your Gemini or DeepSeek API key in Account Settings to run the utilities & fees lookup on this device.');
   }
   const county = reportData.countyName || '';
+  const state = countyState(county);
+  const stateFull = state === 'SC' ? 'South Carolina' : 'North Carolina';
+  const baseCounty = countyBaseName(county);
   const zip = (String(reportData.inputAddress || '').match(/\b(\d{5})(?:-\d{4})?\b/) || [])[1] || '';
-  const locality = zip ? `${reportData.inputAddress} (ZIP ${zip}, ${county} County, NC)` : `${reportData.inputAddress} (${county} County, NC)`;
+  const locality = zip ? `${reportData.inputAddress} (ZIP ${zip}, ${baseCounty} County, ${state})` : `${reportData.inputAddress} (${baseCounty} County, ${state})`;
 
   // Look up the ACTUAL jurisdiction at the searched parcel's coordinates — the
   // strongest address-specific signal for public-utility availability.
@@ -5872,8 +5901,8 @@ export async function fetchUtilitiesEstimate(reportData: SiteFeasibilityData): P
   const place = (typeof lat === 'number' && typeof lng === 'number') ? await incorporatedPlaceAtPoint(lat, lng) : null;
   const incorporated = !!place;
   const jurisdiction = incorporated
-    ? `Inside the incorporated limits of ${place}, NC`
-    : `Unincorporated ${county} County, NC (no municipal limits at this location)`;
+    ? `Inside the incorporated limits of ${place}, ${state}`
+    : `Unincorporated ${baseCounty} County, ${state} (no municipal limits at this location)`;
 
   const prompt = `For the property at ${locality}, determine (A) whether the address is served by PUBLIC water and PUBLIC sewer, needs a private WELL / SEPTIC, or is a MIX of the two, and (B) the CURRENT LOCAL cost of each applicable connection as a SINGLE EXACT DOLLAR AMOUNT (not a range), for building a home (${new Date().getFullYear()}).
 JURISDICTION AT THIS EXACT PARCEL (from the U.S. Census place boundaries): ${jurisdiction}.
@@ -5896,13 +5925,13 @@ STRICT PRICING RULES — REAL FIGURES ONLY:
 - Every dollar figure MUST come from a page you actually found with Google Search: the utility authority's CURRENT published fee schedule / rate ordinance for tap-connection-impact fees, the jurisdiction's CURRENT adopted permit fee schedule, or named LOCAL well-drilling & septic contractors' current pricing for this county.
 - List in "sources" EVERY distinct source URL you used across all the lines — aim for 6–12 different local sources (fee schedules, rate ordinances, contractor pages), not just one or two. A figure without a source URL is not allowed.
 - If you cannot find a verifiable current local figure for a line, you MUST leave it 0. NEVER estimate, NEVER use national/regional averages, NEVER guess.`;
-  const utilitiesSystem = 'You are a site-development utilities and permit-fee analyst for North Carolina — any city, town, or county. Use web search to find the LOCAL water/sewer provider for the given jurisdiction, its CURRENT published tap/connection/impact fee schedule, the jurisdiction\'s CURRENT adopted residential permit fee schedule, and current local well & septic contractor pricing. Determine public-water and public-sewer availability SEPARATELY (a parcel may be public water + septic, well + public sewer, both, or neither) and report EACH cost as a single exact dollar amount. Return only the JSON. Every number must be traceable to a cited source URL; leave any unverifiable number 0 — never estimate or use regional averages.';
+  const utilitiesSystem = `You are a site-development utilities and permit-fee analyst for ${stateFull} — any city, town, or county. Use web search to find the LOCAL water/sewer provider for the given jurisdiction, its CURRENT published tap/connection/impact fee schedule, the jurisdiction's CURRENT adopted residential permit fee schedule, and current local well & septic contractor pricing. Determine public-water and public-sewer availability SEPARATELY (a parcel may be public water + septic, well + public sewer, both, or neither) and report EACH cost as a single exact dollar amount. Return only the JSON. Every number must be traceable to a cited source URL; leave any unverifiable number 0 — never estimate or use regional averages.`;
 
   // Live searching on the Perplexity Search API (parallel batched queries →
   // many ranked fee-schedule sources), synthesis on Gemini/DeepSeek. Runs
   // IMMEDIATELY (no queue wait), in parallel with the tree count and the
   // other section lookups. The card's automatic retry covers a transient miss.
-  const jur = place ? `${place} NC` : `${county} County NC`;
+  const jur = place ? `${place} ${state}` : `${baseCounty} County ${state}`;
   const yr = new Date().getFullYear();
   const diag: { perplexityAttempted: boolean; perplexitySources: number; perplexityUrls?: string[] } = { perplexityAttempted: false, perplexitySources: 0 };
 
@@ -5914,8 +5943,8 @@ STRICT PRICING RULES — REAL FIGURES ONLY:
     `${jur} water sewer authority residential connection fees`,
     `${jur} residential building permit fee schedule ${yr}`,
     `${jur} zoning permit driveway permit fee`,
-    `well drilling cost ${county} County NC ${yr}`,
-    `septic system installation cost perc test ${county} County NC`,
+    `well drilling cost ${baseCounty} County ${state} ${yr}`,
+    `septic system installation cost perc test ${baseCounty} County ${state}`,
   ];
 
   let text: string | null = null;
@@ -5924,6 +5953,7 @@ STRICT PRICING RULES — REAL FIGURES ONLY:
   } else {
     text = await groundedGeminiText(geminiKey, prompt, utilitiesSystem, 90000, queries, diag);
   }
+
   // ALWAYS produce pricing. If the live search fails or answers oddly, fall back
   // to a fully-estimated result (availability from the jurisdiction, prices from
   // the typical-NC ranges) instead of erroring — the user asked to always see a

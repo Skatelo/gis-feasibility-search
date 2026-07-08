@@ -1,26 +1,19 @@
-# Active Task List: South Carolina GIS Attribute Normalization Fix
+# Active Task List: State-Agnostic Map Labels, Zoning, Utilities & Land Clearing
 
-This task list details the division of labor between Antigravity, Claude Code, and Codex to resolve the empty SC GIS search results by normalizing the attributes.
+This task list details the division of labor between Antigravity, Claude Code, and Codex to make the GIS map labels, zoning map search, utility connections, and land clearing calculations work for both NC and SC addresses.
 
 ---
 
 ## 💻 [Claude Code (Lead Architect) Tasks]
-- [x] Review the normalization key mappings in `normalizeCountyParcelAttrs` to ensure no collisions.
-- [x] Verify that the normalized county name field correctly feeds into the county correction logic.
+- [x] Review the boundary check algorithm `getStateFromCoords` to verify it accurately separates NC and SC.
+- [x] Verify that all web-search prompts and Perplexity query constructors correctly format state names.
 
 ## ⚡ [Codex (Senior Software Engineer) Tasks]
-- [x] Update `normalizeCountyParcelAttrs` in `src/services/feasibilityService.ts` to map the SC attributes:
-  - Match `parno` with `/t_map_number|tms|tax_map_number/i`.
-  - Match `ownname` with `/ownership|owner_ship/i`.
-  - Match `mailadd` with `/mailing_add/i`.
-  - Match `mcity` with `/mailing_city/i`.
-  - Match `mstate` with `/mailing_st|mailing_state/i`.
-  - Match `mzip` with `/mailing_zip/i`.
-  - Match `parval` with `/m_value/i`.
-  - Match `landval` with `/l_value/i`.
-  - Match `legdecfull` with `/land_use/i`.
-  - Add `cntyname` to the returned properties matching `/cntyname|county|county_name/i`.
-- [x] Update `executeLandAnalysis` in `src/services/feasibilityService.ts` to normalize properties returned from the statewide queries using `normalizeCountyParcelAttrs`.
+- [x] Implement `getStateFromCoords` in `src/services/feasibilityService.ts` to detect the state based on latitude and longitude.
+- [x] Update `fetchParcelsInBbox` in `src/services/feasibilityService.ts` to query the correct MapServer (NC OneMap or SCDOT) and map the properties dynamically.
+- [x] Update `fetchZoningViaWebSearch` in `src/services/feasibilityService.ts` to replace hardcoded state names with dynamic state parameters.
+- [x] Update `fetchUtilitiesEstimate` in `src/services/feasibilityService.ts` to query using dynamic state parameters.
+- [x] Update `fetchTreeRemovalRates` and `fetchLandClearingEstimate` in `src/services/feasibilityService.ts` to use dynamic state parameters.
 
 ## 🧠 [Antigravity Tasks] (Orchestrator)
 - [x] Coordinate execution, run Vite compilation checks, commit changes, and push to GitHub.
