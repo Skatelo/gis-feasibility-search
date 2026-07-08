@@ -5685,7 +5685,7 @@ Use CURRENT LOCAL prices from credible tree-service / land-clearing / excavation
   const m = text.match(/```json\s*([\s\S]*?)\s*```/) || text.match(/\{[\s\S]*\}/);
   if (!m) return null;
   try {
-    const o = JSON.parse((m[1] || m[0]).replace(/,\\s*([}\\]])/g, '$1'));
+    const o = JSON.parse((m[1] || m[0]).replace(/,\s*([}\\]])/g, '$1'));
     const num = (v: any) => { const n = Number(v); return Number.isFinite(n) && n > 0 ? Math.round(n) : 0; };
     const small = num(o.small), medium = num(o.medium), large = num(o.large);
     if (!small && !medium && !large) return null;
