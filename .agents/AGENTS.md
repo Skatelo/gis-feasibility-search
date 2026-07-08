@@ -93,6 +93,7 @@ Run agents in parallel whenever possible. Example flow:
 * **Architecture Control**: Codex never changes architecture; every major implementation is reviewed by Claude.
 * **Image Interpretation & Code Security**: Gemini never edits application code. Claude never writes repetitive CRUD implementations.
 * **Git History**: Always preserve Git history and create clear handoffs between agents.
+* **Git Push**: Always commit and push successfully implemented and verified changes to the GitHub remote repository (`origin/main` or current working branch) at the end of each task.
 * **Antigravity Responsibilities**: Performs orchestration, browser testing, verification, Git coordination, and merge planning.
 * **Unified Output**: The final response should appear as one unified solution regardless of how many agents contributed.
 
