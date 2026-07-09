@@ -1825,14 +1825,36 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
     const labelsFC = { type: 'FeatureCollection', features: labelFeatures };
 
     const gr = data.gridics;
+    const escapeHtml = (v: any) => String(v ?? '').replace(/[&<>"']/g, (ch) => ({
+      '&': '&amp;',
+      '<': '&lt;',
+      '>': '&gt;',
+      '"': '&quot;',
+      "'": '&#39;',
+    }[ch] as string));
+    const formatCurrency = (v?: number | null) => {
+      const n = Number(v);
+      return Number.isFinite(n) && n > 0 ? `$${n.toLocaleString(undefined, { maximumFractionDigits: 0 })}` : 'N/A';
+    };
+    const taxes = Number.isFinite(Number(data.taxAmount)) && Number(data.taxAmount) > 0
+      ? `${formatCurrency(data.taxAmount)}${data.taxYear ? ` (${data.taxYear})` : ''}`
+      : 'N/A';
     const infoHtml = `<div style="font-family:Arial,sans-serif;padding:6px;color:#000;font-size:12px;line-height:1.4;min-width:230px;max-width:270px;">
         <strong style="color:#0070f3;font-size:13px;display:block;margin-bottom:4px;border-bottom:1px solid #eaeaea;padding-bottom:3px;">PROPERTY BLUEPRINT</strong>
-        <strong>County:</strong> ${data.countyName}<br>
-        <strong>Parcel PIN:</strong> ${data.parcelId}<br>
-        <strong>Address:</strong> ${data.inputAddress}<br>
+        <strong>County:</strong> ${escapeHtml(data.countyName)}<br>
+        <strong>Parcel PIN:</strong> ${escapeHtml(data.parcelId)}<br>
+        <strong>Address:</strong> ${escapeHtml(data.inputAddress)}<br>
         <strong>Area:</strong> ${data.gisAcres ? data.gisAcres.toFixed(3) + ' ac (' + data.grossSf.toLocaleString() + ' SF)' : 'N/A'}<br>
+        <strong style="color:#6d4c41;font-size:13px;display:block;margin-top:6px;margin-bottom:4px;border-bottom:1px solid #eaeaea;padding-bottom:3px;">OWNER &amp; TAX</strong>
+        <div style="display:grid;grid-template-columns:86px minmax(0,1fr);gap:2px 8px;margin-bottom:2px;">
+          <span style="font-weight:bold;">Owner Name</span><span>${escapeHtml(data.ownerName || 'N/A')}</span>
+          <span style="font-weight:bold;">Mailing</span><span>${escapeHtml(data.mailingAddress || 'N/A')}</span>
+          <span style="font-weight:bold;">Assessed</span><span>${formatCurrency(data.assessedPropertyValue)}</span>
+          <span style="font-weight:bold;">Land Value</span><span>${formatCurrency(data.landValue)}</span>
+          <span style="font-weight:bold;">Taxes</span><span>${escapeHtml(taxes)}</span>
+        </div>
         <strong style="color:#008f5d;font-size:13px;display:block;margin-top:6px;margin-bottom:4px;border-bottom:1px solid #eaeaea;padding-bottom:3px;">ZONING &amp; STANDARDS</strong>
-        <strong>Zoning:</strong> ${data.zoningCode}<br>
+        <strong>Zoning:</strong> ${escapeHtml(data.zoningCode)}<br>
         <strong>Frontage:</strong> ${gr ? gr.frontageLengthFt.toFixed(1) + ' ft' : 'N/A'}<br>
         <strong>Max Height (est.):</strong> ${gr ? gr.maxHeightFt + ' ft' : 'N/A'}<br>
         <strong>FAR (est.):</strong> ${gr ? gr.floorAreaRatio : 'N/A'}<br>
@@ -1890,7 +1912,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
               return;
             }
             const b = map.getBounds();
-            const res = await fetchParcelsInBbox(b.getWest(), b.getSouth(), b.getEast(), b.getNorth());
+            const res = await fetchParcelsInBbox(b.getWest(), b.getSouth(), b.getEast(), b.getNorth(), data.countyName);
             if (!res || seq !== neighborSeqRef.current || !map.getSource('neighbor-parcels')) return;
             map.getSource('neighbor-parcels').setData(res.polygons);
             map.getSource('neighbor-owner-labels').setData(res.labels);

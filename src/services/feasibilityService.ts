@@ -623,13 +623,17 @@ function ringCentroid(ring: number[][]): [number, number] | null {
  * labels on the satellite map. Returns GeoJSON: parcel outline polygons plus
  * one label point per parcel (owner, address, acres), or null on failure.
  */
-export async function fetchParcelsInBbox(west: number, south: number, east: number, north: number): Promise<{ polygons: any; labels: any } | null> {
+export async function fetchParcelsInBbox(west: number, south: number, east: number, north: number, countyName?: string): Promise<{ polygons: any; labels: any } | null> {
   try {
     const centerLat = (south + north) / 2;
     const centerLng = (west + east) / 2;
     const state = getStateFromCoords(centerLat, centerLng);
-    const engineUrl = state === 'NC' ? NC_PARCEL_ENGINE : `${SC_STATEWIDE_PARCEL_LAYER}/query`;
-    const outFields = state === 'NC' ? 'ownname,parno,siteadd,gisacres' : 'Ownership,T_Map_Number,Mailing_Add,Acreage';
+    const normalizeLayerUrl = (url: string) => url.replace(/\/query$/i, '').replace(/\/+$/g, '');
+    const scCountyLayer = state === 'SC' && countyName ? countyParcelLayerFor(countyName, state) : undefined;
+    const scCountyLayerBase = scCountyLayer ? normalizeLayerUrl(scCountyLayer) : undefined;
+    const useLocalScParcelLayer = state === 'SC' && !!scCountyLayerBase && scCountyLayerBase !== normalizeLayerUrl(SC_STATEWIDE_PARCEL_LAYER);
+    const engineUrl = state === 'NC' ? NC_PARCEL_ENGINE : useLocalScParcelLayer ? `${scCountyLayerBase}/query` : `${SC_STATEWIDE_PARCEL_LAYER}/query`;
+    const outFields = state === 'NC' ? 'ownname,parno,siteadd,gisacres' : useLocalScParcelLayer ? '*' : 'Ownership,T_Map_Number,Mailing_Add,Acreage';
 
     const url = `${engineUrl}?geometry=${west},${south},${east},${north}` +
       `&geometryType=esriGeometryEnvelope&inSR=4326&spatialRel=esriSpatialRelIntersects` +
@@ -644,10 +648,24 @@ export async function fetchParcelsInBbox(west: number, south: number, east: numb
     for (const f of feats) {
       const rings: number[][][] = f?.geometry?.rings;
       if (!rings || !rings.length) continue;
-      const rawOwner = String((state === 'NC' ? f.attributes?.ownname : f.attributes?.Ownership) || '').trim();
+      let rawOwner = '';
+      let parno = '';
+      let siteadd = '';
+      let acresRaw: any;
+      if (useLocalScParcelLayer) {
+        const norm = normalizeCountyParcelAttrs(f.attributes || {});
+        const normOwner = String(norm.ownname || '').trim();
+        rawOwner = normOwner.toUpperCase() === 'N/A' ? '' : normOwner;
+        parno = String(norm.parno || '');
+        siteadd = String(norm.siteadd || norm.mailadd || '').trim();
+        acresRaw = norm.gisacres;
+      } else {
+        rawOwner = String((state === 'NC' ? f.attributes?.ownname : f.attributes?.Ownership) || '').trim();
+        parno = String((state === 'NC' ? f.attributes?.parno : f.attributes?.T_Map_Number) || '');
+        siteadd = String((state === 'NC' ? f.attributes?.siteadd : f.attributes?.Mailing_Add) || '').trim();
+        acresRaw = state === 'NC' ? f.attributes?.gisacres : f.attributes?.Acreage;
+      }
       const owner = rawOwner ? formatOwnerName(rawOwner).toUpperCase() : '';
-      const parno = String((state === 'NC' ? f.attributes?.parno : f.attributes?.T_Map_Number) || '');
-      const siteadd = String((state === 'NC' ? f.attributes?.siteadd : f.attributes?.Mailing_Add) || '').trim();
       polygons.push({ type: 'Feature', geometry: { type: 'Polygon', coordinates: rings }, properties: { parno, owner, siteadd } });
       if (!owner || owner === 'N/A') continue;
       // Label at the centroid of the largest ring (outer boundary).
@@ -658,7 +676,7 @@ export async function fetchParcelsInBbox(west: number, south: number, east: numb
       }
       const c = ringCentroid(biggest);
       if (!c) continue;
-      const acres = Number(state === 'NC' ? f.attributes?.gisacres : f.attributes?.Acreage);
+      const acres = Number(acresRaw);
       labels.push({
         type: 'Feature',
         geometry: { type: 'Point', coordinates: c },
@@ -869,16 +887,48 @@ function ringAreaSqFt(rings?: number[][][]): number {
 /** Maps a county parcel record (varied field names) onto the statewide schema. */
 function normalizeCountyParcelAttrs(a: Record<string, any>): Record<string, any> {
   const keys = Object.keys(a);
+  const hasValue = (v: any): boolean => v != null && String(v).trim() !== "" && String(v).trim().toLowerCase() !== "null";
   const get = (...res: RegExp[]): any => {
     for (const re of res) {
       const k = keys.find((k) => re.test(k));
-      if (k != null && a[k] != null && String(a[k]).trim() !== "" && String(a[k]).trim().toLowerCase() !== "null") return a[k];
+      if (k != null && hasValue(a[k])) return a[k];
     }
     return undefined;
   };
+  const joinFirstAddressGroup = (): string | undefined => {
+    const groups = [
+      [/^address_?1$/i, /^address_?2$/i, /^address_?3$/i],
+      [/^mailaddr?1$/i, /^mailaddr?2$/i, /^mailaddr?3$/i],
+      [/^mail_?addr_?1$/i, /^mail_?addr_?2$/i, /^mail_?addr_?3$/i],
+      [/^cama_temp_address_?1$/i, /^cama_temp_address_?2$/i, /^cama_temp_address_?3$/i],
+      [/^add1$/i, /^add2$/i, /^add3$/i],
+      [/^owner_?addr(?:ess)?_?1$/i, /^owner_?addr(?:ess)?_?2$/i, /^owner_?addr(?:ess)?_?3$/i],
+      [/^taxpayer_?addr(?:ess)?_?1$/i, /^taxpayer_?addr(?:ess)?_?2$/i, /^taxpayer_?addr(?:ess)?_?3$/i],
+    ];
+    for (const group of groups) {
+      const parts = group.map((re) => get(re)).filter(hasValue).map((v) => String(v).trim());
+      if (parts.length) return parts.join(' ');
+    }
+    return undefined;
+  };
+  const parseCityStateZip = (v: any): { city: string; state: string; zip?: string } | null => {
+    if (!hasValue(v)) return null;
+    const s = String(v).trim().replace(/,\s*/g, ' ').replace(/\s+/g, ' ');
+    const m = s.match(/^([A-Za-z\s\.\-]+)\s+([A-Z]{2})(?:\s+(\d{5}(?:-\d{4})?))?$/);
+    return m ? { city: m[1].trim(), state: m[2].trim(), zip: m[3]?.trim() } : null;
+  };
+  const getCombinedCityStateZip = (): { city: string; state: string; zip?: string } | null => {
+    for (const re of [/^city_?state_?zip$/i, /^cama_temp_address_?3$/i, /^address_?2$/i, /^address_?3$/i]) {
+      const parsed = parseCityStateZip(get(re));
+      if (parsed) return parsed;
+    }
+    return null;
+  };
+
   let ownname = get(/^ownname$/i, /^owner$/i, /ownername/i, /owner_?name/i, /^owner_?1$/i, /^acctname1?$/i, /^taxpayer$/i,
     /^name_?1$/i, /^n_?name$/i, /^ownam1$/i, /^own1$/i, /jan1_?name1?/i, /current_?owners?$/i, /^current_?ow$/i,
-    /property_?owner/i, /^paname$/i, /primary_?owner/i, /owners_?name$/i, /^acct_?name$/i, /^name$/i);
+    /property_?owner/i, /^paname$/i, /primary_?owner/i, /owners_?name$/i, /^acct_?name$/i, /^name$/i, /ownership$/i,
+    /cama_temp_name$/i);
   if (!ownname) {
     const last = get(/own.*lst.*n/i, /owner.*last/i, /lastname/i, /own_?last/i);
     const first = get(/own.*frst.*n/i, /owner.*first/i, /firstname/i, /own_?first/i);
@@ -895,7 +945,8 @@ function normalizeCountyParcelAttrs(a: Record<string, any>): Record<string, any>
   // house-number + street-name pieces (several county schemas split it).
   let siteadd = get(/site_?address/i, /^siteadd/i, /whole_?address/i, /situs/i, /location_?addr/i, /parcel_?addr/i,
     /property_?address/i, /^phys_?addr/i, /physaddres/i, /^phylocat/i, /^prop_?locat/i, /physical_?(street_?address|location)$/i,
-    /^locaddress/i, /^street_?address$/i, /legal_?addr/i, /^str_?addr/i, /^address$/i, /prop_?add/i);
+    /^locaddress/i, /^street_?address$/i, /legal_?addr/i, /^str_?addr/i, /^address$/i, /prop_?add/i, /^loc$/i,
+    /^street$/i, /^locadd$/i, /street_?name/i);
   if (!siteadd) {
     const hn = get(/house_?num/i, /housenumbe/i, /house_?nr/i, /street_?nbr/i, /phys.?lc.?street_?number/i, /^stnum$/i);
     const sn = get(/^street_?name$/i, /^strname$/i, /^strtname$/i, /phys.?lc.?street_?name/i, /^pastna$/i, /^st_?name$/i);
@@ -908,25 +959,48 @@ function normalizeCountyParcelAttrs(a: Record<string, any>): Record<string, any>
     const page = get(/deed_?page/i, /^page$/i);
     if (book) sourceref = page ? `${book}/${page}` : String(book);
   }
+  let mailadd = get(/^mailadd$/i, /^mail_?address$/i, /^mailing_?(add|addr|address)$/i, /^mailing$/i,
+    /^curr_?addr$/i, /^current_?ad$/i, /postal_?address/i, /^owner_?address$/i, /^taxpayer_?address$/i,
+    /^acct_?addr$/i);
+  if (!mailadd) mailadd = joinFirstAddressGroup();
+  if (!mailadd) {
+    mailadd = get(/mailaddr?1/i, /^addr1$/i, /curr_?addr1/i, /mailing/i, /mail_?add/i, /^address_?1$/i, /^address$/i,
+      /taxpayer_?addr(ess)?_?1?/i, /^owadr1$/i, /owner_?addr(ess)?_?1?$/i);
+  }
+  let mcity = get(/mail.*city/i, /^mcity$/i, /curr_?city/i, /loccity/i, /^city$/i, /mailing_?city/i,
+    /^owner_?city$/i, /^mail_?addr_?city$/i);
+  let mstate = get(/mail.*state/i, /^mstate$/i, /curr_?state/i, /^state$/i, /mailing_?st/i, /mailing_?state/i,
+    /^owner_?stat$/i, /^mail_?addr_?state$/i, /^st$/i);
+  let mzip = get(/mail.*zip/i, /^mzip$/i, /curr_?zip/i, /zipnum/i, /^zip(code)?$/i, /mailing_?zip/i,
+    /^owner_?zip$/i, /^mail_?addr_?zip$/i);
+  if (!mcity || !mstate || !mzip) {
+    const combined = getCombinedCityStateZip();
+    if (combined) {
+      if (!mcity) mcity = combined.city;
+      if (!mstate) mstate = combined.state;
+      if (!mzip && combined.zip) mzip = combined.zip;
+    }
+  }
   return {
-    parno: get(/^pin_?num$/i, /^parno$/i, /parcel_?id/i, /^pid$/i, /^pin$/i, /^pin14$/i, /^nad83_?pin$/i, /parcel_?num/i, /^gis_?pin$/i, /gpin/i, /nc_?pin/i, /^newpin$/i, /^geo_?pin$/i, /^par_?code$/i, /^tms$/i, /^pin/i, /t_map_number/i, /tax_?map_?number/i) ?? "N/A",
+    parno: get(/^pin_?num$/i, /^parno$/i, /parcel_?id/i, /^parcel_?id$/i, /^pid$/i, /^pin$/i, /^pin14$/i, /^nad83_?pin$/i, /parcel_?num/i, /^gis_?pin$/i, /gpin/i, /nc_?pin/i, /^newpin$/i, /^geo_?pin$/i, /^par_?code$/i, /^tms$/i, /^pin/i, /t_map_number/i, /tax_?map_?number/i, /^taxmapid$/i, /^map_?number$/i, /^tax_?pin$/i, /^tms_?number$/i, /^cmplnn2?$/i) ?? "N/A",
     gisacres: get(/gis_?acres/i, /calc.*acre/i, /calculated_?acreage/i, /^calc_?ac(re)?$/i, /^cacres$/i, /acres_?gis/i, /deed_?ac(res?|re)/i, /^acres$/i, /acreage/i, /legal_?acres/i, /tax_?acres/i, /total_?acres/i, /poly_?acres/i, /map_?acres/i, /assessed_?ac$/i, /^total_?calc/i, /land_?area/i, /^pacrea$/i, /^calculated$/i, /gross.*acres/i),
     ownname: ownname ?? get(/ownership/i, /owner_?ship/i) ?? "N/A",
     ownname2: ownname2 ?? "",
     siteadd: siteadd ?? get(/mailing_?add/i),
-    mailadd: get(/mailaddr?1/i, /^addr1$/i, /curr_?addr1/i, /mailing/i, /mail_?add/i, /^address_?1$/i, /^address$/i, /taxpayer_?addr(ess)?_?1?/i, /^owadr1$/i, /^current_?ad$/i, /postal_?address/i, /owner_?addr(ess)?_?1?$/i, /acct_?addr$/i, /mailing_?add/i),
-    mcity: get(/mail.*city/i, /^mcity$/i, /curr_?city/i, /loccity/i, /^city$/i, /mailing_?city/i),
-    mstate: get(/mail.*state/i, /^mstate$/i, /curr_?state/i, /^state$/i, /mailing_?st/i, /mailing_?state/i),
-    mzip: get(/mail.*zip/i, /^mzip$/i, /curr_?zip/i, /zipnum/i, /^zip(code)?$/i, /mailing_?zip/i),
+    mailadd,
+    mcity,
+    mstate,
+    mzip,
     scity: get(/^scity$/i, /loccity/i, /^city$/i, /mailing_?city/i),
-    parval: get(/^parval$/i, /total_?value_?assd/i, /assessed_?value/i, /total_?value/i, /total_?prop_?value/i, /^totval$/i, /tot_?mark_?val/i, /market_?value/i, /appraised/i, /^totmkt$/i, /mkt_?total/i, /^tax_?value$/i, /^netval/i, /^par_?value$/i, /^adj_?value$/i, /^mkt_?value$/i, /total_?asses/i, /^assessed_?va?/i, /^cost_?tot/i, /^tot_?val/i, /^cur_?tot_?tot$/i, /m_value/i),
-    landval: get(/^landval$/i, /land_?val(ue)?/i, /tot_?land_?val/i, /l_value/i),
+    parval: get(/^parval$/i, /total_?value_?assd/i, /assessed_?value/i, /total_?value/i, /total_?prop_?value/i, /^totval$/i, /tot_?mark_?val/i, /market_?value/i, /appraised/i, /^totmkt$/i, /mkt_?total/i, /^mkt_?total$/i, /^tax_?value$/i, /^netval/i, /^par_?value$/i, /^adj_?value$/i, /^mkt_?value$/i, /total_?asses/i, /^assessed_?va?/i, /^cost_?tot/i, /^tot_?val/i, /^cur_?tot_?tot$/i, /m_value/i, /^apr_?tot_?val$/i, /^fair_?mkt_?val$/i, /^tot_?market_?appr$/i, /^tax_?mkt_?val$/i, /^cama_temp_tot_taxable_appr$/i),
+    landval: get(/^landval$/i, /land_?val(ue)?/i, /tot_?land_?val/i, /l_value/i, /^apr_?land_?val$/i, /^taxable_?land$/i),
     saledate: get(/^sale_?date$/i, /^saledate$/i, /deed_?date/i, /transfer_?date/i),
     reviseyear: get(/revis.*year/i, /^yearid$/i, /parcel_?year/i, /tax_?year/i, /^year_?$/i),
     sourceref: sourceref ?? "N/A",
     legdecfull: get(/legal_?desc/i, /^legdec/i, /prop_?desc/i, /^legaldesc$/i, /land_?use/i) ?? "County Parcel",
     structyear: get(/year_?built/i, /yearblt/i, /struct.*year/i, /yrbuilt/i),
     cntyname: get(/^cntyname$/i, /^county$/i, /county_?name/i),
+    zoning: get(/^zoning$/i, /^zone$/i, /^zoning_?district$/i, /^zoning_?code$/i, /^zoning_?class$/i, /^zone_?code$/i, /^zoning_?class_?code$/i),
   }
 }
 
@@ -1757,7 +1831,14 @@ export async function executeLandAnalysis(
   // Cache the RESOLVED district by parcel so re-running a search is instant.
   const zoningCacheKey = `gisfs:zoning:v2:${parcelId !== 'N/A' ? parcelId : `${countyName}:${lat.toFixed(5)}:${lng.toFixed(5)}`}`;
   const cachedZoning = readZoningCache(zoningCacheKey);
-  if (cachedZoning) {
+  const parcelZoning = String(info.zoning || '').trim();
+  if (parcelZoning && parcelZoning.toUpperCase() !== 'N/A') {
+    zoningCode = parcelZoning;
+    zoningDescription = `${countyName} County GIS parcel zoning district`;
+    zoningSource = 'county-gis';
+    zoningSourceUrl = undefined;
+    writeZoningCache(zoningCacheKey, { code: zoningCode, description: zoningDescription, source: zoningSource, sourceUrl: zoningSourceUrl });
+  } else if (cachedZoning) {
     zoningCode = cachedZoning.code;
     zoningDescription = cachedZoning.description;
     zoningSource = cachedZoning.source;
