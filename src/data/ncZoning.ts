@@ -192,6 +192,21 @@ Object.assign(
   ),
 );
 
+// Verified SC county zoning MapServers (override the state-fallback default so
+// the district overlays on the map + seeds the AI). Each endpoint was tested
+// live against a real parcel point via the ArcGIS identify op.
+const SC_ZONING_OVERRIDES: Record<string, CountyZoningConfig> = {
+  "greenville,_sc": {
+    county_id: "045", name: "Greenville, SC", lat: 34.8526, lng: -82.3940,
+    // Greenville County GIS base map — layer 41 is the county zoning district
+    // polygon (field ZONING, e.g. "MX-D", "R-1", "C-3"). Verified 2026.
+    zoning_mapserver_url: "https://www.gcgis.org/arcgis/rest/services/GCGIA/Greenville_Base/MapServer",
+    zoning_field_mapping: "ZONING", description_field: null, zoning_layers: "show:41",
+    use_state_fallback: F,
+  },
+};
+Object.assign(ncZoningRegistry.counties, SC_ZONING_OVERRIDES);
+
 /** Normalize a county display name to its registry key (e.g. "New Hanover" -> "new_hanover"). */
 export function normalizeCountyKey(name: string): string {
   return name.trim().toLowerCase().replace(/\s+/g, "_");
