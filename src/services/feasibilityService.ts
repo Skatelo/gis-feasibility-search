@@ -96,6 +96,33 @@ export const SC_PARCEL_FIELDS = "T_Map_Number,County,L_Value,M_Value,Ownership,M
 export async function ncAddressSuggestions(query: string, max = 5): Promise<string[]> {
   const q = query.trim();
   if (q.length < 3) return [];
+
+  // PRIMARY: Google geocoding covers BOTH North & South Carolina and returns the
+  // real state in each result — so SC addresses autocomplete and keep their ", SC"
+  // suffix instead of being force-labeled NC. Restricted to NC + SC only.
+  const key = getUserKeys().googleMaps;
+  if (key) {
+    try {
+      const url = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(q)}` +
+        `&components=country:US&key=${key}`;
+      const res = await fetchWithTimeout(url, 6000);
+      if (res.ok) {
+        const j = await res.json();
+        const out: string[] = [];
+        for (const r of (j.results || [])) {
+          const comps = r.address_components || [];
+          const st = comps.find((c: any) => c.types?.includes('administrative_area_level_1'));
+          const sc = String(st?.short_name || '').toUpperCase();
+          if (sc !== 'NC' && sc !== 'SC') continue; // Carolinas only
+          const a = String(r.formatted_address || '').replace(/,?\s*USA$/i, '').trim();
+          if (a && !out.includes(a)) out.push(a);
+        }
+        if (out.length) return out.slice(0, max);
+      }
+    } catch { /* fall through to the NC state geocoder */ }
+  }
+
+  // FALLBACK: NC statewide address locator (NC coverage only).
   try {
     const url = `${NC_GEOCODER}?SingleLine=${encodeURIComponent(q)}&maxLocations=${max}&outFields=&f=json`;
     const res = await fetchWithTimeout(url, 6000);
@@ -105,7 +132,7 @@ export async function ncAddressSuggestions(query: string, max = 5): Promise<stri
     for (const c of (j.candidates || [])) {
       let a = String(c.address || '').trim();
       if (!a) continue;
-      if (!/\bNC\b/i.test(a)) a += ', NC';
+      if (!/\b(NC|SC)\b/i.test(a)) a += ', NC';
       if (!out.includes(a)) out.push(a);
     }
     return out.slice(0, max);
@@ -1601,17 +1628,24 @@ export async function executeLandAnalysis(
 
   const info = normalizeCountyParcelAttrs(parcelFeature.properties || {});
 
-  // Self-correct the county from the ACTUAL parcel record (authoritative). The
-  // parcel point query is county-agnostic, so even if the county was mis-detected
-  // up front, the resolved parcel's own cntyname is the truth — use it for zoning,
-  // comps, tax rate, and display so a wrong county never propagates.
+  // Self-correct the county from the ACTUAL parcel record (authoritative), for
+  // BOTH states. The parcel point query is county-agnostic, so even if the county
+  // was mis-detected up front, the resolved parcel's own County field is the truth
+  // — use it for zoning, comps, tax rate, and display so a wrong county never
+  // propagates. SC parcels carry cntyname as "<County>, SC"; NC as a bare name.
   if (!isSimulated && info?.cntyname) {
-    const parcelCnty = String(info.cntyname).replace(/\s+County$/i, '').trim();
-    const corrected = NC_COUNTY_NAMES.find((n) => n.toLowerCase() === parcelCnty.toLowerCase());
-    if (corrected && corrected.toLowerCase() !== countyBaseName(countyName).toLowerCase()) {
-      const qualified = `${corrected}, NC`;
-      console.log(`County corrected "${countyName}" -> "${qualified}" from parcel cntyname.`);
-      countyName = qualified;
+    const rawCnty = String(info.cntyname).trim();
+    const isScParcel = /,\s*SC\s*$/i.test(rawCnty) || selectedState === 'SC';
+    const parcelCnty = rawCnty.replace(/,\s*(NC|SC)\s*$/i, '').replace(/\s+County$/i, '').trim();
+    const names = isScParcel ? SC_COUNTY_NAMES : NC_COUNTY_NAMES;
+    const corrected = names.find((n) => n.toLowerCase() === parcelCnty.toLowerCase());
+    if (corrected) {
+      const qualified = `${corrected}, ${isScParcel ? 'SC' : 'NC'}`;
+      const currentQualified = `${countyBaseName(countyName)}, ${countyState(countyName)}`;
+      if (qualified.toLowerCase() !== currentQualified.toLowerCase()) {
+        console.log(`County corrected "${countyName}" -> "${qualified}" from parcel County field.`);
+        countyName = qualified;
+      }
     }
   }
 
