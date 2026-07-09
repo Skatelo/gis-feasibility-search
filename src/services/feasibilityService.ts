@@ -88,6 +88,7 @@ const SC_STATEWIDE_PARCEL_LAYER = "https://smpesri.scdot.org/arcgis/rest/service
 // the response small so the (sometimes overloaded) statewide server is far less
 // likely to hit a gateway timeout. The State Plane query needs geometry only.
 const NC_PARCEL_FIELDS = "parno,siteadd,gisacres,ownname,ownname2,ownfrst,ownlast,mailadd,mcity,mstate,mzip,scity,parval,landval,saledate,reviseyear,sourceref,legdecfull,cntyname";
+export const SC_PARCEL_FIELDS = "T_Map_Number,County,L_Value,M_Value,Ownership,Mailing_Add,Mailing_City,Mailing_St,Mailing_Zip,Zoning,Land_Use,Acreage";
 
 /** Keyless address suggestions from the NC statewide geocoder — the always-
  *  available fallback for the search box when Google Places is unavailable,
@@ -424,6 +425,9 @@ const countyState = (countyName: string): SupportedState => {
   return 'NC';
 };
 
+const countyDisplayName = (countyName: string): string =>
+  `${countyBaseName(countyName)} County, ${countyState(countyName)}`;
+
 const countyParcelLayerKey = (countyName: string): string => normalizeCountyKey(countyBaseName(countyName));
 
 const countyParcelLayerFor = (countyName: string, state: SupportedState): string | undefined => {
@@ -541,6 +545,7 @@ function formatOwnerName(raw?: string): string {
   // business token or a co-owner name.
   name = name.replace(/[,\s]+ET\s?AL\.?\s*$/i, "").trim();
   if (!name) return "N/A";
+  if (/^(N\/?A|NONE|UNKNOWN|NOT AVAILABLE)$/i.test(name)) return "N/A";
 
   const isBusiness = /\b(LLC|L\.?L\.?C|INC|CORP|CO|COMPANY|TRUST|TRUSTEES?|LP|LLP|PARTNERS(HIP)?|HOLDINGS|PROPERTIES|INVESTMENTS?|VENTURES?|GROUP|REALTY|HOMES|BUILDERS|DEVELOPMENT|ASSOCIATION|ASSOC|HOA|CHURCH|CITY|TOWN|COUNTY|STATE|ESTATE|BANK)\b/i.test(name);
   if (isBusiness) return toTitleCase(name);
@@ -623,17 +628,13 @@ function ringCentroid(ring: number[][]): [number, number] | null {
  * labels on the satellite map. Returns GeoJSON: parcel outline polygons plus
  * one label point per parcel (owner, address, acres), or null on failure.
  */
-export async function fetchParcelsInBbox(west: number, south: number, east: number, north: number, countyName?: string): Promise<{ polygons: any; labels: any } | null> {
+export async function fetchParcelsInBbox(west: number, south: number, east: number, north: number, _countyName?: string): Promise<{ polygons: any; labels: any } | null> {
   try {
     const centerLat = (south + north) / 2;
     const centerLng = (west + east) / 2;
     const state = getStateFromCoords(centerLat, centerLng);
-    const normalizeLayerUrl = (url: string) => url.replace(/\/query$/i, '').replace(/\/+$/g, '');
-    const scCountyLayer = state === 'SC' && countyName ? countyParcelLayerFor(countyName, state) : undefined;
-    const scCountyLayerBase = scCountyLayer ? normalizeLayerUrl(scCountyLayer) : undefined;
-    const useLocalScParcelLayer = state === 'SC' && !!scCountyLayerBase && scCountyLayerBase !== normalizeLayerUrl(SC_STATEWIDE_PARCEL_LAYER);
-    const engineUrl = state === 'NC' ? NC_PARCEL_ENGINE : useLocalScParcelLayer ? `${scCountyLayerBase}/query` : `${SC_STATEWIDE_PARCEL_LAYER}/query`;
-    const outFields = state === 'NC' ? 'ownname,parno,siteadd,gisacres' : useLocalScParcelLayer ? '*' : 'Ownership,T_Map_Number,Mailing_Add,Acreage';
+    const engineUrl = state === 'NC' ? NC_PARCEL_ENGINE : `${SC_STATEWIDE_PARCEL_LAYER}/query`;
+    const outFields = state === 'NC' ? 'ownname,parno,siteadd,gisacres' : SC_PARCEL_FIELDS;
 
     const url = `${engineUrl}?geometry=${west},${south},${east},${north}` +
       `&geometryType=esriGeometryEnvelope&inSR=4326&spatialRel=esriSpatialRelIntersects` +
@@ -652,19 +653,10 @@ export async function fetchParcelsInBbox(west: number, south: number, east: numb
       let parno = '';
       let siteadd = '';
       let acresRaw: any;
-      if (useLocalScParcelLayer) {
-        const norm = normalizeCountyParcelAttrs(f.attributes || {});
-        const normOwner = String(norm.ownname || '').trim();
-        rawOwner = normOwner.toUpperCase() === 'N/A' ? '' : normOwner;
-        parno = String(norm.parno || '');
-        siteadd = String(norm.siteadd || norm.mailadd || '').trim();
-        acresRaw = norm.gisacres;
-      } else {
-        rawOwner = String((state === 'NC' ? f.attributes?.ownname : f.attributes?.Ownership) || '').trim();
-        parno = String((state === 'NC' ? f.attributes?.parno : f.attributes?.T_Map_Number) || '');
-        siteadd = String((state === 'NC' ? f.attributes?.siteadd : f.attributes?.Mailing_Add) || '').trim();
-        acresRaw = state === 'NC' ? f.attributes?.gisacres : f.attributes?.Acreage;
-      }
+      rawOwner = String((state === 'NC' ? f.attributes?.ownname : f.attributes?.Ownership) || '').trim();
+      parno = String((state === 'NC' ? f.attributes?.parno : f.attributes?.T_Map_Number) || '');
+      siteadd = String((state === 'NC' ? f.attributes?.siteadd : '') || '').trim();
+      acresRaw = state === 'NC' ? f.attributes?.gisacres : f.attributes?.Acreage;
       const owner = rawOwner ? formatOwnerName(rawOwner).toUpperCase() : '';
       polygons.push({ type: 'Feature', geometry: { type: 'Polygon', coordinates: rings }, properties: { parno, owner, siteadd } });
       if (!owner || owner === 'N/A') continue;
@@ -884,9 +876,59 @@ function ringAreaSqFt(rings?: number[][][]): number {
   return Math.abs(area) / 2;
 }
 
-/** Maps a county parcel record (varied field names) onto the statewide schema. */
-function normalizeCountyParcelAttrs(a: Record<string, any>): Record<string, any> {
+const SC_STATEWIDE_FIELD_NAMES = new Set([
+  "t_map_number", "county", "l_value", "m_value", "ownership", "mailing_add", "mailing_city", "mailing_st", "mailing_zip", "zoning", "land_use", "acreage",
+]);
+
+function normalizeScCountyDisplayName(value: any): string | undefined {
+  const raw = String(value ?? '').trim();
+  if (!raw) return undefined;
+  const canonical = SC_COUNTY_NAMES.find((name) => name.toLowerCase() === raw.toLowerCase());
+  return canonical ? `${canonical}, SC` : `${toTitleCase(raw)}, SC`;
+}
+
+function normalizeScStatewideParcelAttrs(a: Record<string, any>): Record<string, any> {
   const keys = Object.keys(a);
+  const getExact = (name: string): any => {
+    const k = keys.find((key) => key.toLowerCase() === name.toLowerCase());
+    const v = k != null ? a[k] : undefined;
+    return v != null && String(v).trim() !== "" && String(v).trim().toLowerCase() !== "null" ? v : undefined;
+  };
+  return {
+    parno: getExact("T_Map_Number") ?? "N/A",
+    gisacres: getExact("Acreage"),
+    ownname: getExact("Ownership") ?? "N/A",
+    ownname2: "",
+    // The statewide SC layer has mailing address fields, but no situs street.
+    // Keep situs empty so the searched/reverse-geocoded property address remains
+    // the property address and mailing data stays only in mailingAddress.
+    siteadd: undefined,
+    mailadd: getExact("Mailing_Add"),
+    mcity: getExact("Mailing_City"),
+    mstate: getExact("Mailing_St"),
+    mzip: getExact("Mailing_Zip"),
+    scity: undefined,
+    sstate: "SC",
+    parval: getExact("M_Value"),
+    landval: getExact("L_Value"),
+    saledate: undefined,
+    reviseyear: undefined,
+    sourceref: "N/A",
+    legdecfull: getExact("Land_Use") ?? "SC Parcel",
+    structyear: undefined,
+    cntyname: normalizeScCountyDisplayName(getExact("County")),
+    zoning: getExact("Zoning"),
+  };
+}
+
+/** Maps a county parcel record (varied field names) onto the statewide schema. */
+export function normalizeCountyParcelAttrs(a: Record<string, any>): Record<string, any> {
+  const keys = Object.keys(a);
+  const lowerKeySet = new Set(keys.map((k) => k.toLowerCase()));
+  if (["t_map_number", "ownership", "mailing_add"].every((k) => lowerKeySet.has(k)) ||
+      [...lowerKeySet].filter((k) => SC_STATEWIDE_FIELD_NAMES.has(k)).length >= 5) {
+    return normalizeScStatewideParcelAttrs(a);
+  }
   const hasValue = (v: any): boolean => v != null && String(v).trim() !== "" && String(v).trim().toLowerCase() !== "null";
   const get = (...res: RegExp[]): any => {
     for (const re of res) {
@@ -986,7 +1028,7 @@ function normalizeCountyParcelAttrs(a: Record<string, any>): Record<string, any>
     gisacres: get(/gis_?acres/i, /calc.*acre/i, /calculated_?acreage/i, /^calc_?ac(re)?$/i, /^cacres$/i, /acres_?gis/i, /deed_?ac(res?|re)/i, /^acres$/i, /acreage/i, /legal_?acres/i, /tax_?acres/i, /total_?acres/i, /poly_?acres/i, /map_?acres/i, /assessed_?ac$/i, /^total_?calc/i, /land_?area/i, /^pacrea$/i, /^calculated$/i, /gross.*acres/i),
     ownname: ownname ?? get(/ownership/i, /owner_?ship/i) ?? "N/A",
     ownname2: ownname2 ?? "",
-    siteadd: siteadd ?? get(/mailing_?add/i),
+    siteadd,
     mailadd,
     mcity,
     mstate,
@@ -1002,6 +1044,33 @@ function normalizeCountyParcelAttrs(a: Record<string, any>): Record<string, any>
     cntyname: get(/^cntyname$/i, /^county$/i, /county_?name/i),
     zoning: get(/^zoning$/i, /^zone$/i, /^zoning_?district$/i, /^zoning_?code$/i, /^zoning_?class$/i, /^zone_?code$/i, /^zoning_?class_?code$/i),
   }
+}
+
+async function queryScStatewideParcelAttributes(lng: number, lat: number, where: string): Promise<Record<string, any> | null> {
+  const endpoint = `${SC_STATEWIDE_PARCEL_LAYER}/query`;
+  const buildUrl = (geometry: string, geometryType: "esriGeometryPoint" | "esriGeometryEnvelope") =>
+    `${endpoint}?geometry=${geometry}` +
+    `&geometryType=${geometryType}&inSR=4326&spatialRel=esriSpatialRelIntersects` +
+    `&where=${encodeURIComponent(where)}` +
+    `&outFields=${encodeURIComponent(SC_PARCEL_FIELDS)}` +
+    `&returnGeometry=false&resultRecordCount=1&f=json`;
+
+  const urls = [
+    buildUrl(`${lng},${lat}`, "esriGeometryPoint"),
+    buildUrl(`${lng - 0.00015},${lat - 0.00015},${lng + 0.00015},${lat + 0.00015}`, "esriGeometryEnvelope"),
+  ];
+  for (const url of urls) {
+    try {
+      const res = await fetchWithRetry(url, 2, 10000);
+      if (!res.ok) continue;
+      const data = await res.json();
+      const attrs = data?.features?.[0]?.attributes;
+      if (attrs) return normalizeCountyParcelAttrs(attrs);
+    } catch {
+      // Try the buffered fallback or let the caller continue with local attrs.
+    }
+  }
+  return null;
 }
 
 /**
@@ -1073,6 +1142,7 @@ async function queryMecklenburgParcel(lng: number, lat: number) {
 function generateSimulatedParcel(lng: number, lat: number, addressString: string, countyName: string) {
   const charCodeSum = (addressString || "").split("").reduce((sum: number, char: string) => sum + char.charCodeAt(0), 0);
   const parcelId = String(10000000 + (charCodeSum % 89999999));
+  const state = countyState(countyName);
   
   const gisAcres = 0.25 + ((charCodeSum % 21) * 0.01);
   const grossSf = Math.round(gisAcres * 43560);
@@ -1105,22 +1175,19 @@ function generateSimulatedParcel(lng: number, lat: number, addressString: string
     [baseSPX - lotWidth / 2, baseSPY - lotDepth / 2]
   ]];
   
-  const assessedPropertyValue = 80000 + (charCodeSum % 120) * 1000;
-  const landValue = Math.round(assessedPropertyValue * 0.6);
-  
   const properties = {
     parno: parcelId,
-    ownname: "State Land Registry Fallback (NC GIS Offline)",
-    mailadd: addressString,
+    ownname: "N/A",
+    mailadd: "",
     mcity: countyName,
-    mstate: "NC",
-    mzip: "28202",
-    saledate: Date.now() - 5 * 365 * 24 * 60 * 60 * 1000,
-    parval: assessedPropertyValue,
-    landval: landValue,
+    mstate: state,
+    mzip: "",
+    saledate: undefined,
+    parval: 0,
+    landval: 0,
     reviseyear: "2025",
     siteadd: addressString,
-    legdecfull: `SIMULATED LOT #${parcelId} - NC ONE MAP OFFLINE FALLBACK`,
+    legdecfull: `SIMULATED LOT #${parcelId} - ${state} GIS OFFLINE FALLBACK`,
     gisacres: gisAcres.toString()
   };
   
@@ -1380,7 +1447,7 @@ export async function executeLandAnalysis(
     ? [config.parcelUrl, NC_PARCEL_ENGINE_MIRROR]
     : [SC_STATEWIDE_PARCEL_LAYER];
   const parcelWhere = config.extraWhere || '1=1';
-  const parcelOutFields = selectedState === 'NC' ? NC_PARCEL_FIELDS : '*';
+  const parcelOutFields = selectedState === 'NC' ? NC_PARCEL_FIELDS : SC_PARCEL_FIELDS;
   const measurementOutSr = selectedState === 'NC' ? '2264' : '2273';
 
   // 1) SC county parcel layer - preferred over the statewide SC layer when a
@@ -1390,6 +1457,16 @@ export async function executeLandAnalysis(
     try {
       const localRes = await queryCountyParcel(countyParcelLayer, lng, lat);
       if (localRes) {
+        const statewideAttrs = await queryScStatewideParcelAttributes(lng, lat, parcelWhere);
+        if (statewideAttrs) {
+          const localAttrs = localRes.wgs84Feature.properties || {};
+          localRes.wgs84Feature.properties = {
+            ...localAttrs,
+            ...statewideAttrs,
+            siteadd: localAttrs.siteadd || statewideAttrs.siteadd,
+            gisacres: localAttrs.gisacres || statewideAttrs.gisacres,
+          };
+        }
         parcelFeature = localRes.wgs84Feature;
         statePlaneFeature = localRes.statePlaneFeature;
         console.log(`${countyName} parcel resolved via county GIS server.`);
@@ -5645,7 +5722,7 @@ Rules: every "cost" is a whole-dollar USD number for THIS home/lot from cited CU
     const sqft = Math.round(Number(obj.plannedSqft) || plannedSqft) || plannedSqft;
 
     return {
-      locality: String(obj.locality || `${reportData.countyName} County, NC`).trim(),
+      locality: String(obj.locality || countyDisplayName(reportData.countyName)).trim(),
       plannedSqft: sqft,
       lineItems,
       hardCostTotal,
@@ -5731,7 +5808,7 @@ export async function fetchMaterialTakeoff(reportData: SiteFeasibilityData): Pro
   const zip = (String(reportData.inputAddress || "").match(/\b(\d{5})(?:-\d{4})?\b/) || [])[1] || "";
   const sqfts = (reportData.comps || []).map((c) => c.sqft).filter((n): n is number => !!n && n > 0).sort((a, b) => a - b);
   const plannedSqft = sqfts.length ? Math.round(sqfts[Math.floor(sqfts.length / 2)] / 50) * 50 : 1600;
-  const locality = zip ? `ZIP ${zip} (${reportData.countyName} County, NC)` : `${reportData.countyName} County, NC`;
+  const locality = zip ? `ZIP ${zip} (${countyDisplayName(reportData.countyName)})` : countyDisplayName(reportData.countyName);
 
   const priceLines = MATERIAL_RECIPE.map((r) => `- ${r.key}: ${r.priceDesc}`).join('\n');
   const keysJson = `{ ${MATERIAL_RECIPE.map((r) => `"${r.key}": 0`).join(', ')} }`;
@@ -6371,7 +6448,7 @@ STRICT PRICING RULES — REAL FIGURES ONLY:
     ].filter(Boolean)
   );
   return {
-    locality: zip ? `ZIP ${zip} · ${county} County, NC` : `${county} County, NC`,
+    locality: zip ? `ZIP ${zip} - ${countyDisplayName(`${county}, ${state}`)}` : countyDisplayName(`${county}, ${state}`),
     jurisdiction, incorporated,
     publicWater, publicSewer, lines, totalLow, totalHigh, permits, tapNote, summary,
     provider: o.provider ? String(o.provider).slice(0, 120) : undefined,
@@ -7056,13 +7133,15 @@ export async function chatFollowUp(
   if (!apiKey) throw new Error("Gemini API key is required. Please configure it in Account Settings.");
 
   const acres = reportData.gisAcres ? reportData.gisAcres.toFixed(2) : '?';
-  const system = `You are a sharp, concise land-development analyst answering FOLLOW-UP questions in a chat about ONE North Carolina parcel. The full AI feasibility report is already earlier in this conversation.
+  const parcelStateName = countyState(reportData.countyName) === 'SC' ? 'South Carolina' : 'North Carolina';
+  const parcelCountyLabel = countyDisplayName(reportData.countyName);
+  const system = `You are a sharp, concise land-development analyst answering FOLLOW-UP questions in a chat about ONE ${parcelStateName} parcel. The full AI feasibility report is already earlier in this conversation.
 RULES:
 - Answer the user's exact question DIRECTLY and BRIEFLY — a few sentences or a short bulleted list. Lead with the answer.
 - Use the report + the facts below; only use Google Search when the question needs CURRENT external facts (rates, prices, codes, market) you don't already have.
 - No preamble, no restating the question, no re-dumping the whole report. Plain markdown only — no code blocks; use × and ÷ for math, never the asterisk.
 - If the user attaches images or documents (site plans, surveys, photos, listings, PDFs), ANALYZE them directly and tie your findings to this parcel and its development.
-PARCEL: ${reportData.inputAddress} · ${reportData.countyName} County, NC · ${acres} acres · zoning ${reportData.zoningCode}${reportData.ownerName ? ` · owner ${reportData.ownerName}` : ''}.`;
+PARCEL: ${reportData.inputAddress} · ${parcelCountyLabel} · ${acres} acres · zoning ${reportData.zoningCode}${reportData.ownerName ? ` · owner ${reportData.ownerName}` : ''}.`;
 
   const contents = messages.map((m) => {
     const parts: any[] = [];

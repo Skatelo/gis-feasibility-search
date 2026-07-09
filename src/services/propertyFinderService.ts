@@ -13,7 +13,7 @@
 // (the same keys configured in Account Settings for the feasibility search).
 // ---------------------------------------------------------------------------
 
-import { getUserKeys, ncCountyConfig, fetchFemaFloodZone, fetchNwiWetlands, fetchSlope3DEP } from './feasibilityService';
+import { getUserKeys, ncCountyConfig, fetchFemaFloodZone, fetchNwiWetlands, fetchSlope3DEP, normalizeCountyParcelAttrs, SC_PARCEL_FIELDS } from './feasibilityService';
 import type { Slope3DEP } from './feasibilityService';
 import type { FloodZoneInfo, WetlandsInfo } from '../types/feasibility';
 import { idbGet, idbSet, idbDel } from './idb';
@@ -523,12 +523,13 @@ export function classifyOwner(name?: string): 'individual' | 'company' | 'estate
  * street, the owner lives there → never flagged absentee.
  */
 export function computeGisDistress(a: {
-  siteadd?: string; scity?: string; mailadd?: string; mcity?: string; mstate?: string; ownname?: string; saleEpoch?: number;
+  siteadd?: string; scity?: string; state?: string; mailadd?: string; mcity?: string; mstate?: string; ownname?: string; saleEpoch?: number;
 }): GisDistress {
   const ownerType = classifyOwner(a.ownname);
 
+  const situsState = String(a.state || 'NC').trim().toUpperCase();
   const mS = String(a.mstate || '').trim().toUpperCase();
-  const outOfState = !!mS && mS !== 'NC';
+  const outOfState = !!mS && !!situsState && mS !== situsState;
   const poBox = isPoBox(a.mailadd);
   // Situs street = portion before the first comma (siteadd may embed city/unit).
   const situsStreet = normStreet(String(a.siteadd || '').split(',')[0]);
@@ -852,6 +853,44 @@ function fetchTimeout(url: string, ms: number): Promise<Response> {
   return fetch(url, { signal: c.signal }).finally(() => clearTimeout(t));
 }
 
+const FINDER_NC_FIELDS = 'parno,cntyname,siteadd,scity,sstate,szip,mailadd,mcity,mstate,mzip,ownname,ownfrst,ownlast,gisacres,parval,landval,saledate';
+
+const isScCountyConfig = (county: string, cfg: { extraWhere: string }): boolean =>
+  /,\s*SC\s*$/i.test(county) || /\bCounty\s*=/.test(cfg.extraWhere);
+
+const countyBase = (county: string): string =>
+  String(county || '').split(',')[0].replace(/\s+County$/i, '').trim();
+
+const parcelQueryEndpoint = (url: string): string =>
+  /\/query$/i.test(url) ? url : `${url.replace(/\/+$/g, '')}/query`;
+
+const parcelOutFields = (state: 'NC' | 'SC'): string =>
+  state === 'SC' ? SC_PARCEL_FIELDS : FINDER_NC_FIELDS;
+
+const parcelConfigForState = (
+  state: 'NC' | 'SC',
+  fallback: { geocodeUrl: string; parcelUrl: string; extraWhere: string },
+): { geocodeUrl: string; parcelUrl: string; extraWhere: string } =>
+  state === 'SC'
+    ? (isScCountyConfig('York, SC', ncCountyConfig['York, SC']) ? ncCountyConfig['York, SC'] : fallback)
+    : (!isScCountyConfig('Gaston', ncCountyConfig.Gaston) ? ncCountyConfig.Gaston : fallback);
+
+const countyQueryLabel = (county: string, state: 'NC' | 'SC'): string =>
+  `${countyBase(county)} County, ${state}`;
+
+const stateHintFromAddress = (address: string, fallback: 'NC' | 'SC'): 'NC' | 'SC' => {
+  if (/\bSC\b|south\s+carolina/i.test(address)) return 'SC';
+  if (/\bNC\b|north\s+carolina/i.test(address)) return 'NC';
+  return fallback;
+};
+
+const formatPropertyAddress = (siteadd: string, scity: string, state: 'NC' | 'SC', county: string, parcelId: string): string =>
+  siteadd
+    ? `${siteadd}${scity ? `, ${scity}` : ''}, ${state}`
+    : `${countyQueryLabel(county, state)} parcel ${parcelId}`;
+
+const attrsOf = (f: any): Record<string, any> => normalizeCountyParcelAttrs(f?.attributes || f?.properties || {});
+
 /** Format a parcel's mailing address from NC GIS fields (street, city state, zip). */
 function composeMailing(a: any): string {
   return [
@@ -862,20 +901,33 @@ function composeMailing(a: any): string {
 }
 
 const NC_PARCEL_POINT = 'https://services.gis.nc.gov/secure/rest/services/NC1Map_Parcels/MapServer/1/query';
+const SC_PARCEL_POINT = 'https://smpesri.scdot.org/arcgis/rest/services/GISMapping/SC_Parcels/MapServer/0/query';
 
-/** Owner of record + mailing address of the parcel at a point (NC GIS). Used for
+/** Owner of record + mailing address of the parcel at a point (NC/SC GIS). Used for
  *  the manual single-address land path; discovery already carries this. */
 async function fetchParcelOwnerAtPoint(lat: number, lng: number): Promise<{ ownerName?: string; mailingAddress?: string }> {
-  try {
-    const url = `${NC_PARCEL_POINT}?geometry=${lng},${lat}&geometryType=esriGeometryPoint&inSR=4326&spatialRel=esriSpatialRelIntersects` +
-      `&outFields=${encodeURIComponent('ownname,mailadd,mcity,mstate,mzip')}&returnGeometry=false&resultRecordCount=1&f=json`;
-    const res = await fetchTimeout(url, 10000);
-    if (!res.ok) return {};
-    const d = await res.json();
-    const a = d?.features?.[0]?.attributes;
-    if (!a) return {};
-    return { ownerName: String(a.ownname ?? '').trim() || undefined, mailingAddress: composeMailing(a) || undefined };
-  } catch { return {}; }
+  const attempts = [
+    {
+      url: `${NC_PARCEL_POINT}?geometry=${lng},${lat}&geometryType=esriGeometryPoint&inSR=4326&spatialRel=esriSpatialRelIntersects` +
+        `&outFields=${encodeURIComponent('ownname,mailadd,mcity,mstate,mzip')}&returnGeometry=false&resultRecordCount=1&f=json`,
+    },
+    {
+      url: `${SC_PARCEL_POINT}?geometry=${lng},${lat}&geometryType=esriGeometryPoint&inSR=4326&spatialRel=esriSpatialRelIntersects` +
+        `&where=1%3D1&outFields=${encodeURIComponent(SC_PARCEL_FIELDS)}&returnGeometry=false&resultRecordCount=1&f=json`,
+    },
+  ];
+  for (const attempt of attempts) {
+    try {
+      const res = await fetchTimeout(attempt.url, 10000);
+      if (!res.ok) continue;
+      const d = await res.json();
+      const raw = d?.features?.[0]?.attributes;
+      if (!raw) continue;
+      const a = normalizeCountyParcelAttrs(raw);
+      return { ownerName: String(a.ownname ?? '').trim() || undefined, mailingAddress: composeMailing(a) || undefined };
+    } catch { /* try next source */ }
+  }
+  return {};
 }
 
 /** Representative point (bounding-box center) of a GeoJSON parcel geometry. */
@@ -929,9 +981,10 @@ export async function discoverCandidates(
   if (!keys.googleMaps) throw new Error('Google Maps API key required (set it in Account Settings).');
   const cfg = ncCountyConfig[county];
   if (!cfg) throw new Error(`Unsupported county: ${county}`);
+  const state: 'NC' | 'SC' = isScCountyConfig(county, cfg) ? 'SC' : 'NC';
 
   onProgress?.('Locating scan area…');
-  const areaQuery = city ? `${city}, NC` : zip ? `${zip}, NC` : `${county} County, NC`;
+  const areaQuery = city ? `${city}, ${state}` : zip ? `${zip}, ${state}` : countyQueryLabel(county, state);
   const center = await geocodeAddress(areaQuery, keys.googleMaps);
   if (!center) throw new Error(`Could not locate "${areaQuery}".`);
 
@@ -956,10 +1009,10 @@ export async function discoverCandidates(
   // simplified (maxAllowableOffset ≈ 30m) so we only carry a coarse outline for
   // the centroid — that keeps payloads small enough to page deeply uncapped.
   const baseUrl =
-    `${cfg.parcelUrl}?where=${encodeURIComponent(cfg.extraWhere)}` +
+    `${parcelQueryEndpoint(cfg.parcelUrl)}?where=${encodeURIComponent(cfg.extraWhere)}` +
     `&geometry=${xmin},${ymin},${xmax},${ymax}&geometryType=esriGeometryEnvelope&inSR=4326` +
     `&spatialRel=esriSpatialRelIntersects` +
-    `&outFields=${encodeURIComponent('parno,siteadd,scity,sstate,szip,mailadd,mcity,mstate,mzip,ownname,ownfrst,ownlast,gisacres,parval,landval,saledate')}` +
+    `&outFields=${encodeURIComponent(parcelOutFields(state))}` +
     `&returnGeometry=true&maxAllowableOffset=0.0003&outSR=4326&f=geojson`;
   const PAGE = 2000;
   const MAX_PAGES = 30; // up to 60k parcels — effectively uncapped for any realistic scan
@@ -975,16 +1028,16 @@ export async function discoverCandidates(
       if (data?.error) throw new Error(data.error?.message || 'GIS query error');
       fs = Array.isArray(data?.features) ? data.features : [];
     } catch (e: any) {
-      if (page === 0) throw new Error(`NC OneMap parcel query failed (${e?.message || 'timeout'}). Try a smaller radius.`);
+      if (page === 0) throw new Error(`${state} parcel query failed (${e?.message || 'timeout'}). Try a smaller radius.`);
       break; // a partial pool is fine
     }
     if (!fs.length) break;
     // Guard against servers that ignore resultOffset (would re-send the first page).
-    const firstParno = String(fs[0]?.properties?.parno ?? '');
+    const firstParno = String(attrsOf(fs[0]).parno ?? '');
     if (page > 0 && firstParno && firstParno === prevFirstParno) break;
     prevFirstParno = firstParno;
     features.push(...fs);
-    onProgress?.(`Querying NC OneMap parcels… (${features.length})`);
+    onProgress?.(`Querying ${state} parcels... (${features.length})`);
     if (fs.length < PAGE) break; // last page
   }
 
@@ -995,7 +1048,7 @@ export async function discoverCandidates(
   const seenStreets = new Set<string>(); // collapses condo/townhome units at one address (house mode)
   const candidates: Candidate[] = [];
   for (const f of features) {
-    const p = f?.properties || {};
+    const p = attrsOf(f);
     const parcelId = String(p.parno ?? '').trim();
     if (!parcelId || seen.has(parcelId)) continue;
     const center2 = geomCenter(f.geometry);
@@ -1037,7 +1090,7 @@ export async function discoverCandidates(
     seen.add(parcelId);
     const cand: Candidate = {
       parcelId,
-      address: siteadd ? `${siteadd}${scity ? `, ${scity}` : ''}, NC` : `${scity || county} County parcel ${parcelId}`,
+      address: formatPropertyAddress(siteadd, scity, state, county, parcelId),
       addressFromSitus: !!siteadd,
       scity, lat: center2.lat, lng: center2.lng,
       acres: Number.isFinite(acres) ? acres : 0,
@@ -1055,7 +1108,7 @@ export async function discoverCandidates(
     // NC GIS appends the jurisdiction type ("GASTONIA CITY"); strip it for a clean
     // mailing city + better skip-trace matching.
     cand.propCity = (scity || '').replace(/\s+(CITY|TOWN|TOWNSHIP|TWP|VILLAGE)$/i, '').trim() || undefined;
-    cand.propState = String(p.sstate ?? '').trim() || 'NC';
+    cand.propState = String(p.sstate ?? '').trim() || state;
     cand.propZip = String(p.szip ?? '').trim() || undefined;
     cand.mailStreet = String(p.mailadd ?? '').trim() || undefined;
     cand.mailCity = String(p.mcity ?? '').trim() || undefined;
@@ -1064,7 +1117,7 @@ export async function discoverCandidates(
     if (mode === 'house') {
       // GIS distress / motivated-seller targeting from assessor + ownership data.
       const gd = computeGisDistress({
-        siteadd, scity, mailadd: String(p.mailadd ?? ''), mcity: String(p.mcity ?? ''), mstate: String(p.mstate ?? ''),
+        siteadd, scity, state, mailadd: String(p.mailadd ?? ''), mcity: String(p.mcity ?? ''), mstate: String(p.mstate ?? ''),
         ownname: String(p.ownname ?? ''), saleEpoch: cand.saleEpoch,
       });
       cand.absenteeOwner = gd.absenteeOwner;
@@ -1277,7 +1330,7 @@ function aggregateParcel(
   dealPt?: { lat: number; lng: number },
 ): void {
   const owner = String(a.ownname ?? '').trim();
-  if (!owner) return;
+  if (!owner || /^(N\/?A|NONE|UNKNOWN|NOT AVAILABLE)$/i.test(owner)) return;
   const ownerType = classifyOwner(owner);
   if (ownerType === 'public') return; // governments aren't buyers
   const mailadd = String(a.mailadd ?? '').trim();
@@ -1287,11 +1340,12 @@ function aggregateParcel(
   let g = groups.get(key);
   if (!g) {
     const mstate = String(a.mstate ?? '').trim().toUpperCase();
+    const parcelState = String(a.sstate || (String(cnty || '').match(/,\s*(NC|SC)\s*$/i)?.[1]) || 'NC').trim().toUpperCase();
     g = {
       ownerName: owner, mailadd, mcity: String(a.mcity ?? '').trim(), mstate,
       mzip: String(a.mzip ?? '').trim(),
       ownerType: ownerType === 'estate' ? 'estate' : ownerType, // never 'public' here
-      outOfState: !!mstate && mstate !== 'NC',
+      outOfState: !!mstate && !!parcelState && mstate !== parcelState,
       count: 0, houseCount: 0, landCount: 0, totalAssessed: 0, assessedCount: 0, examples: [],
       counties: new Set(),
     };
@@ -1384,6 +1438,9 @@ export async function buildBuyerList(
   if (!keys.googleMaps) throw new Error('Google Maps API key required (set it in Account Settings).');
   const cfg = ncCountyConfig[county];
   if (!cfg) throw new Error(`Unsupported county: ${county}`);
+  const selectedState: 'NC' | 'SC' = isScCountyConfig(county, cfg) ? 'SC' : 'NC';
+  let queryState: 'NC' | 'SC' = selectedState;
+  let queryCfg = cfg;
 
   // With a deal address, center the search on it (so the buyers are in its area)
   // and search spatially across county lines. Otherwise center on the city/ZIP/
@@ -1396,9 +1453,11 @@ export async function buildBuyerList(
     if (!d) throw new Error(`Could not locate the deal address "${dealAddress.trim()}".`);
     deal = d;
     center = { lat: d.lat, lng: d.lng };
+    queryState = stateHintFromAddress(dealAddress.trim(), selectedState);
+    queryCfg = parcelConfigForState(queryState, cfg);
   } else {
     onProgress?.('Locating area…');
-    const areaQuery = city ? `${city}, NC` : zip ? `${zip}, NC` : `${county} County, NC`;
+    const areaQuery = city ? `${city}, ${selectedState}` : zip ? `${zip}, ${selectedState}` : countyQueryLabel(county, selectedState);
     const c = await geocodeAddress(areaQuery, keys.googleMaps);
     if (!c) throw new Error(`Could not locate "${areaQuery}".`);
     center = c;
@@ -1411,14 +1470,14 @@ export async function buildBuyerList(
   // No deal → no geometry (tiny rows, page deeply across a county). With a deal we
   // request simplified geometry (geojson) so we can measure each owner's nearest
   // holding to the deal. `where=1=1` for deal mode keeps it spatial/cross-county.
-  const where = deal ? '1=1' : cfg.extraWhere;
+  const where = deal ? '1=1' : queryCfg.extraWhere;
   const geomParams = deal
     ? '&returnGeometry=true&maxAllowableOffset=0.0003&outSR=4326&f=geojson'
     : '&returnGeometry=false&f=json';
   const baseUrl =
-    `${cfg.parcelUrl}?where=${encodeURIComponent(where)}` +
+    `${parcelQueryEndpoint(queryCfg.parcelUrl)}?where=${encodeURIComponent(where)}` +
     `&geometry=${env}&geometryType=esriGeometryEnvelope&inSR=4326&spatialRel=esriSpatialRelIntersects` +
-    `&outFields=${encodeURIComponent('parno,cntyname,siteadd,scity,ownname,mailadd,mcity,mstate,mzip,parval,landval,saledate')}` +
+    `&outFields=${encodeURIComponent(parcelOutFields(queryState))}` +
     geomParams;
   const PAGE = 2000;
   const MAX_PAGES = 100; // up to 200k parcels — county-scale (rows are tiny w/o geometry)
@@ -1438,12 +1497,10 @@ export async function buildBuyerList(
       if (data?.error) throw new Error(data.error?.message || 'GIS query error');
       rows = Array.isArray(data?.features) ? data.features : [];
     } catch (e: any) {
-      if (page === 0) throw new Error(`NC OneMap parcel query failed (${e?.message || 'timeout'}). Try a smaller radius.`);
+      if (page === 0) throw new Error(`${queryState} parcel query failed (${e?.message || 'timeout'}). Try a smaller radius.`);
       break;
     }
     if (!rows.length) break;
-    // f=json rows carry `.attributes`; f=geojson rows carry `.properties` + `.geometry`.
-    const attrsOf = (f: any) => f.attributes || f.properties || {};
     const firstParno = String(attrsOf(rows[0]).parno ?? '');
     if (page > 0 && firstParno && firstParno === prevFirstParno) break; // offset ignored
     prevFirstParno = firstParno;
@@ -1500,9 +1557,10 @@ export async function buildBuyerDatabase(
     if (shouldStop?.()) break;
     const cfg = ncCountyConfig[county];
     if (!cfg) continue;
+    const state: 'NC' | 'SC' = isScCountyConfig(county, cfg) ? 'SC' : 'NC';
     const baseUrl =
-      `${cfg.parcelUrl}?where=${encodeURIComponent(`cntyname = '${county}'`)}` +
-      `&outFields=${encodeURIComponent('parno,cntyname,siteadd,scity,ownname,mailadd,mcity,mstate,mzip,parval,landval,saledate')}` +
+      `${parcelQueryEndpoint(cfg.parcelUrl)}?where=${encodeURIComponent(cfg.extraWhere)}` +
+      `&outFields=${encodeURIComponent(parcelOutFields(state))}` +
       `&returnGeometry=false&f=json`;
     let prevFirstParno: string | undefined;
     let countyScanned = 0;
@@ -1517,15 +1575,15 @@ export async function buildBuyerDatabase(
         if (data?.error) throw new Error(data.error?.message || 'GIS query error');
         rows = Array.isArray(data?.features) ? data.features : [];
       } catch (e: any) {
-        if (page === 0) throw new Error(`${county}: NC OneMap query failed (${e?.message || 'timeout'}).`);
+        if (page === 0) throw new Error(`${county}: ${state} parcel query failed (${e?.message || 'timeout'}).`);
         break; // partial county is fine
       }
       if (!rows.length) break;
-      const firstParno = String(rows[0]?.attributes?.parno ?? '');
+      const firstParno = String(attrsOf(rows[0]).parno ?? '');
       if (page > 0 && firstParno && firstParno === prevFirstParno) break;
       prevFirstParno = firstParno;
       for (const f of rows) {
-        const a = f.attributes || {};
+        const a = attrsOf(f);
         aggregateParcel(groups, a, String(a.cntyname ?? county).trim() || county, undefined, undefined);
       }
       countyScanned += rows.length;
@@ -1603,10 +1661,11 @@ export function buyerLookupAddress(b: BuyerRecord): string | null {
   const street = (b.mostRecentProperty || '').trim();
   if (!street || !/^[1-9]/.test(street)) return null; // need a real house number
   const city = (b.mostRecentPropertyCity || b.mailCity || '').trim();
-  return `${street}${city ? `, ${city}` : ''}, NC`;
+  const state = b.counties.some((c) => /,\s*SC\s*$/i.test(c)) ? 'SC' : 'NC';
+  return `${street}${city ? `, ${city}` : ''}, ${state}`;
 }
 
-/** Geocode an address AND extract its NC county (for matching against the database). */
+/** Geocode an address AND extract its NC/SC county (for matching against the database). */
 export async function geocodeDealCounty(
   address: string,
   apiKey: string,
@@ -1620,8 +1679,10 @@ export async function geocodeDealCounty(
   const loc = r.geometry?.location;
   if (!loc) return null;
   const comp = (r.address_components || []).find((c: any) => c.types?.includes('administrative_area_level_2'));
+  const stateComp = (r.address_components || []).find((c: any) => c.types?.includes('administrative_area_level_1'));
+  const state = String(stateComp?.short_name || '').toUpperCase();
   const county = comp?.long_name ? String(comp.long_name).replace(/\s+County$/i, '').trim() : undefined;
-  return { lat: loc.lat, lng: loc.lng, county };
+  return { lat: loc.lat, lng: loc.lng, county: county && (state === 'NC' || state === 'SC') ? `${county}, ${state}` : county };
 }
 
 // ---------------------------------------------------------------------------
@@ -1636,6 +1697,20 @@ export interface SavedBuyerDatabase {
 }
 
 const BUYER_DB_KEY = 'buyerDatabase:v1';
+
+function countyParts(value?: string): { name: string; state?: string } {
+  const raw = String(value || '').trim();
+  const state = raw.match(/,\s*(NC|SC)\s*$/i)?.[1]?.toUpperCase();
+  const name = raw.replace(/,\s*(NC|SC)\s*$/i, '').replace(/\s+County$/i, '').trim().toLowerCase();
+  return { name, state };
+}
+
+export function buyerCountyMatches(buyerCounty: string, targetCounty: string | undefined): boolean {
+  if (!targetCounty) return true;
+  const a = countyParts(buyerCounty);
+  const b = countyParts(targetCounty);
+  return !!a.name && a.name === b.name && (!a.state || !b.state || a.state === b.state);
+}
 
 export async function saveBuyerDatabase(db: SavedBuyerDatabase): Promise<void> {
   await idbSet(BUYER_DB_KEY, db);
@@ -1657,10 +1732,9 @@ export function matchBuyersToDeal(
   county: string | undefined,
   dealType: 'house' | 'land' | 'any',
 ): BuyerRecord[] {
-  const cty = (county || '').toLowerCase();
   return db.buyers
     .filter((b) => {
-      const inCounty = !cty || b.counties.some((c) => c.toLowerCase() === cty);
+      const inCounty = !county || b.counties.some((c) => buyerCountyMatches(c, county));
       const typeOk = dealType === 'any' || (dealType === 'land' ? b.landCount > 0 : b.houseCount > 0);
       return inCounty && typeOk;
     })
