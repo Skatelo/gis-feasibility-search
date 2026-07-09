@@ -6,6 +6,7 @@ import {
 import {
   analyzeProperty, analyzeCandidate, discoverCandidates, buildBuyerList, buildBuyerDatabase,
   rentCastLastSale, buyerLookupAddress, geocodeDealCounty, matchBuyersToDeal,
+  buyerCountyMatches,
   saveBuyerDatabase, loadBuyerDatabase, clearBuyerDatabase,
   resultsToCsv, resultsToOwnerCsv, buyersToCsv, resultsToPrintableHtml, downloadFile, ncCountyNames, splitOwnerName,
 } from '../services/propertyFinderService';
@@ -26,6 +27,8 @@ type UiMode = SearchMode | 'buyers';
 
 // Charlotte-metro + western Piedmont counties for the multi-county buyer database.
 const METRO_COUNTIES = ['Gaston', 'Mecklenburg', 'Cabarrus', 'Union', 'Lincoln', 'Iredell', 'Catawba', 'Cleveland', 'Rowan', 'Stanly'];
+const SC_DATABASE_COUNTIES = ncCountyNames.filter((c) => /,\s*SC$/i.test(c));
+const DATABASE_COUNTIES = [...METRO_COUNTIES, ...SC_DATABASE_COUNTIES];
 const BIG_COUNTIES = new Set(['Mecklenburg', 'Wake', 'Guilford', 'Forsyth']); // large → slower scan
 
 const MODES: { id: UiMode; label: string; icon: typeof Home; blurb: string }[] = [
@@ -43,8 +46,17 @@ function scoreColor(score: number): string {
 const fmtMoney = (n?: number) => (n && n > 0 ? `$${Math.round(n).toLocaleString()}` : '—');
 const fmtAcres = (n?: number) => (n && n > 0 ? `${n.toFixed(2)} ac` : '—');
 
+const formatCountyLabel = (c?: string) => {
+  const raw = String(c || '').trim();
+  if (!raw) return '';
+  const state = raw.match(/,\s*(NC|SC)\s*$/i)?.[1]?.toUpperCase();
+  const base = raw.replace(/,\s*(NC|SC)\s*$/i, '').replace(/\s+County$/i, '').trim();
+  return `${base} County${state ? `, ${state}` : ''}`;
+};
+
 function ScoreRing({ score }: { score: number }) {
   const color = scoreColor(score);
+
   return (
     <div className="finder-score-ring" style={{ background: `conic-gradient(${color} ${score * 3.6}deg, var(--bg-card-border) 0deg)` }}>
       <div className="finder-score-inner"><span style={{ color }}>{score}</span></div>
@@ -99,9 +111,9 @@ function ResultCard({ r }: { r: PropertyResult }) {
           </div>
         )}
 
-        {/* Owner of record + mailing address (NC GIS / county tax records) */}
+        {/* Owner of record + mailing address (county GIS / tax records) */}
         {r.parcel?.ownerName && (
-          <div className="finder-owner" title="Owner of record (NC GIS / county tax records)"><User size={12} /> {r.parcel.ownerName}</div>
+          <div className="finder-owner" title="Owner of record (county GIS / tax records)"><User size={12} /> {r.parcel.ownerName}</div>
         )}
         {r.parcel?.mailingAddress && (
           <div className="finder-owner finder-owner-mail" title="Owner mailing address — where the county sends tax bills"><Mail size={12} /> {r.parcel.mailingAddress}</div>
@@ -585,7 +597,7 @@ export function DistressedFinder() {
   // PDF via the browser's print engine (hidden iframe) — no PDF library needed.
   const exportPdf = () => {
     if (!visibleResults.length) return;
-    const areaLabel = `${county} County${cityZip.trim() ? ` · ${cityZip.trim()}` : ''}, NC`;
+    const areaLabel = `${formatCountyLabel(county)}${cityZip.trim() ? ` - ${cityZip.trim()}` : ''}`;
     const html = resultsToPrintableHtml(visibleResults, mode === 'land' ? 'land' : 'house', areaLabel);
     const iframe = document.createElement('iframe');
     Object.assign(iframe.style, { position: 'fixed', right: '0', bottom: '0', width: '0', height: '0', border: '0' });
@@ -606,7 +618,7 @@ export function DistressedFinder() {
       (b) =>
         (buyerFilter === 'all' || (buyerFilter === 'house' ? b.houseCount > 0 : b.landCount > 0)) &&
         (buyerClass === 'all' || b.investorClass === buyerClass) &&
-        (!matchCty || b.counties.some((c) => c.toLowerCase() === matchCty)),
+        (!matchCty || b.counties.some((c) => buyerCountyMatches(c, dealMatch?.county))),
     );
     const sorted = [...list];
     if (buyerSort === 'recent') {
@@ -697,7 +709,7 @@ export function DistressedFinder() {
             <div className="finder-field finder-field-wide">
               <label>Counties to scan <span>(merges the same owner across counties; large counties take a few minutes)</span></label>
               <div className="finder-county-chips">
-                {METRO_COUNTIES.map((c) => (
+                {DATABASE_COUNTIES.map((c) => (
                   <button key={c} type="button" className={dbCounties.includes(c) ? 'active' : ''} onClick={() => toggleDbCounty(c)}>
                     {dbCounties.includes(c) ? <Check size={12} /> : null} {c}{BIG_COUNTIES.has(c) ? ' ·lg' : ''}
                   </button>
@@ -965,7 +977,7 @@ export function DistressedFinder() {
           {dealMatch && (
             <div className="finder-match-banner">
               <Target size={15} />
-              <span>Most likely buyers for <strong>{dealMatch.label}</strong>{dealMatch.county ? <> — active in <strong>{dealMatch.county} County</strong></> : ' — county undetermined, showing all'}. Use the House/Land filter to match what you're selling.</span>
+              <span>Most likely buyers for <strong>{dealMatch.label}</strong>{dealMatch.county ? <> - active in <strong>{formatCountyLabel(dealMatch.county)}</strong></> : ' - county undetermined, showing all'}. Use the House/Land filter to match what you're selling.</span>
             </div>
           )}
           <div className="finder-results-head">
