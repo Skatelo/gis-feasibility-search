@@ -495,31 +495,81 @@ function toTitleCase(str: string): string {
  * (suffixes like Jr/Sr/III stay after the last name). Business names
  * (LLC, INC, TRUST, etc.) are left as-is. Returns a title-cased string.
  */
-function formatOwnerName(raw?: string): string {
-  if (!raw || !String(raw).trim()) return "N/A";
-  let name = String(raw).trim().replace(/\s+/g, " ");
-  const isBusiness = /\b(LLC|L\.?L\.?C|INC|CORP|CO|COMPANY|TRUST|TRUSTEES?|LP|LLP|PARTNERS(HIP)?|HOLDINGS|PROPERTIES|INVESTMENTS?|VENTURES?|GROUP|REALTY|HOMES|BUILDERS|DEVELOPMENT|ASSOCIATION|ASSOC|HOA|CHURCH|CITY|TOWN|COUNTY|STATE|ESTATE|BANK|ET\s?AL)\b/i.test(name);
-  if (!isBusiness) {
-    if (name.includes(",")) {
-      // "LAST, FIRST MIDDLE" → "First Middle Last"
-      const idx = name.indexOf(",");
-      const last = name.slice(0, idx).trim();
-      const rest = name.slice(idx + 1).trim().replace(/,/g, " ").replace(/\s+/g, " ");
-      if (last && rest) name = `${rest} ${last}`;
-    } else {
-      // "LAST FIRST MIDDLE [SUFFIX]" → "First Middle Last [Suffix]"
-      const parts = name.split(" ");
-      if (parts.length >= 2 && parts.length <= 4) {
-        const suffixes: string[] = [];
-        while (parts.length > 2 && /^(JR|SR|II|III|IV|V)\.?$/i.test(parts[parts.length - 1])) {
-          suffixes.unshift(parts.pop() as string);
-        }
-        const last = parts.shift() as string;
-        name = [...parts, last, ...suffixes].join(" ");
+/** Reorder ONE person's stored name to "First Middle Last [Suffix]" and title-case
+ *  it. Handles both "LAST, FIRST MIDDLE" (comma) and "LAST FIRST MIDDLE [SUFFIX]"
+ *  (surname-first, no comma) storage. Business detection is handled by the caller. */
+function formatSingleOwnerName(name: string): string {
+  name = name.trim().replace(/\s+/g, " ");
+  if (!name) return "";
+  if (name.includes(",")) {
+    // "LAST, FIRST MIDDLE" → "First Middle Last"
+    const idx = name.indexOf(",");
+    const last = name.slice(0, idx).trim();
+    const rest = name.slice(idx + 1).trim().replace(/,/g, " ").replace(/\s+/g, " ");
+    if (last && rest) name = `${rest} ${last}`;
+  } else {
+    // "LAST FIRST MIDDLE [SUFFIX]" → "First Middle Last [Suffix]"
+    const parts = name.split(" ");
+    if (parts.length >= 2 && parts.length <= 4) {
+      const suffixes: string[] = [];
+      while (parts.length > 2 && /^(JR|SR|II|III|IV|V)\.?$/i.test(parts[parts.length - 1])) {
+        suffixes.unshift(parts.pop() as string);
       }
+      const last = parts.shift() as string;
+      name = [...parts, last, ...suffixes].join(" ");
     }
   }
   return toTitleCase(name);
+}
+
+function formatOwnerName(raw?: string): string {
+  if (!raw || !String(raw).trim()) return "N/A";
+  let name = String(raw).trim().replace(/\s+/g, " ");
+  // Strip a trailing "ET AL" / "ETAL" ("and others") so it isn't mistaken for a
+  // business token or a co-owner name.
+  name = name.replace(/[,\s]+ET\s?AL\.?\s*$/i, "").trim();
+  if (!name) return "N/A";
+
+  const isBusiness = /\b(LLC|L\.?L\.?C|INC|CORP|CO|COMPANY|TRUST|TRUSTEES?|LP|LLP|PARTNERS(HIP)?|HOLDINGS|PROPERTIES|INVESTMENTS?|VENTURES?|GROUP|REALTY|HOMES|BUILDERS|DEVELOPMENT|ASSOCIATION|ASSOC|HOA|CHURCH|CITY|TOWN|COUNTY|STATE|ESTATE|BANK)\b/i.test(name);
+  if (isBusiness) return toTitleCase(name);
+
+  // Joint owners: "&", "/", or "AND" separates co-owners. Format each side; when a
+  // co-owner has no surname of their own — e.g. "SMITH JOHN A & MARY B", where
+  // "MARY B" is only a given name (+ middle initial) — borrow the first owner's
+  // surname so it reads "Mary B Smith" instead of just "B Mary".
+  const parts = name.split(/\s*(?:&|\/|\bAND\b)\s*/i).map((p) => p.trim()).filter(Boolean);
+  if (parts.length >= 2) {
+    const first = parts[0];
+    const firstHasComma = first.includes(",");
+    const firstSurname = (firstHasComma ? first.slice(0, first.indexOf(",")) : first.split(" ")[0]).trim();
+    const formatted = [formatSingleOwnerName(first)];
+    for (let i = 1; i < parts.length; i++) {
+      let co = parts[i];
+      const coTokens = co.split(" ").filter(Boolean);
+      const lacksSurname = !co.includes(",") &&
+        (coTokens.length === 1 || (coTokens.length === 2 && /^[A-Z]\.?$/i.test(coTokens[1])));
+      if (lacksSurname && firstSurname) {
+        // Re-attach the first owner's surname in the same storage form so the
+        // single-name formatter reorders it correctly.
+        co = firstHasComma ? `${firstSurname}, ${co}` : `${firstSurname} ${co}`;
+      }
+      formatted.push(formatSingleOwnerName(co));
+    }
+    return formatted.join(" & ");
+  }
+
+  return formatSingleOwnerName(name);
+}
+
+/** True when a parcel owner is a roadway / DOT right-of-way rather than a private
+ *  lot — e.g. "SCDOT", "NCDOT", "DEPT OF TRANSPORTATION", "HIGHWAY", "ROAD R/W",
+ *  "RIGHT OF WAY". A point query near a property edge can intersect the adjacent
+ *  road segment, so these are skipped in favor of the actual lot parcel. */
+function isRoadwayOwner(owner?: string): boolean {
+  if (!owner) return false;
+  const s = String(owner).toUpperCase().replace(/\./g, "");
+  return /\b(NCDOT|SCDOT|DEPT? OF TRANS(PORTATION)?|DEPARTMENT OF TRANSPORTATION|STATE HIGHWAY|HIGHWAYS?|RIGHT[\s-]?OF[\s-]?WAY|R\/W|ROADWAY)\b/.test(s)
+    || /\bROAD (R\/?W|RIGHT|ROW)\b/.test(s);
 }
 
 /** Shoelace polygon area (sum of signed rings, so holes subtract) for rings of
@@ -1292,8 +1342,26 @@ export async function executeLandAnalysis(
     }
 
     if (wgs84Data && wgs84Data.features && wgs84Data.features.length > 0) {
-      parcelFeature = wgs84Data.features[0];
-      statePlaneFeature = statePlaneData && statePlaneData.features ? statePlaneData.features[0] : null;
+      const feats: any[] = wgs84Data.features;
+      // A point near a property edge can intersect the adjacent roadway parcel (a
+      // state/SCDOT right-of-way or highway segment) instead of the private lot.
+      // Prefer the first feature whose owner is NOT a roadway/DOT right-of-way,
+      // falling back to the first feature when every match is a road segment.
+      let pickedIdx = feats.findIndex((f) => !isRoadwayOwner(normalizeCountyParcelAttrs(f?.properties || {}).ownname));
+      if (pickedIdx < 0) pickedIdx = 0;
+      parcelFeature = feats[pickedIdx];
+      const spFeats: any[] = statePlaneData && Array.isArray(statePlaneData.features) ? statePlaneData.features : [];
+      if (spFeats.length) {
+        // Align the State Plane measurement feature to the SAME parcel by id (the
+        // two projection queries can order their features differently).
+        const pickedParno = String(normalizeCountyParcelAttrs(parcelFeature.properties || {}).parno || '').trim();
+        const spMatch = (pickedParno && pickedParno.toUpperCase() !== 'N/A')
+          ? spFeats.find((f) => String(normalizeCountyParcelAttrs(f?.attributes || {}).parno || '').trim() === pickedParno)
+          : null;
+        statePlaneFeature = spMatch || spFeats[pickedIdx] || spFeats[0];
+      } else {
+        statePlaneFeature = null;
+      }
       console.log(`${countyName} parcel resolved via statewide ${selectedState === 'NC' ? 'NC OneMap' : 'SC parcel service'}.`);
     }
   }
@@ -3520,6 +3588,49 @@ async function zoningViaDeepSeek(promptText: string, searchQueries?: string[]): 
   }
 }
 
+/** Zoning web lookup via Perplexity's `sonar` online chat model. Unlike the
+ *  DeepSeek/Gemini paths, `sonar` runs its OWN live web search over the prompt's
+ *  official sources, so we POST the prompt straight to the chat completions
+ *  endpoint and parse the zoning JSON from the reply. Returns null on missing
+ *  key / no confident answer. */
+async function zoningViaPerplexity(promptText: string): Promise<ZoningResult | null> {
+  const key = getPerplexityKey();
+  if (!key) return null;
+  try {
+    const body = JSON.stringify({
+      model: 'sonar',
+      messages: [
+        { role: 'system', content: ZONING_SYSTEM },
+        { role: 'user', content: promptText },
+      ],
+      temperature: 0.2,
+      max_tokens: 2000,
+    });
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const res = await fetchWithTimeout('https://api.perplexity.ai/chat/completions', 30000, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
+        body,
+      });
+      if (res.ok) {
+        const data = await res.json();
+        const content = data?.choices?.[0]?.message?.content;
+        return content ? parseZoningResult(content) : null;
+      }
+      if ((res.status === 429 || res.status >= 500) && attempt === 0) {
+        await new Promise((r) => setTimeout(r, 1500));
+        continue;
+      }
+      console.warn(`Zoning web lookup via Perplexity HTTP ${res.status}.`);
+      return null;
+    }
+    return null;
+  } catch (e) {
+    console.warn('Zoning web lookup via Perplexity failed:', e);
+    return null;
+  }
+}
+
 /**
  * Gemini 3.5 Flash or DeepSeek V4 Pro with Perplexity web search over the official
  * county/city zoning sources. The caller COMBINES this with the county GIS layer to
@@ -3533,10 +3644,11 @@ export async function fetchZoningViaWebSearch(
   lng?: number,
   gisHint?: string | null,
 ): Promise<ZoningResult | null> {
+  const perplexityKey = getPerplexityKey();
   const deepSeekKey = getDeepSeekKey();
   const geminiApiKey = getUserKeys().gemini || "";
-  if (!deepSeekKey && !geminiApiKey) {
-    console.warn("Neither DeepSeek nor Gemini API key is configured in Account Settings.");
+  if (!perplexityKey && !deepSeekKey && !geminiApiKey) {
+    console.warn("No Perplexity, DeepSeek, or Gemini API key is configured in Account Settings.");
     return null;
   }
 
@@ -3565,11 +3677,19 @@ Rules: "zoningCode" must be the actual district code that jurisdiction uses for 
     `${cityPart || countyBaseName(countyName || '') || ''} ${state} planning department zoning lookup`.trim(),
   ];
 
+  // Perplexity's `sonar` model runs its own live web search over official sources
+  // — try it first when a key is configured, then fall back to DeepSeek/Gemini.
+  if (perplexityKey) {
+    const pplxResult = await zoningViaPerplexity(lookupPrompt);
+    if (pplxResult) return pplxResult;
+  }
+
   if (deepSeekKey) {
     return await zoningViaDeepSeek(lookupPrompt, queries);
-  } else {
+  } else if (geminiApiKey) {
     return await zoningViaGemini(lookupPrompt, geminiApiKey, queries);
   }
+  return null;
 }
 
 /**

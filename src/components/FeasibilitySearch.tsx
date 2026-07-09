@@ -4344,7 +4344,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                               {ln.low === ln.high ? `$${ln.low.toLocaleString()}` : `$${ln.low.toLocaleString()} – $${ln.high.toLocaleString()}`}{' '}
                               {ln.verified
                                 ? <span className="util-verified-tag">{ln.isPublic ? 'exact published fee' : 'typical local cost'}</span>
-                                : <span className="util-verified-tag util-estimate-tag">typical NC estimate · confirm with {utilities.provider || 'the local provider'}</span>}
+                                : <span className="util-verified-tag util-estimate-tag">typical {data?.countyName?.includes(', SC') ? 'SC' : 'NC'} estimate · confirm with {utilities.provider || 'the local provider'}</span>}
                             </div>
                           </div>
                         ))}
@@ -4374,7 +4374,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                                 <span className="util-name">{p.name}</span>
                               </div>
                               {p.note && <div className="util-note">{p.note}</div>}
-                              <div className="util-cost">{p.low === p.high ? `$${p.low.toLocaleString()}` : `~$${p.low.toLocaleString()} – $${p.high.toLocaleString()}`} <span className={`util-verified-tag ${p.verified ? '' : 'util-estimate-tag'}`}>{p.verified ? 'fee schedule' : 'typical NC estimate'}</span></div>
+                              <div className="util-cost">{p.low === p.high ? `$${p.low.toLocaleString()}` : `~$${p.low.toLocaleString()} – $${p.high.toLocaleString()}`} <span className={`util-verified-tag ${p.verified ? '' : 'util-estimate-tag'}`}>{p.verified ? 'fee schedule' : `typical ${data?.countyName?.includes(', SC') ? 'SC' : 'NC'} estimate`}</span></div>
                             </div>
                           ))}
                           {(() => {

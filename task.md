@@ -1,20 +1,19 @@
-# Active Task List: State-Agnostic Map Labels, Zoning, Utilities & Land Clearing
+# Active Task List: Perplexity Zoning, Dynamic Utilities, & SC Owner Filters
 
-This task list details the division of labor between Antigravity, Claude Code, and Codex to make the GIS map labels, zoning map search, utility connections, and land clearing calculations work for both NC and SC addresses.
+This task list coordinates the implementation of Perplexity chat completions for Zoning, dynamic SC-specific permit fallbacks in the UI, joint owner name splitting and first-name-first formatting, and excluding roadway parcels in GIS lookups.
 
 ---
 
 ## 💻 [Claude Code (Lead Architect) Tasks]
-- [x] Review the boundary check algorithm `getStateFromCoords` to verify it accurately separates NC and SC.
-- [x] Verify that all web-search prompts and Perplexity query constructors correctly format state names.
+- [x] Review the `formatOwnerName` implementation to ensure joint names split and format correctly without regressions.
+- [x] Verify the Perplexity chat completion API invocation payload structure.
 
 ## ⚡ [Codex (Senior Software Engineer) Tasks]
-- [x] Implement `getStateFromCoords` in `src/services/feasibilityService.ts` to detect the state based on latitude and longitude.
-- [x] Update `fetchParcelsInBbox` in `src/services/feasibilityService.ts` to query the correct MapServer (NC OneMap or SCDOT) and map the properties dynamically.
-- [x] Update `fetchZoningViaWebSearch` in `src/services/feasibilityService.ts` to replace hardcoded state names with dynamic state parameters.
-- [x] Update `fetchUtilitiesEstimate` in `src/services/feasibilityService.ts` to query using dynamic state parameters.
-- [x] Update `fetchTreeRemovalRates` and `fetchLandClearingEstimate` in `src/services/feasibilityService.ts` to use dynamic state parameters.
+- [x] Implement `zoningViaPerplexity` in `src/services/feasibilityService.ts`.
+- [x] Update `fetchZoningViaWebSearch` in `src/services/feasibilityService.ts` to call `zoningViaPerplexity` first if a Perplexity key is available.
+- [x] Update `formatOwnerName` in `src/services/feasibilityService.ts` to support joint owner splitting, ET AL stripping, and implied surname appending.
+- [x] Update `executeLandAnalysis` in `src/services/feasibilityService.ts` to filter out roadway/highway features (e.g. SCDOT right-of-ways) from parcel lookup results.
+- [x] Update `src/components/FeasibilitySearch.tsx` to dynamically render `typical SC estimate` or `typical NC estimate` based on `data.countyName`.
 
 ## 🧠 [Antigravity Tasks] (Orchestrator)
 - [x] Coordinate execution, run Vite compilation checks, commit changes, and push to GitHub.
-
