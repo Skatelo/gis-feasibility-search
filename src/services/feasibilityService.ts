@@ -28,7 +28,9 @@ export interface UserKeys {
 
 export function getUserKeys(): UserKeys {
   try {
-    const userStr = localStorage.getItem('gis_active_user') || sessionStorage.getItem('gis_active_user');
+    const hasLocal = typeof localStorage !== 'undefined';
+    const hasSession = typeof sessionStorage !== 'undefined';
+    const userStr = (hasLocal && localStorage.getItem('gis_active_user')) || (hasSession && sessionStorage.getItem('gis_active_user'));
     if (userStr) {
       const user = JSON.parse(userStr);
       return user.keys || {};
@@ -221,7 +223,10 @@ function queueGemini<T>(task: () => Promise<T>, priority: GeminiPriority = 'low'
 // ---------------------------------------------------------------------------
 
 export function getPerplexityKey(): string {
-  return (getUserKeys().perplexity || (import.meta.env.VITE_PERPLEXITY_API_KEY as string | undefined) || '').trim();
+  const envVar = (typeof import.meta !== 'undefined' && import.meta.env)
+    ? import.meta.env.VITE_PERPLEXITY_API_KEY
+    : (globalThis as any).process?.env?.VITE_PERPLEXITY_API_KEY;
+  return (getUserKeys().perplexity || (envVar as string | undefined) || '').trim();
 }
 export function perplexityConfigured(): boolean {
   return !!getPerplexityKey();
@@ -420,6 +425,13 @@ const countyState = (countyName: string): SupportedState => {
 };
 
 const countyParcelLayerKey = (countyName: string): string => normalizeCountyKey(countyBaseName(countyName));
+
+const countyParcelLayerFor = (countyName: string, state: SupportedState): string | undefined => {
+  const key = countyParcelLayerKey(countyName);
+  return state === 'SC'
+    ? countyParcelLayers[`${key}_sc`] || countyParcelLayers[key]
+    : countyParcelLayers[key];
+};
 
 const getStateFromCoords = (lat: number, lng: number): SupportedState => {
   if (lat > 35.25) return 'NC';
@@ -795,12 +807,28 @@ const countyParcelLayers: Record<string, string> = {
   wilson: "https://gis.wilson-co.com/arcgis/rest/services/Open_gov/Opengov_Address_Taxparcels/FeatureServer/0",
   yadkin: "https://services1.arcgis.com/NjPxXbprfWFvge6E/arcgis/rest/services/Yadkin_VAD_Map/FeatureServer/6",
   yancey: "https://services1.arcgis.com/KUeKSLlMUcWvuPRM/arcgis/rest/services/Yancey_County_WFL1/FeatureServer/11",
+  // South Carolina parcel layers. Counties that share a name with NC use the
+  // `_sc` suffix so NC county fallback lookups do not hit SC services.
   abbeville: SC_STATEWIDE_PARCEL_LAYER,
+  aiken: SC_STATEWIDE_PARCEL_LAYER,
+  allendale: SC_STATEWIDE_PARCEL_LAYER,
+  anderson: SC_STATEWIDE_PARCEL_LAYER,
+  bamberg: SC_STATEWIDE_PARCEL_LAYER,
+  barnwell: SC_STATEWIDE_PARCEL_LAYER,
+  beaufort_sc: SC_STATEWIDE_PARCEL_LAYER,
   berkeley: "https://services.arcgis.com/M2JiPNPcfxhLjlp7/arcgis/rest/services/ParcelsAndAddress/FeatureServer/1",
-  charleston: "https://services.arcgis.com/DN2fPfpggEPlLhP6/arcgis/rest/services/Mt_P_Way_all_data/FeatureServer/25",
   calhoun: "https://services5.arcgis.com/B3Zo1xqTw8CidOoF/arcgis/rest/services/WebParcels/FeatureServer/0",
-  darlington: "https://services5.arcgis.com/8FJikaProY6O3ncx/arcgis/rest/services/PARCELS/FeatureServer/1",
+  charleston: "https://services.arcgis.com/DN2fPfpggEPlLhP6/arcgis/rest/services/Mt_P_Way_all_data/FeatureServer/25",
+  cherokee_sc: SC_STATEWIDE_PARCEL_LAYER,
+  chester: SC_STATEWIDE_PARCEL_LAYER,
+  chesterfield: SC_STATEWIDE_PARCEL_LAYER,
+  clarendon: SC_STATEWIDE_PARCEL_LAYER,
   colleton: "https://services1.arcgis.com/m0cnLGKdhwao8WvM/arcgis/rest/services/Public_Data/FeatureServer/2",
+  darlington: "https://services5.arcgis.com/8FJikaProY6O3ncx/arcgis/rest/services/PARCELS/FeatureServer/1",
+  dillon: SC_STATEWIDE_PARCEL_LAYER,
+  dorchester: "https://gisportal.dorchestercounty.net/hosting/rest/services/County_Basemap/MapServer/3",
+  edgefield: SC_STATEWIDE_PARCEL_LAYER,
+  fairfield: SC_STATEWIDE_PARCEL_LAYER,
   florence: "http://arc2000.florenceco.org/ArcGIS/rest/services/Florence_County_Maps_WebMercator/MapServer/5",
   georgetown: "https://gis1.georgetowncountysc.org/portal/rest/services/GCGIS_OpenData/FeatureServer/2",
   greenville: "https://citygis.greenvillesc.gov/arcgis/rest/services/AddressSearch/Property/MapServer/3",
@@ -808,16 +836,24 @@ const countyParcelLayers: Record<string, string> = {
   hampton: "https://services8.arcgis.com/6eabNhFouHU5vuYk/arcgis/rest/services/Parcels_Published_view/FeatureServer/1",
   horry: "https://gisportal.horrycounty.org/server/rest/services/OpenData/Parcels/FeatureServer/0",
   jasper: "https://services6.arcgis.com/UXJOITFCLbn0Ibm0/arcgis/rest/services/Jasper_County_Parcels_View/FeatureServer/2",
-  laurens: "https://www.laurenscountygis.org/arcgis/rest/services/Pebble/TaxParcel/MapServer/5",
-  lexington: "https://maps.lex-co.com/agstserver/rest/services/Property/MapServer/4",
-  dorchester: "https://gisportal.dorchestercounty.net/hosting/rest/services/County_Basemap/MapServer/3",
-  lee: "https://services5.arcgis.com/zg6ovB2KKN8L0zFv/arcgis/rest/services/Web_Parcels/FeatureServer/0",
+  kershaw: SC_STATEWIDE_PARCEL_LAYER,
   lancaster: "https://services.arcgis.com/TL5Ii4EYksDBPH1o/arcgis/rest/services/Lancaster_Parcels/FeatureServer/0",
-  pickens: "https://services1.arcgis.com/59960rq18IxUcAVI/arcgis/rest/services/Energov_AGOL/FeatureServer/7",
-  orangeburg: "https://services2.arcgis.com/bUKn95BqgpYYTnx3/arcgis/rest/services/Main_Public_Tax_Parcel_Map_WFL1/FeatureServer/0",
+  laurens: "https://www.laurenscountygis.org/arcgis/rest/services/Pebble/TaxParcel/MapServer/5",
+  lee_sc: "https://services5.arcgis.com/zg6ovB2KKN8L0zFv/arcgis/rest/services/Web_Parcels/FeatureServer/0",
+  lexington: "https://maps.lex-co.com/agstserver/rest/services/Property/MapServer/4",
+  marion: SC_STATEWIDE_PARCEL_LAYER,
+  marlboro: SC_STATEWIDE_PARCEL_LAYER,
+  mccormick: SC_STATEWIDE_PARCEL_LAYER,
+  newberry: SC_STATEWIDE_PARCEL_LAYER,
   oconee: "https://arcserver2.oconeesc.com/arcgis/rest/services/PARCELDATA/MapServer/1",
-  spartanburg: "https://services9.arcgis.com/HoRra3ATPLGmyjn6/arcgis/rest/services/Spartanburg_County_Parcels_1_7_2019/FeatureServer/0",
+  orangeburg: "https://services2.arcgis.com/bUKn95BqgpYYTnx3/arcgis/rest/services/Main_Public_Tax_Parcel_Map_WFL1/FeatureServer/0",
+  pickens: "https://services1.arcgis.com/59960rq18IxUcAVI/arcgis/rest/services/Energov_AGOL/FeatureServer/7",
   richland: "https://services1.arcgis.com/Mnt8FoJcogKtoVBs/arcgis/rest/services/EnergovInformationPublic/FeatureServer/13",
+  saluda: SC_STATEWIDE_PARCEL_LAYER,
+  spartanburg: "https://services9.arcgis.com/HoRra3ATPLGmyjn6/arcgis/rest/services/Spartanburg_County_Parcels_1_7_2019/FeatureServer/0",
+  sumter: SC_STATEWIDE_PARCEL_LAYER,
+  union_sc: SC_STATEWIDE_PARCEL_LAYER,
+  williamsburg: SC_STATEWIDE_PARCEL_LAYER,
   york: "https://services1.arcgis.com/2AGLxyiJoNiVHKwq/arcgis/rest/services/Parcels/FeatureServer/0",
 };
 
@@ -1254,23 +1290,43 @@ export async function executeLandAnalysis(
   }
 
 
-  // Parcel resolution order: (1) statewide NC OneMap parcel layer (authoritative,
-  // covers all 100 counties) → (2) the county's own parcel server if the statewide
-  // service is down → (3) a deterministic simulated outline as a last resort.
+  // Parcel resolution order:
+  // - NC: statewide OneMap primary/mirror first, then local county fallback.
+  // - SC: local county parcel layer first when known, then statewide SC fallback.
+  // - Last resort: deterministic simulated outline.
   let parcelFeature: any = null;
   let statePlaneFeature: any = null;
   let isSimulated = false;
   const countyKeyLower = countyParcelLayerKey(countyName);
+  const countyParcelLayer = countyParcelLayerFor(countyName, selectedState);
+  const hasScLocalParcelLayer = selectedState === 'SC' &&
+    !!countyParcelLayer &&
+    countyParcelLayer !== SC_STATEWIDE_PARCEL_LAYER;
   const parcelHosts = selectedState === 'NC'
     ? [config.parcelUrl, NC_PARCEL_ENGINE_MIRROR]
-    : [config.parcelUrl];
+    : [SC_STATEWIDE_PARCEL_LAYER];
   const parcelWhere = config.extraWhere || '1=1';
   const parcelOutFields = selectedState === 'NC' ? NC_PARCEL_FIELDS : '*';
   const measurementOutSr = selectedState === 'NC' ? '2264' : '2273';
 
-  // 1) Statewide NC OneMap parcel layer — primary host, then the mirror host
-  //    (same layer served from services.gis.nc.gov AND services.nconemap.gov;
-  //    they fail independently more often than together).
+  // 1) SC county parcel layer - preferred over the statewide SC layer when a
+  //    true county-level endpoint is known.
+  if (hasScLocalParcelLayer && countyParcelLayer) {
+    onStageChange?.("Querying county parcel server...");
+    try {
+      const localRes = await queryCountyParcel(countyParcelLayer, lng, lat);
+      if (localRes) {
+        parcelFeature = localRes.wgs84Feature;
+        statePlaneFeature = localRes.statePlaneFeature;
+        console.log(`${countyName} parcel resolved via county GIS server.`);
+      }
+    } catch (err) {
+      console.warn(`County parcel query failed for ${countyName}:`, err);
+    }
+  }
+
+  // 2) Statewide parcel layer. NC tries both OneMap hosts; SC only reaches this
+  //    path when no local county layer exists or the local attempt missed.
   for (const parcelHost of parcelHosts.filter((v, i, arr) => arr.indexOf(v) === i)) {
     if (parcelFeature) break;
     onStageChange?.(selectedState === 'NC' ? "Querying statewide NC OneMap records..." : "Querying statewide SC parcel records...");
@@ -1314,7 +1370,7 @@ export async function executeLandAnalysis(
         }
       } else {
         const err = wgsRes.status === 'rejected' ? wgsRes.reason : `HTTP ${wgsRes.value.status}`;
-        console.warn(`Direct point query failed on statewide NC MapServer (${parcelHost.includes('nconemap') ? 'mirror' : 'primary'} host):`, err);
+        console.warn(`Direct point query failed on statewide ${selectedState} parcel service (${selectedState === 'NC' && parcelHost.includes('nconemap') ? 'mirror' : 'primary'} host):`, err);
       }
     }
 
@@ -1366,13 +1422,13 @@ export async function executeLandAnalysis(
     }
   }
 
-  // 2) County's own parcel server — fallback when the statewide service is down.
-  if (!parcelFeature && (countyKeyLower === "mecklenburg" || countyParcelLayers[countyKeyLower])) {
+  // 3) NC county parcel server - fallback when the statewide OneMap service is down.
+  if (!parcelFeature && selectedState === 'NC' && (countyKeyLower === "mecklenburg" || countyParcelLayer)) {
     onStageChange?.("Statewide GIS unavailable — trying county parcel server...");
     try {
       const localRes = countyKeyLower === "mecklenburg"
         ? await queryMecklenburgParcel(lng, lat)
-        : await queryCountyParcel(countyParcelLayers[countyKeyLower], lng, lat);
+        : countyParcelLayer ? await queryCountyParcel(countyParcelLayer, lng, lat) : null;
       if (localRes) {
         parcelFeature = localRes.wgs84Feature;
         statePlaneFeature = localRes.statePlaneFeature;
@@ -1383,7 +1439,7 @@ export async function executeLandAnalysis(
     }
   }
 
-  // 3) If both statewide and county queries failed, generate a simulated parcel.
+  // 4) If both real GIS paths failed, generate a simulated parcel.
   if (!parcelFeature) {
     console.log("Statewide GIS completely unresponsive and no local query succeeded. Generating deterministic simulated parcel outline.");
     const sim = generateSimulatedParcel(lng, lat, addressString, countyName);
@@ -4104,15 +4160,24 @@ const MIN_COMP_YEAR_BUILT = 2025; // new-construction floor (criteria: built 202
 const MAX_COMP_YEAR_BUILT = 2026; // new-construction ceiling
 
 function getRealtyApiKey(): string {
-  return getUserKeys().realtyApi || (import.meta.env.VITE_REALTYAPI_KEY as string | undefined) || "";
+  const envVar = (typeof import.meta !== 'undefined' && import.meta.env)
+    ? import.meta.env.VITE_REALTYAPI_KEY
+    : (globalThis as any).process?.env?.VITE_REALTYAPI_KEY;
+  return getUserKeys().realtyApi || (envVar as string | undefined) || "";
 }
 
 function getDeepSeekKey(): string {
-  return getUserKeys().deepSeek || (import.meta.env.VITE_DEEPSEEK_API_KEY as string | undefined) || "";
+  const envVar = (typeof import.meta !== 'undefined' && import.meta.env)
+    ? import.meta.env.VITE_DEEPSEEK_API_KEY
+    : (globalThis as any).process?.env?.VITE_DEEPSEEK_API_KEY;
+  return getUserKeys().deepSeek || (envVar as string | undefined) || "";
 }
 /** Mapbox public access token for the satellite base map (Account Settings or env). */
 export function getMapboxToken(): string {
-  return (getUserKeys().mapbox || (import.meta.env.VITE_MAPBOX_TOKEN as string | undefined) || '').trim();
+  const envVar = (typeof import.meta !== 'undefined' && import.meta.env)
+    ? import.meta.env.VITE_MAPBOX_TOKEN
+    : (globalThis as any).process?.env?.VITE_MAPBOX_TOKEN;
+  return (getUserKeys().mapbox || (envVar as string | undefined) || '').trim();
 }
 
 // Per-platform property-type vocabularies (exact tokens from each platform's
