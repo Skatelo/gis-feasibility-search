@@ -248,6 +248,16 @@ export interface SiteFeasibilityData {
   gridics?: GridicsData;
   isSimulated?: boolean;
 
+  // Free official SC parcel verification. Values remain flat for backwards
+  // compatibility while these fields explain exactly where they came from.
+  parcelVerificationStatus?: 'verified' | 'unavailable' | 'blocked';
+  parcelSourceName?: string;
+  parcelSourceUrl?: string;
+  parcelSourceAsOf?: string;
+  ownerRecordType?: 'assessor' | 'deed' | 'gis' | 'unavailable';
+  geometryStatus?: 'verified' | 'statewide-candidate' | 'stale-hidden' | 'unavailable';
+  parcelConflicts?: string[];
+
   // Rich Property Registry fields
   ownerName?: string;
   /** Authoritative owner first/last from the GIS (ownfrst/ownlast) when populated;
@@ -258,6 +268,10 @@ export interface SiteFeasibilityData {
   assessedYear?: number;
   assessedPropertyValue?: number;
   landValue?: number;
+  improvementValue?: number;
+  marketValue?: number;
+  taxableValue?: number;
+  totalAssessedValue?: number;
   contactByMail?: string;
   deedBookPage?: string;
   deedType?: string;
@@ -271,6 +285,14 @@ export interface SiteFeasibilityData {
   legalDescription?: string;
   totalValueCalculated?: number;
   typeOfTransaction?: string;
+  building?: {
+    livingSqft?: number;
+    firstFloorSqft?: number;
+    buildingSqft?: number;
+    buildingCount?: number;
+    stories?: number;
+    baths?: number;
+  };
 
   // Environmental constraints (queried by coordinate)
   /** FEMA NFHL flood zone. */
@@ -284,4 +306,3 @@ export interface SiteFeasibilityData {
   /** Conversational markdown summary of the comp run (criteria, per-comp detail, Bottom Line). */
   compRunSummary?: string;
 }
-
