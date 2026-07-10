@@ -202,6 +202,24 @@ function dedupeUrls(values) {
   return urls;
 }
 
+function discoverPageLinks($, sourceUrl) {
+  const links = [];
+  $('a[href],script[src]').each((_, element) => {
+    const value = $(element).attr('href') || $(element).attr('src');
+    if (!value) return;
+    try { links.push(new URL(value, sourceUrl).href); } catch { /* malformed link */ }
+  });
+  return dedupeUrls(links).slice(0, 300);
+}
+
+function discoverGisEndpoints($, sourceUrl) {
+  const html = $.html() || '';
+  const candidates = html.match(/https?:\\?\/\\?\/[^"'<>\s]+?(?:MapServer|FeatureServer)(?:\/\d+)?/gi) || [];
+  return dedupeUrls(candidates.map((value) => value.replace(/\\\//g, '/')))
+    .filter((value) => /^https:/i.test(value) && value !== sourceUrl)
+    .slice(0, 100);
+}
+
 export async function crawlSources({
   urls,
   queries = [],
@@ -275,6 +293,8 @@ export async function crawlSources({
       } else {
         if (!/html|xhtml/i.test(String(mime))) return;
         title = cleanText($('title').first().text() || $('h1').first().text() || title, 300);
+        const links = discoverPageLinks($, loadedUrl);
+        const endpoints = discoverGisEndpoints($, loadedUrl);
         const depth = Number(request.userData?.depth || 0);
         if (depth < depthLimit) {
           const anchorTextByUrl = new Map();
@@ -297,6 +317,8 @@ export async function crawlSources({
           });
         }
         content = extractHtmlText($, charLimit, queryTerms);
+        request.userData.discoveredLinks = links;
+        request.userData.discoveredEndpoints = endpoints;
       }
 
       if (content.length >= (kind ? 20 : 80)) {
@@ -308,6 +330,8 @@ export async function crawlSources({
           kind: resultKind,
           contentType: String(mime),
           date: response?.headers?.['last-modified'] || undefined,
+          links: request.userData?.discoveredLinks || [],
+          endpoints: request.userData?.discoveredEndpoints || [],
         });
       }
     },

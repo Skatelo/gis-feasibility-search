@@ -118,6 +118,7 @@ test('Crawlee extracts a page and follows relevant document links', async (t) =>
   assert.ok(result.results.some((item) => item.kind === 'html' && /dimensional standards/i.test(item.content)));
   assert.ok(result.results.some((item) => item.kind === 'text' && /\$500/.test(item.content)));
   assert.ok(result.results.some((item) => item.kind === 'json' && /frontSetbackFt/.test(item.content)));
+  assert.ok(result.results.some((item) => item.kind === 'html' && item.links.some((url) => url.endsWith('/fees.txt'))));
   assert.equal(result.results.some((item) => item.url.endsWith('/sports')), false);
 });
 

@@ -1,6 +1,7 @@
 import type { SiteFeasibilityData, SlopeProfile, CompProperty, FloodZoneInfo, WetlandsInfo, ConstructionCostEstimate, CostLineItem, MaterialTakeoff, MaterialTakeoffItem, LandClearingEstimate, TreeRemovalLine, ClearingMethod, UtilitiesEstimate, UtilityLine, PermitFeeLine } from '../types/feasibility';
 import { fetchCountyZoningCode, hasCountyZoning, normalizeCountyKey } from '../data/ncZoning';
 import { getSupabase, isSupabaseConfigured } from './supabaseClient';
+import { fetchOfficialScParcel, shouldHideStatewideGeometry } from './scParcelVerification';
 
 export interface UserKeys {
   googleMaps?: string;
@@ -1008,6 +1009,7 @@ function normalizeScStatewideParcelAttrs(a: Record<string, any>): Record<string,
     return v != null && String(v).trim() !== "" && String(v).trim().toLowerCase() !== "null" ? v : undefined;
   };
   return {
+    recordsource: 'scdot',
     parno: getExact("T_Map_Number") ?? "N/A",
     gisacres: getExact("Acreage"),
     ownname: getExact("Ownership") ?? "N/A",
@@ -1211,6 +1213,7 @@ async function queryCountyParcel(baseUrl: string, lng: number, lat: number) {
     const spFeat = spJson?.features?.[0] || null;
 
     const norm = normalizeCountyParcelAttrs(wgsFeat.properties || {});
+    norm.recordsource = baseUrl === SC_STATEWIDE_PARCEL_LAYER ? 'scdot' : 'county-gis';
     if (!norm.gisacres) {
       const sqft = ringAreaSqFt(spFeat?.geometry?.rings);
       if (sqft > 0) norm.gisacres = sqft / 43560;
@@ -1689,16 +1692,27 @@ export async function executeLandAnalysis(
     }
   }
 
-  // 4) If both real GIS paths failed, generate a simulated parcel.
+  // 4) If both real GIS paths failed, never invent an SC parcel. NC retains the
+  // legacy simulated outline for compatibility, but SC continues with an empty
+  // record so the UI can link to the official county viewer.
   if (!parcelFeature) {
-    console.log("Statewide GIS completely unresponsive and no local query succeeded. Generating deterministic simulated parcel outline.");
-    const sim = generateSimulatedParcel(lng, lat, addressString, countyName);
-    parcelFeature = sim.wgs84Feature;
-    statePlaneFeature = sim.statePlaneFeature;
-    isSimulated = true;
+    if (selectedState === 'SC') {
+      parcelFeature = {
+        type: 'Feature',
+        properties: { parno: 'N/A', ownname: 'N/A', cntyname: `${countyBaseName(countyName)}, SC`, recordsource: 'unavailable' },
+        geometry: null,
+      };
+      statePlaneFeature = null;
+    } else {
+      console.log("Statewide GIS completely unresponsive and no local query succeeded. Generating deterministic simulated parcel outline.");
+      const sim = generateSimulatedParcel(lng, lat, addressString, countyName);
+      parcelFeature = sim.wgs84Feature;
+      statePlaneFeature = sim.statePlaneFeature;
+      isSimulated = true;
+    }
   }
 
-  const info = normalizeCountyParcelAttrs(parcelFeature.properties || {});
+  let info = normalizeCountyParcelAttrs(parcelFeature.properties || {});
 
   // Self-correct the county from the ACTUAL parcel record (authoritative), for
   // BOTH states. The parcel point query is county-agnostic, so even if the county
@@ -1719,6 +1733,64 @@ export async function executeLandAnalysis(
         countyName = qualified;
       }
     }
+  }
+
+  const officialScRecord = selectedState === 'SC'
+    ? await fetchOfficialScParcel(
+        countyName,
+        addressString,
+        String(info.parno || ''),
+        { lat, lng },
+      )
+    : null;
+  let geometryStatus: SiteFeasibilityData['geometryStatus'] = selectedState === 'SC'
+    ? (info.recordsource === 'county-gis' ? 'verified' : info.recordsource === 'scdot' ? 'statewide-candidate' : 'unavailable')
+    : 'verified';
+  const parcelConflicts: string[] = [];
+
+  if (selectedState === 'SC' && officialScRecord?.status === 'verified') {
+    const candidateParcelId = info.parno;
+    const candidateAcres = Number(info.gisacres || 0);
+    const acreageConflicts = !!officialScRecord.acres && candidateAcres > 0 &&
+      Math.abs(officialScRecord.acres - candidateAcres) / officialScRecord.acres > 0.1;
+    const identityConflicts = info.recordsource === 'scdot' &&
+      shouldHideStatewideGeometry(candidateParcelId, officialScRecord.parcelId);
+    if (identityConflicts || acreageConflicts) {
+      parcelFeature.geometry = null;
+      statePlaneFeature = null;
+      geometryStatus = 'stale-hidden';
+      parcelConflicts.push('The statewide SCDOT polygon conflicts with the current county assessor record and was hidden.');
+    }
+
+    info = {
+      ...info,
+      parno: officialScRecord.parcelId || info.parno,
+      ownname: officialScRecord.ownerName || 'N/A',
+      ownname2: '',
+      siteadd: officialScRecord.situsAddress || info.siteadd,
+      officialmailingaddress: officialScRecord.mailingAddress,
+      gisacres: officialScRecord.acres && officialScRecord.acres > 0 ? officialScRecord.acres : (geometryStatus === 'stale-hidden' ? undefined : info.gisacres),
+      reviseyear: officialScRecord.assessedYear,
+      parval: officialScRecord.assessedPropertyValue,
+      landval: officialScRecord.landValue,
+      improvementvalue: officialScRecord.improvementValue,
+      marketvalue: officialScRecord.marketValue,
+      taxablevalue: officialScRecord.taxableValue,
+      totalassessedvalue: officialScRecord.totalAssessedValue,
+      taxcodearea: officialScRecord.taxCodeArea,
+      taxamount: officialScRecord.taxAmount,
+      taxyear: officialScRecord.taxYear,
+      building: officialScRecord.building,
+      recordsource: 'county-assessor',
+    };
+  } else if (selectedState === 'SC' && info.recordsource === 'scdot') {
+    // The statewide layer is useful for candidate geometry, but it is not fresh
+    // enough to assert ownership or tax facts without county confirmation.
+    info = {
+      ...info,
+      ownname: 'N/A', ownname2: '', mailadd: undefined, mcity: undefined, mstate: undefined, mzip: undefined,
+      parval: undefined, landval: undefined, reviseyear: undefined,
+    };
   }
 
   // Extract WGS84 rings from geojson structure to draw the polygon boundary on Google Maps
@@ -1857,35 +1929,36 @@ export async function executeLandAnalysis(
   // first, others first-last — so parsing ownname alone gets the order wrong).
   const gisFirst = String(info.ownfrst ?? '').trim();
   const gisLast = String(info.ownlast ?? '').trim();
-  let ownerName: string;
+  let ownerName: string | undefined;
   let ownerFirst: string | undefined;
   let ownerLast: string | undefined;
   if (gisFirst && gisLast) {
     ownerName = toTitleCase(`${gisFirst} ${gisLast}`);
     ownerFirst = gisFirst;
     ownerLast = gisLast;
-  } else {
+  } else if (info.ownname && String(info.ownname).trim().toUpperCase() !== 'N/A') {
     ownerName = formatOwnerName(info.ownname); // surname-first parse fallback
   }
-  if (info.ownname2 && String(info.ownname2).trim()) {
+  if (ownerName && info.ownname2 && String(info.ownname2).trim()) {
     ownerName += " & " + formatOwnerName(info.ownname2);
   }
 
   // Format mailing address
-  let mailingAddress = "";
-  if (info.mailadd) {
+  let mailingAddress: string | undefined;
+  if (info.officialmailingaddress) {
+    mailingAddress = toTitleCase(info.officialmailingaddress);
+  } else if (info.mailadd) {
+    mailingAddress = '';
     mailingAddress += toTitleCase(info.mailadd);
     if (info.mcity) mailingAddress += `, ${toTitleCase(info.mcity)}`;
     if (info.mstate) mailingAddress += `, ${info.mstate}`;
     if (info.mzip) {
       mailingAddress += ` ${info.mzip}`;
     }
-  } else {
-    mailingAddress = "N/A";
   }
 
   // Formulate dates
-  let dateOfSale = "N/A";
+  let dateOfSale: string | undefined;
   if (info.saledate) {
     const d = new Date(info.saledate);
     if (!isNaN(d.getTime())) {
@@ -1898,29 +1971,29 @@ export async function executeLandAnalysis(
 
   const charCodeSum = (parcelId || "").split("").reduce((sum: number, char: string) => sum + char.charCodeAt(0), 0);
 
-  // Generate Census Tract
+  // The legacy NC flow retains its deterministic placeholders. SC registry
+  // fields must only come from an official published record.
   const tractSuffix = String(charCodeSum % 999999).padStart(6, '0');
   const blockGroup = String(charCodeSum % 10);
-  const censusTract = `00${tractSuffix.substring(0, 4)}${tractSuffix.substring(4, 6)}${blockGroup}`;
+  const censusTract = selectedState === 'SC' ? undefined : `00${tractSuffix.substring(0, 4)}${tractSuffix.substring(4, 6)}${blockGroup}`;
 
   // Formulate values
-  const assessedYear = info.reviseyear ? parseInt(info.reviseyear) : 2025;
-  const assessedPropertyValue = info.parval ? parseFloat(info.parval) : 0;
-  const landValue = info.landval ? parseFloat(info.landval) : 0;
+  const assessedYear = info.reviseyear ? parseInt(info.reviseyear) : (selectedState === 'SC' ? undefined : 2025);
+  const assessedPropertyValue = info.parval != null ? parseFloat(info.parval) : undefined;
+  const landValue = info.landval != null ? parseFloat(info.landval) : undefined;
   
   // Determine if contact by mail
-  let contactByMail = "No";
-  if (info.mcity && info.scity && info.mcity.trim().toLowerCase() !== info.scity.trim().toLowerCase()) {
-    contactByMail = "Yes";
-  }
+  const contactByMail = selectedState === 'SC'
+    ? (mailingAddress ? 'Yes' : undefined)
+    : (info.mcity && info.scity && info.mcity.trim().toLowerCase() !== info.scity.trim().toLowerCase() ? 'Yes' : 'No');
 
   // Deed Type
-  const deedType = "Warranty Deed";
-  const deedBookPage = info.sourceref || "N/A";
+  const deedType = selectedState === 'SC' ? undefined : "Warranty Deed";
+  const deedBookPage = info.sourceref && info.sourceref !== 'N/A' ? info.sourceref : undefined;
 
   // Price Sold For & dynamic transaction history estimation
-  let priceSoldFor = 0;
-  if (assessedPropertyValue > 0) {
+  let priceSoldFor: number | undefined;
+  if (selectedState !== 'SC' && assessedPropertyValue && assessedPropertyValue > 0) {
     let factor = 0.7;
     const saleYear = info.saledate ? new Date(info.saledate).getFullYear() : 2000;
     if (saleYear < 1980) {
@@ -1936,14 +2009,25 @@ export async function executeLandAnalysis(
   }
 
   // Tax computation
-  const taxCodeArea = String((charCodeSum % 15) + 1).padStart(2, '0');
+  const taxCodeArea = info.taxcodearea != null
+    ? String(info.taxcodearea)
+    : selectedState === 'SC' ? undefined : String((charCodeSum % 15) + 1).padStart(2, '0');
   const taxRate = countyName.toLowerCase() === "mecklenburg" ? 0.00793 : 0.0065;
-  const taxAmount = Math.round(assessedPropertyValue * taxRate * 100) / 100;
-  const taxYear = assessedYear;
-  const salePriceFull = "Financial consideration";
-  const legalDescription = info.legdecfull ? info.legdecfull.replace(/-/g, ' ') : ("Lot " + parcelId);
-  const totalValueCalculated = assessedPropertyValue;
-  const typeOfTransaction = "Resale";
+  const taxAmount = info.taxamount != null
+    ? Number(info.taxamount)
+    : selectedState === 'SC' || assessedPropertyValue == null ? undefined : Math.round(assessedPropertyValue * taxRate * 100) / 100;
+  const taxYear = info.taxyear != null ? Number(info.taxyear) : selectedState === 'SC' ? undefined : assessedYear;
+  const salePriceFull = selectedState === 'SC' ? undefined : "Financial consideration";
+  const legalDescription = info.legdecfull && info.legdecfull !== 'SC Parcel'
+    ? info.legdecfull.replace(/-/g, ' ')
+    : selectedState === 'SC' ? undefined : ("Lot " + parcelId);
+  const totalValueCalculated = info.marketvalue != null
+    ? Number(info.marketvalue)
+    : selectedState === 'SC' ? undefined : assessedPropertyValue;
+  const typeOfTransaction = selectedState === 'SC' ? undefined : "Resale";
+  const ownerRecordType: SiteFeasibilityData['ownerRecordType'] = ownerName
+    ? (officialScRecord?.ownerRecordType || (info.recordsource === 'county-gis' ? 'gis' : 'unavailable'))
+    : 'unavailable';
 
   // Detailed Property Registry data container
   const registryData = {
@@ -1954,6 +2038,10 @@ export async function executeLandAnalysis(
     assessedYear,
     assessedPropertyValue,
     landValue,
+    improvementValue: info.improvementvalue != null ? Number(info.improvementvalue) : undefined,
+    marketValue: info.marketvalue != null ? Number(info.marketvalue) : undefined,
+    taxableValue: info.taxablevalue != null ? Number(info.taxablevalue) : undefined,
+    totalAssessedValue: info.totalassessedvalue != null ? Number(info.totalassessedvalue) : undefined,
     contactByMail,
     deedBookPage,
     deedType,
@@ -1966,7 +2054,15 @@ export async function executeLandAnalysis(
     salePriceFull,
     legalDescription,
     totalValueCalculated,
-    typeOfTransaction
+    typeOfTransaction,
+    building: info.building,
+    parcelVerificationStatus: officialScRecord?.status,
+    parcelSourceName: officialScRecord?.sourceName || (info.recordsource === 'county-gis' ? 'County GIS' : undefined),
+    parcelSourceUrl: officialScRecord?.sourceUrl,
+    parcelSourceAsOf: officialScRecord?.asOf,
+    ownerRecordType,
+    geometryStatus,
+    parcelConflicts,
   };
 
   // -------------------------------------------------------------------------
@@ -2052,6 +2148,7 @@ export async function executeLandAnalysis(
         : "No published county zoning GIS; web lookup found nothing";
     }
   }
+
   gridics = buildGridics(); // re-derive setback/height estimates from the real district
   onPartial?.({ zoningCode, zoningDescription, zoningSource, zoningSourceUrl, gridics });
 
