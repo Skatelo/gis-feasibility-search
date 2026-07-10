@@ -15,10 +15,6 @@ export interface UserKeys {
    *  runs on the Perplexity Search API (parallel batched queries, many ranked
    *  sources) instead of Gemini's Google-Search grounding. */
   perplexity?: string;
-  /** Firecrawl API key - deep live-web source for scrape-heavy research.
-   *  Perplexity handles fast/easy searches; Firecrawl handles harder source
-   *  packs where clean page extraction matters, with Gemini as fallback. */
-  firecrawl?: string;
   /** Mapbox public access token (pk.…) — satellite base map for the parcel aerial view. */
   mapbox?: string;
   realtyApi?: string;
@@ -264,32 +260,22 @@ export function perplexityConfigured(): boolean {
   return !!getPerplexityKey();
 }
 
-export function getFirecrawlKey(): string {
-  const envVar = (typeof import.meta !== 'undefined' && import.meta.env)
-    ? import.meta.env.VITE_FIRECRAWL_API_KEY
-    : (globalThis as any).process?.env?.VITE_FIRECRAWL_API_KEY;
-  return (getUserKeys().firecrawl || (envVar as string | undefined) || '').trim();
-}
-
-function firecrawlProxyEnabled(): boolean {
-  const envVar = (typeof import.meta !== 'undefined' && import.meta.env)
-    ? import.meta.env.VITE_FIRECRAWL_PROXY_ENABLED
-    : (globalThis as any).process?.env?.VITE_FIRECRAWL_PROXY_ENABLED;
-  return /^(1|true|yes)$/i.test(String(envVar || '').trim());
-}
-
-export function firecrawlConfigured(): boolean {
-  return !!getFirecrawlKey() || firecrawlProxyEnabled();
-}
-
 export function liveWebResearchConfigured(): boolean {
-  return firecrawlConfigured() || perplexityConfigured();
+  return perplexityConfigured();
 }
 
 export interface PplxResult { title: string; url: string; snippet: string; date?: string }
-export interface FirecrawlResult { title: string; url: string; snippet: string; markdown?: string; date?: string }
+export interface CrawleeResult {
+  title: string;
+  url: string;
+  content: string;
+  snippet: string;
+  kind: 'html' | 'pdf' | 'docx' | 'xlsx' | 'csv' | 'json' | 'text';
+  contentType?: string;
+  date?: string;
+}
 
-type WebResearchMode = 'auto' | 'easy' | 'hard' | 'perplexity' | 'firecrawl';
+type WebResearchMode = 'auto' | 'easy' | 'hard' | 'perplexity' | 'crawlee';
 interface WebResearchOptions {
   maxResultsPerQuery?: number;
   maxSources?: number;
@@ -298,158 +284,51 @@ interface WebResearchOptions {
 
 const SCRAPE_HEAVY_QUERY_RE = /\b(ordinance|code\s+of\s+ordinances|zoning\s+(map|ordinance|district|lookup)|parcel\s+viewer|gis|planning\s+department|permit\s+fees?|fee\s+schedule|tap\s+fees?|impact\s+fees?|water\s+sewer|utilities|well\s+septic|minimum\s+lot|setbacks?|subdivision|rezoning|registered\s+agent|secretary\s+of\s+state|annual\s+report|bizapedia|corporationwiki|contractor|material\s+prices?|construction\s+costs?)\b/i;
 
-function wantsFirecrawlResearch(queries: string[], opts?: WebResearchOptions): boolean {
-  if (!firecrawlConfigured()) return false;
-  if (!perplexityConfigured()) return true;
-  if (opts?.mode === 'firecrawl' || opts?.mode === 'hard') return true;
+function wantsCrawleeResearch(queries: string[], opts?: WebResearchOptions): boolean {
+  if (opts?.mode === 'crawlee' || opts?.mode === 'hard') return true;
   if (opts?.mode === 'perplexity' || opts?.mode === 'easy') return false;
   return queries.some((q) => SCRAPE_HEAVY_QUERY_RE.test(q));
 }
 
-type FirecrawlEndpoint = 'search' | 'scrape';
-
-/** One Firecrawl REST call. The same-origin function is tried first so Netlify
- *  deployments can keep FIRECRAWL_API_KEY server-side; direct API fallback keeps
- *  local/dev setups working when the user's key is saved in Account Settings. */
-async function firecrawlRequest(endpoint: FirecrawlEndpoint, body: Record<string, unknown>, key?: string): Promise<any | null> {
-  const payload = JSON.stringify(body);
-  const directAllowed = !!key;
-  const routes: { url: string; timeout: number; direct: boolean }[] = [
-    { url: `/.netlify/functions/firecrawl?endpoint=${endpoint}`, timeout: endpoint === 'scrape' ? 70000 : 35000, direct: false },
-    ...(directAllowed ? [{ url: `https://api.firecrawl.dev/v2/${endpoint}`, timeout: endpoint === 'scrape' ? 70000 : 35000, direct: true }] : []),
-  ];
-  for (const route of routes) {
-    for (let attempt = 0; attempt < 2; attempt++) {
-      try {
-        const headers: Record<string, string> = { 'Content-Type': 'application/json', Accept: 'application/json' };
-        if (key) headers.Authorization = `Bearer ${key}`;
-        const res = await fetchWithTimeout(route.url, route.timeout, { method: 'POST', headers, body: payload });
-        if (res.ok) return await res.json();
-        if ((res.status === 429 || res.status >= 500) && attempt === 0) {
-          await new Promise((r) => setTimeout(r, 1500));
-          continue;
-        }
-        if (res.status < 500 && res.status !== 429) {
-          const detail = await res.text().catch(() => '');
-          console.warn(`Firecrawl ${endpoint} HTTP ${res.status}:`, detail.slice(0, 200));
-          if (!route.direct) break;
-          return null;
-        }
-        break;
-      } catch {
-        if (attempt === 0) {
-          await new Promise((r) => setTimeout(r, 800));
-          continue;
-        }
-      }
-    }
-  }
-  return null;
-}
-
-function flattenFirecrawlSearchResults(data: any): FirecrawlResult[] {
-  const out: FirecrawlResult[] = [];
-  const push = (r: any) => {
-    if (!r || typeof r !== 'object') return;
-    const metadata = r.metadata || {};
-    const url = String(r.url || r.sourceURL || metadata.sourceURL || metadata.url || '').trim();
-    if (!url) return;
-    const markdown = typeof r.markdown === 'string' ? r.markdown : undefined;
-    const description = r.description || r.snippet || metadata.description || '';
-    out.push({
-      title: String(r.title || metadata.title || url),
-      url,
-      snippet: String(description || markdown || '').trim(),
-      markdown,
-      date: r.publishedDate || r.date || metadata.publishedTime || metadata.modifiedTime || undefined,
+async function crawleeScrapeBatch(urls: string[], queries: string[]): Promise<CrawleeResult[]> {
+  const targets = [...new Set(urls.map((url) => url.trim()).filter(Boolean))].slice(0, 8);
+  if (!targets.length) return [];
+  try {
+    const response = await fetchWithTimeout('/.netlify/functions/crawlee', 30000, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify({
+        urls: targets,
+        queries,
+        maxPages: Math.min(12, Math.max(6, targets.length + 4)),
+        maxDepth: 1,
+        maxCharsPerPage: 14000,
+      }),
     });
-  };
-
-  const candidates = [
-    data?.data?.web,
-    data?.data?.results,
-    data?.data,
-    data?.web,
-    data?.results,
-  ];
-  for (const c of candidates) {
-    if (Array.isArray(c)) {
-      c.forEach(push);
-      if (out.length) break;
+    if (!response.ok) {
+      console.warn(`Crawlee scraper HTTP ${response.status}:`, (await response.text().catch(() => '')).slice(0, 250));
+      return [];
     }
+    const payload = await response.json();
+    return Array.isArray(payload?.data?.results) ? payload.data.results : [];
+  } catch (error) {
+    console.warn('Crawlee scraper failed:', error);
+    return [];
   }
-  return out;
 }
 
-export async function firecrawlSearchBatch(
-  queries: string[],
-  opts?: { maxResultsPerQuery?: number; country?: string },
-): Promise<FirecrawlResult[]> {
-  const key = getFirecrawlKey();
-  const qs = queries.map((q) => q.trim()).filter(Boolean);
-  if ((!key && !firecrawlProxyEnabled()) || qs.length === 0) return [];
-  const bodies = qs.map((query) => ({
-    query,
-    limit: Math.min(20, Math.max(1, opts?.maxResultsPerQuery ?? 6)),
-    sources: ['web'],
-    country: opts?.country ?? 'US',
-    scrapeOptions: {
-      formats: ['markdown'],
-      onlyMainContent: true,
-      removeBase64Images: true,
-    },
-  }));
-  const responses = await Promise.all(bodies.map((b) => firecrawlRequest('search', b, key)));
-  const seen = new Set<string>();
-  const merged: FirecrawlResult[] = [];
-  for (const resp of responses) {
-    for (const r of flattenFirecrawlSearchResults(resp)) {
-      if (!seen.has(r.url)) {
-        seen.add(r.url);
-        merged.push(r);
-      }
-    }
-  }
-  return merged;
-}
-
-export async function firecrawlScrapeUrl(url: string): Promise<FirecrawlResult | null> {
-  const key = getFirecrawlKey();
-  const target = url.trim();
-  if ((!key && !firecrawlProxyEnabled()) || !target) return null;
-  const resp = await firecrawlRequest('scrape', {
-    url: target,
-    formats: ['markdown'],
-    onlyMainContent: true,
-    removeBase64Images: true,
-    timeout: 60000,
-  }, key);
-  const data = resp?.data || resp;
-  const metadata = data?.metadata || {};
-  const scrapedUrl = String(data?.url || data?.sourceURL || metadata.sourceURL || metadata.url || target);
-  const markdown = typeof data?.markdown === 'string' ? data.markdown : '';
-  if (!scrapedUrl || !markdown) return null;
-  return {
-    title: String(data?.title || metadata.title || scrapedUrl),
-    url: scrapedUrl,
-    snippet: markdown.slice(0, 1200),
-    markdown,
-    date: data?.publishedDate || metadata.publishedTime || metadata.modifiedTime || undefined,
-  };
-}
-
-function formatFirecrawlSources(results: FirecrawlResult[], maxSources = 24, maxSnippetChars = 1200): string {
+function formatCrawleeSources(results: CrawleeResult[], maxSources = 24, maxSnippetChars = 1400): string {
   return results.slice(0, maxSources).map((r, i) => {
-    const body = (r.markdown || r.snippet || '').slice(0, maxSnippetChars);
-    return `[${i + 1}] ${r.title}${r.date ? ` (${r.date})` : ''}\nURL: ${r.url}\n${body}`;
+    const body = (r.content || r.snippet || '').slice(0, maxSnippetChars);
+    return `[${i + 1}] ${r.title}${r.date ? ` (${r.date})` : ''} [${r.kind}]\nURL: ${r.url}\n${body}`;
   }).join('\n\n');
 }
 
-async function firecrawlResearchBlock(queries: string[], opts?: WebResearchOptions): Promise<{ block: string; urls: string[] }> {
-  const results = await firecrawlSearchBatch(queries, { maxResultsPerQuery: opts?.maxResultsPerQuery ?? 6 });
+async function crawleeResearchBlock(searchResults: PplxResult[], queries: string[], opts?: WebResearchOptions): Promise<{ block: string; urls: string[] }> {
+  const results = await crawleeScrapeBatch(searchResults.map((result) => result.url), queries);
   if (!results.length) return { block: '', urls: [] };
   return {
-    block: `\n\nLIVE WEB SEARCH RESULTS (Firecrawl Search API - ranked, current, with extracted page content). Base every figure on THESE sources and cite their URLs in "sources"; do not invent anything beyond them:\n\n${formatFirecrawlSources(results, opts?.maxSources ?? 24)}`,
+    block: `\n\nLIVE WEB RESEARCH (Perplexity discovery + Crawlee page/document extraction). Base every figure on THESE extracted sources and cite their URLs in "sources"; do not invent anything beyond them:\n\n${formatCrawleeSources(results, opts?.maxSources ?? 24)}`,
     urls: results.map((r) => r.url),
   };
 }
@@ -550,18 +429,11 @@ function formatPplxSources(results: PplxResult[], maxSources = 24, maxSnippetCha
 /** The research block injected into a Gemini prompt in place of Google-Search
  *  grounding: many ranked sources with extracted content. '' = nothing found. */
 async function perplexityResearchBlock(queries: string[], opts?: WebResearchOptions): Promise<{ block: string; urls: string[] }> {
-  const firecrawlFirst = wantsFirecrawlResearch(queries, opts);
-  if (firecrawlFirst) {
-    const firecrawl = await firecrawlResearchBlock(queries, opts).catch(() => ({ block: '', urls: [] as string[] }));
-    if (firecrawl.block) return firecrawl;
-  }
   const results = await perplexitySearchBatch(queries, { maxResultsPerQuery: opts?.maxResultsPerQuery ?? 6 });
-  if (!results.length) {
-    if (!firecrawlFirst && firecrawlConfigured() && opts?.mode !== 'easy' && opts?.mode !== 'perplexity') {
-      const firecrawl = await firecrawlResearchBlock(queries, opts).catch(() => ({ block: '', urls: [] as string[] }));
-      if (firecrawl.block) return firecrawl;
-    }
-    return { block: '', urls: [] };
+  if (!results.length) return { block: '', urls: [] };
+  if (wantsCrawleeResearch(queries, opts)) {
+    const crawled = await crawleeResearchBlock(results, queries, opts);
+    if (crawled.block) return crawled;
   }
   return {
     block: `\n\nLIVE WEB SEARCH RESULTS (Perplexity Search API — ranked, current, with extracted page content). Base every figure on THESE sources and cite their URLs in "sources"; do not invent anything beyond them:\n\n${formatPplxSources(results, opts?.maxSources ?? 24)}`,
@@ -6898,33 +6770,18 @@ async function groundedDeepSeekText(prompt: string, systemText: string, searchQu
  *  DeepSeek real web access inside the fusion. Never throws; returns a short
  *  status string on error. */
 async function webSearchViaGemini(query: string, geminiKey: string): Promise<string> {
-  const firecrawlFirst = wantsFirecrawlResearch([query]);
-  if (firecrawlFirst) {
-    try {
-      const results = await firecrawlSearchBatch([query], { maxResultsPerQuery: 8 });
-      if (results.length) {
-        return results.slice(0, 8).map((r, i) => `[${i + 1}] ${r.title}${r.date ? ` (${r.date})` : ''} - ${(r.markdown || r.snippet).slice(0, 700)}`).join('\n')
-          + `\nSources: ${results.slice(0, 8).map((r) => r.url).join(' | ')}`;
-      }
-    } catch { /* fall through to Perplexity/Gemini */ }
-  }
   if (perplexityConfigured()) {
     try {
+      if (wantsCrawleeResearch([query])) {
+        const { block } = await perplexityResearchBlock([query], { maxResultsPerQuery: 8, maxSources: 8 });
+        if (block) return block;
+      }
       const results = await perplexitySearchBatch([query], { maxResultsPerQuery: 8, maxTokensPerPage: 900 });
       if (results.length) {
         return results.slice(0, 8).map((r, i) => `[${i + 1}] ${r.title}${r.date ? ` (${r.date})` : ''} — ${r.snippet.slice(0, 700)}`).join('\n')
           + `\nSources: ${results.slice(0, 8).map((r) => r.url).join(' | ')}`;
       }
       return '(no results found)';
-    } catch { /* fall through to grounding */ }
-  }
-  if (!firecrawlFirst && firecrawlConfigured()) {
-    try {
-      const results = await firecrawlSearchBatch([query], { maxResultsPerQuery: 8 });
-      if (results.length) {
-        return results.slice(0, 8).map((r, i) => `[${i + 1}] ${r.title}${r.date ? ` (${r.date})` : ''} - ${(r.markdown || r.snippet).slice(0, 700)}`).join('\n')
-          + `\nSources: ${results.slice(0, 8).map((r) => r.url).join(' | ')}`;
-      }
     } catch { /* fall through to grounding */ }
   }
   const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=${geminiKey}`;
