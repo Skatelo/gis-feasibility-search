@@ -75,6 +75,17 @@ export function setReportAutoGenerate(auto: boolean): void {
   try { localStorage.setItem(REPORT_MODE_KEY, auto ? 'auto' : 'manual'); } catch { /* ignore */ }
 }
 
+/** Remove legacy property-search result caches left by earlier app versions. */
+export function clearAddressSearchCache(): void {
+  try {
+    const prefixes = ['gisfs:geo:v1:', 'gisfs:zoning:v2:', 'gisfs:comps:v21:'];
+    for (let i = localStorage.length - 1; i >= 0; i--) {
+      const key = localStorage.key(i);
+      if (key && prefixes.some((prefix) => key.startsWith(prefix))) localStorage.removeItem(key);
+    }
+  } catch { /* storage unavailable */ }
+}
+
 
 
 const NC_GEOCODER = "https://services.nconemap.gov/secure/rest/services/AddressNC/AddressNC_geocoder/GeocodeServer/findAddressCandidates";
@@ -1163,7 +1174,7 @@ async function queryScStatewideParcelAttributes(lng: number, lat: number, where:
   ];
   for (const url of urls) {
     try {
-      const res = await fetchWithRetry(url, 2, 10000);
+      const res = await fetchWithRetry(url, 2, 10000, { cache: 'no-store' });
       if (!res.ok) continue;
       const data = await res.json();
       const attrs = data?.features?.[0]?.attributes;
@@ -1186,8 +1197,8 @@ async function queryCountyParcel(baseUrl: string, lng: number, lat: number) {
     // Independent fetches: the WGS84 boundary is the critical result — don't
     // let a failed native-SR (measurement) query discard a good parcel.
     const [wgsRes, spRes] = await Promise.allSettled([
-      fetchWithRetry(`${baseUrl}/query?${common}&outSR=4326&f=geojson`, 2, 10000),
-      fetchWithRetry(`${baseUrl}/query?${common}&f=json`, 2, 10000), // native SR (NC State Plane feet)
+      fetchWithRetry(`${baseUrl}/query?${common}&outSR=4326&f=geojson`, 2, 10000, { cache: 'no-store' }),
+      fetchWithRetry(`${baseUrl}/query?${common}&f=json`, 2, 10000, { cache: 'no-store' }), // native SR (NC State Plane feet)
     ]);
     if (wgsRes.status !== 'fulfilled') throw wgsRes.reason;
     const wgsJson = await wgsRes.value.json();
@@ -1228,7 +1239,7 @@ async function queryMecklenburgParcel(lng: number, lat: number) {
   if (!result) return null;
   try {
     const common = `geometry=${lng},${lat}&geometryType=esriGeometryPoint&inSR=4326&spatialRel=esriSpatialRelIntersects&where=1%3D1&outFields=*&returnGeometry=false&f=json`;
-    const res = await fetchWithRetry(`${cama}/query?${common}`, 2, 7000);
+    const res = await fetchWithRetry(`${cama}/query?${common}`, 2, 7000, { cache: 'no-store' });
     const camAttrs = (await res.json()).features?.[0]?.attributes;
     if (camAttrs) {
       const enriched = normalizeCountyParcelAttrs(camAttrs);
@@ -1310,26 +1321,6 @@ function generateSimulatedParcel(lng: number, lat: number, addressString: string
   };
 }
 
-interface CachedZoning { code: string; description: string; source: 'county-gis' | 'web' | undefined; sourceUrl?: string }
-const ZONING_CACHE_TTL_MS = 1000 * 60 * 60 * 24 * 30; // 30 days — zoning rarely changes between searches
-
-/** Reads a previously resolved zoning district for a parcel (skips slow re-lookups). */
-function readZoningCache(key: string): CachedZoning | null {
-  try {
-    const raw = localStorage.getItem(key);
-    if (!raw) return null;
-    const v = JSON.parse(raw);
-    if (!v || typeof v.ts !== 'number' || Date.now() - v.ts > ZONING_CACHE_TTL_MS) return null;
-    if (!v.code || v.code === 'N/A') return null;
-    return { code: v.code, description: v.description, source: v.source, sourceUrl: v.sourceUrl };
-  } catch { return null; }
-}
-
-/** Caches a resolved zoning district so re-runs/refinements are instant. */
-function writeZoningCache(key: string, z: CachedZoning): void {
-  try { localStorage.setItem(key, JSON.stringify({ ...z, ts: Date.now() })); } catch { /* quota / SSR — non-fatal */ }
-}
-
 /**
  * Auto-detect the NC/SC county for an address (so the user never picks one).
  * Google geocodes the address, then TIGERweb verifies the true county boundary.
@@ -1348,7 +1339,7 @@ async function countyAtPoint(lat: number, lng: number): Promise<CountyAtPointRes
     const url = `https://tigerweb.geo.census.gov/arcgis/rest/services/TIGERweb/State_County/MapServer/1/query` +
       `?geometry=${lng},${lat}&geometryType=esriGeometryPoint&inSR=4326&spatialRel=esriSpatialRelIntersects` +
       `&outFields=BASENAME,NAME,STATE&returnGeometry=false&f=json`;
-    const res = await fetchWithTimeout(url, 9000);
+    const res = await fetchWithTimeout(url, 9000, { cache: 'no-store' });
     if (!res.ok) return null;
     const data = await res.json();
     const a = data?.features?.[0]?.attributes;
@@ -1372,7 +1363,7 @@ async function incorporatedPlaceAtPoint(lat: number, lng: number): Promise<strin
     const url = `https://tigerweb.geo.census.gov/arcgis/rest/services/TIGERweb/Places_CouSub_ConCity_SubMCD/MapServer/4/query` +
       `?geometry=${lng},${lat}&geometryType=esriGeometryPoint&inSR=4326&spatialRel=esriSpatialRelIntersects` +
       `&outFields=BASENAME,NAME&returnGeometry=false&f=json`;
-    const res = await fetchWithTimeout(url, 9000);
+    const res = await fetchWithTimeout(url, 9000, { cache: 'no-store' });
     if (!res.ok) return null;
     const data = await res.json();
     const a = data?.features?.[0]?.attributes;
@@ -1387,7 +1378,7 @@ export async function detectNcCounty(address: string, googleKey: string): Promis
   try {
     const url = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(address)}` +
       `&key=${googleKey}`;
-    const res = await fetchWithTimeout(url, 8000);
+    const res = await fetchWithTimeout(url, 8000, { cache: 'no-store' });
     if (!res.ok) return null;
     const data = await res.json();
     if (data.status !== 'OK' || !data.results?.[0]) return null;
@@ -1428,7 +1419,7 @@ export async function lookupParcelById(pin: string, googleKey: string): Promise<
   const url = `${NC_PARCEL_ENGINE}?where=${encodeURIComponent(where)}` +
     `&outFields=${encodeURIComponent('parno,siteadd,scity,cntyname')}&returnGeometry=true&outSR=4326&resultRecordCount=1&f=json`;
   try {
-    const res = await fetchWithTimeout(url, 15000);
+    const res = await fetchWithTimeout(url, 15000, { cache: 'no-store' });
     if (!res.ok) return null;
     const data = await res.json();
     const feat = data?.features?.[0];
@@ -1453,7 +1444,7 @@ export async function lookupParcelById(pin: string, googleKey: string): Promise<
     // Vacant parcel with no situs address — reverse-geocode the polygon centroid.
     if (typeof lat === 'number' && typeof lng === 'number' && googleKey) {
       try {
-        const gr = await fetchWithTimeout(`https://maps.googleapis.com/maps/api/geocode/json?latlng=${lat},${lng}&key=${googleKey}`, 8000);
+        const gr = await fetchWithTimeout(`https://maps.googleapis.com/maps/api/geocode/json?latlng=${lat},${lng}&key=${googleKey}`, 8000, { cache: 'no-store' });
         if (gr.ok) {
           const gj = await gr.json();
           const best = gj.results?.find((r: any) => r.types?.some((t: string) => ['street_address', 'premise'].includes(t))) || gj.results?.[0];
@@ -1506,7 +1497,7 @@ export async function executeLandAnalysis(
     try {
       if (config.geocodeUrl) {
         const geocodeQuery = `${config.geocodeUrl}?SingleLine=${encodeURIComponent(addressString)}&outSR=4326&f=json`;
-        const geoResponse = await fetchWithRetry(geocodeQuery, 2, 5000); // fail fast
+        const geoResponse = await fetchWithRetry(geocodeQuery, 2, 5000, { cache: 'no-store' }); // fail fast
         const geoData = await geoResponse.json();
         if (geoData.candidates && geoData.candidates.length > 0) {
           lng = geoData.candidates[0].location.x;
@@ -1619,8 +1610,8 @@ export async function executeLandAnalysis(
     // and 5s single-shot was misreading "slow" as "offline".
     {
       const [wgsRes, spRes] = await Promise.allSettled([
-        fetchWithRetry(parcelQueryWgs84, 2, 12000),
-        fetchWithRetry(parcelQueryStatePlane, 2, 12000),
+        fetchWithRetry(parcelQueryWgs84, 2, 12000, { cache: 'no-store' }),
+        fetchWithRetry(parcelQueryStatePlane, 2, 12000, { cache: 'no-store' }),
       ]);
       if (wgsRes.status === 'fulfilled' && wgsRes.value.ok) {
         try { wgs84Data = await wgsRes.value.json(); } catch { /* malformed body — treat as miss */ }
@@ -1643,8 +1634,8 @@ export async function executeLandAnalysis(
       parcelQueryStatePlane = `${parcelEndpoint}?geometry=${envGeometry}&geometryType=esriGeometryEnvelope&inSR=4326&spatialRel=esriSpatialRelIntersects&where=${encodeURIComponent(parcelWhere)}&outFields=${selectedState === 'NC' ? 'parno' : encodeURIComponent(parcelOutFields)}&returnGeometry=true&outSR=${measurementOutSr}&f=json`;
 
       const [wgsRes, spRes] = await Promise.allSettled([
-        fetchWithTimeout(parcelQueryWgs84, 10000),
-        fetchWithTimeout(parcelQueryStatePlane, 10000),
+        fetchWithTimeout(parcelQueryWgs84, 10000, { cache: 'no-store' }),
+        fetchWithTimeout(parcelQueryStatePlane, 10000, { cache: 'no-store' }),
       ]);
       if (wgsRes.status === 'fulfilled' && wgsRes.value.ok) {
         try { wgs84Data = await wgsRes.value.json(); } catch { /* malformed body */ }
@@ -2020,21 +2011,14 @@ export async function executeLandAnalysis(
   // confirms it against the official zoning map (or fills it in for city parcels
   // the county layer leaves blank). GIS stays authoritative — the AI confirms it,
   // fills gaps, or flags a discrepancy to verify. Never fabricated.
-  // Cache the RESOLVED district by parcel so re-running a search is instant.
-  const zoningCacheKey = `gisfs:zoning:v2:${parcelId !== 'N/A' ? parcelId : `${countyName}:${lat.toFixed(5)}:${lng.toFixed(5)}`}`;
-  const cachedZoning = readZoningCache(zoningCacheKey);
+  // Always resolve the current district for each submitted search. Zoning and
+  // official source pages can change, so repeat searches must not reuse a prior run.
   const parcelZoning = String(info.zoning || '').trim();
   if (parcelZoning && parcelZoning.toUpperCase() !== 'N/A') {
     zoningCode = parcelZoning;
     zoningDescription = `${countyName} County GIS parcel zoning district`;
     zoningSource = 'county-gis';
     zoningSourceUrl = undefined;
-    writeZoningCache(zoningCacheKey, { code: zoningCode, description: zoningDescription, source: zoningSource, sourceUrl: zoningSourceUrl });
-  } else if (cachedZoning) {
-    zoningCode = cachedZoning.code;
-    zoningDescription = cachedZoning.description;
-    zoningSource = cachedZoning.source;
-    zoningSourceUrl = cachedZoning.sourceUrl;
   } else {
     onStageChange?.("Resolving zoning (county GIS + AI)...");
     const gisZoning = await fetchCountyZoningCode(countyName, lng, lat).catch(() => null);
@@ -2066,9 +2050,6 @@ export async function executeLandAnalysis(
       zoningDescription = hasCountyZoning(countyName)
         ? `Not auto-resolved at the parcel point — to be verified against ${countyName} County GIS`
         : "No published county zoning GIS; web lookup found nothing";
-    }
-    if (zoningCode && zoningCode !== 'N/A') {
-      writeZoningCache(zoningCacheKey, { code: zoningCode, description: zoningDescription, source: zoningSource, sourceUrl: zoningSourceUrl });
     }
   }
   gridics = buildGridics(); // re-derive setback/height estimates from the real district
@@ -3767,25 +3748,10 @@ export function getUseCategory(zoningCode: string, zoningDesc: string): 'residen
   return getPermittedCategory(zoningCode, zoningDesc);
 }
 
-const GEOCODE_CACHE_PREFIX = "gisfs:geo:v1:";
-const GEOCODE_CACHE_TTL_MS = 90 * 24 * 60 * 60 * 1000; // 90 days per spec
-
 async function geocodeAddress(address: string, apiKey: string): Promise<{ lat: number; lng: number } | null> {
-  // 90-day geocode cache (Google Geocoding is the only geocoder).
-  const geoKey = GEOCODE_CACHE_PREFIX + address.toLowerCase().trim().replace(/\s+/g, " ");
-  try {
-    const raw = localStorage.getItem(geoKey);
-    if (raw) {
-      const v = JSON.parse(raw);
-      if (Number.isFinite(v?.lat) && Number.isFinite(v?.lng) && Date.now() - (v.t || 0) < GEOCODE_CACHE_TTL_MS) {
-        return { lat: v.lat, lng: v.lng };
-      }
-    }
-  } catch { /* ignore */ }
-
   const url = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(address)}&key=${apiKey}`;
   try {
-    const res = await fetchWithTimeout(url, 8000);
+    const res = await fetchWithTimeout(url, 8000, { cache: 'no-store' });
     if (res.ok) {
       const data = await res.json();
       if (data.status === "OK" && data.results && data.results[0]) {
@@ -3810,7 +3776,6 @@ async function geocodeAddress(address: string, apiKey: string): Promise<{ lat: n
             lat: result.geometry.location.lat,
             lng: result.geometry.location.lng
           };
-          try { localStorage.setItem(geoKey, JSON.stringify({ ...coords, t: Date.now() })); } catch { /* ignore */ }
           return coords;
         } else {
           console.warn(`Geocoding rejected address "${address}" because it does not resolve to a specific property. Types: ${JSON.stringify(result.types)}`);
@@ -4207,45 +4172,6 @@ function updateZipHealth(zip: string, productive: boolean): void {
     h[zip] = { empty, dead: empty >= 2 };
   }
   writeZipHealth(h);
-}
-
-// ---------------------------------------------------------------------------
-// Comp result cache. The Gemini/Google-Search comp discovery is inherently
-// non-deterministic, so without a cache the SAME address could return a
-// DIFFERENT comp set on every run. We persist the final verified comp set per
-// parcel location (localStorage, 7-day TTL) so repeat searches on the same
-// address are instant AND return identical comps.
-// ---------------------------------------------------------------------------
-const COMPS_CACHE_PREFIX = "gisfs:comps:v21:"; // v21 = Gemini Vision picks the building-EXTERIOR photo per comp
-const COMPS_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
-
-function compsCacheKey(lat: number, lng: number, category: string, radiusMiles = 5): string {
-  // ~1m coordinate precision → the same parcel+radius always maps to the same key.
-  return `${COMPS_CACHE_PREFIX}${lat.toFixed(5)},${lng.toFixed(5)}|${category}|r${radiusMiles}`;
-}
-
-function readCompsCache(key: string): { comps: CompProperty[]; summary: string } | null {
-  try {
-    const raw = localStorage.getItem(key);
-    if (!raw) return null;
-    const entry = JSON.parse(raw);
-    if (!entry || !Array.isArray(entry.comps) || typeof entry.t !== "number") return null;
-    if (Date.now() - entry.t > COMPS_CACHE_TTL_MS) {
-      localStorage.removeItem(key);
-      return null;
-    }
-    return { comps: entry.comps as CompProperty[], summary: typeof entry.summary === "string" ? entry.summary : "" };
-  } catch {
-    return null;
-  }
-}
-
-function writeCompsCache(key: string, comps: CompProperty[], summary: string): void {
-  try {
-    localStorage.setItem(key, JSON.stringify({ t: Date.now(), comps, summary }));
-  } catch {
-    // localStorage full/unavailable — caching is best-effort only.
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -5322,9 +5248,6 @@ export async function fetchGoogleDistanceMatrixComps(
   _countyName: string,
   onStageChange?: (stage: string) => void,
   maxRadiusMiles = 5,
-  /** true = skip the deterministic comps cache and run a FRESH search (used by
-   *  the 3/5/10-mile radius pills so every click re-runs the comps). */
-  bypassCache = false,
 ): Promise<CompRunResult> {
   onStageChange?.("Searching sold listings...");
 
@@ -5342,17 +5265,6 @@ export async function fetchGoogleDistanceMatrixComps(
 
   // Permitted use category (drives the Realtor search property type).
   const category = getPermittedCategory(zoningCode, zoningDesc);
-
-  // Same address+radius searched again? Return the EXACT same verified comp set
-  // — unless the caller asked for a fresh run (radius-pill clicks).
-  const cacheKey = compsCacheKey(lat, lng, category, EXPANDED_RADIUS_MILES);
-  if (!bypassCache) {
-    const cached = readCompsCache(cacheKey);
-    if (cached && cached.comps.length > 0) {
-      console.log(`Returning ${cached.comps.length} cached comps for this parcel (deterministic re-run).`);
-      return cached;
-    }
-  }
 
   // Straight-line (haversine-approx) miles from the subject to a candidate.
   const straightMiles = (c: { coords: { lat: number; lng: number } }) => {
@@ -5596,7 +5508,6 @@ export async function fetchGoogleDistanceMatrixComps(
   await selectExteriorComps(result, getBackgroundGeminiKey());
 
   console.log(`Returning ${result.length} verified new-construction comps.`);
-  if (result.length > 0) writeCompsCache(cacheKey, result, summary);
   return { comps: result, summary };
 }
 
