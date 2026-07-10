@@ -27,6 +27,8 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
   const [showGeminiKey2, setShowGeminiKey2] = useState(false);
   const [perplexityKey, setPerplexityKey] = useState('');
   const [showPerplexityKey, setShowPerplexityKey] = useState(false);
+  const [firecrawlKey, setFirecrawlKey] = useState('');
+  const [showFirecrawlKey, setShowFirecrawlKey] = useState(false);
   const [mapboxToken, setMapboxToken] = useState('');
   const [showMapboxToken, setShowMapboxToken] = useState(false);
   const [enformionName, setEnformionName] = useState('');
@@ -57,6 +59,7 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
       setGeminiKey(activeUser.keys?.gemini || '');
       setGeminiKey2(activeUser.keys?.gemini2 || '');
       setPerplexityKey(activeUser.keys?.perplexity || '');
+      setFirecrawlKey(activeUser.keys?.firecrawl || '');
       setMapboxToken(activeUser.keys?.mapbox || '');
       setEnformionName(activeUser.keys?.enformionApName || '');
       setEnformionPassword(activeUser.keys?.enformionApPassword || '');
@@ -94,6 +97,7 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
       gemini: geminiKey.trim(),
       gemini2: geminiKey2.trim(),
       perplexity: perplexityKey.trim(),
+      firecrawl: firecrawlKey.trim(),
       mapbox: mapboxToken.trim(),
       enformionApName: enformionName.trim(),
       enformionApPassword: enformionPassword.trim(),
@@ -163,7 +167,7 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
           <div className="settings-notice">
             <Info size={16} className="notice-icon" />
             <p>
-              Your API keys are stored entirely inside your browser's local sandbox. They are never sent to external servers except direct connections to the Google, Gemini, and RealtyAPI APIs.
+              Your API keys are stored entirely inside your browser's local sandbox. They are sent only to the APIs or same-origin proxy routes needed for the services you enable.
             </p>
           </div>
 
@@ -436,6 +440,32 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
                 </button>
               </div>
               <p className="field-help">Enriches the Investor Buyer List with REAL last-sale prices &amp; dates from RentCast (api.rentcast.io), on demand for the buyers you choose. RentCast bills per request and free plans are limited, so enrichment is opt-in and capped. Get a key at app.rentcast.io.</p>
+            </div>
+
+            {/* Firecrawl - preferred live web data source for search + scrape */}
+            <div className="settings-field-group">
+              <div className="field-label-row">
+                <label htmlFor="firecrawlKey">Firecrawl API Key (web scrape/search)</label>
+                <span className="badge optional">Optional</span>
+              </div>
+              <div className="field-input-container">
+                <Key className="input-icon" size={16} />
+                <input
+                  id="firecrawlKey"
+                  type={showFirecrawlKey ? "text" : "password"}
+                  placeholder="fc-..."
+                  value={firecrawlKey}
+                  onChange={(e) => setFirecrawlKey(e.target.value)}
+                />
+                <button
+                  type="button"
+                  className="field-toggle-btn"
+                  onClick={() => setShowFirecrawlKey(!showFirecrawlKey)}
+                >
+                  {showFirecrawlKey ? <EyeOff size={16} /> : <Eye size={16} />}
+                </button>
+              </div>
+              <p className="field-help">When set, Firecrawl handles scrape-heavy research like zoning pages, ordinances, fee schedules, utility pages, and source packs that need clean page extraction. Perplexity still handles fast/easy searches first.</p>
             </div>
 
           </div>

@@ -15,9 +15,9 @@ export interface UserKeys {
    *  runs on the Perplexity Search API (parallel batched queries, many ranked
    *  sources) instead of Gemini's Google-Search grounding. */
   perplexity?: string;
-  /** Firecrawl API key - preferred live web data source for search/scrape.
-   *  When set, Firecrawl feeds the same zoning, costs, utilities, rates, and
-   *  report research paths before the app falls back to Perplexity/Gemini. */
+  /** Firecrawl API key - deep live-web source for scrape-heavy research.
+   *  Perplexity handles fast/easy searches; Firecrawl handles harder source
+   *  packs where clean page extraction matters, with Gemini as fallback. */
   firecrawl?: string;
   /** Mapbox public access token (pk.…) — satellite base map for the parcel aerial view. */
   mapbox?: string;
@@ -289,6 +289,23 @@ export function liveWebResearchConfigured(): boolean {
 export interface PplxResult { title: string; url: string; snippet: string; date?: string }
 export interface FirecrawlResult { title: string; url: string; snippet: string; markdown?: string; date?: string }
 
+type WebResearchMode = 'auto' | 'easy' | 'hard' | 'perplexity' | 'firecrawl';
+interface WebResearchOptions {
+  maxResultsPerQuery?: number;
+  maxSources?: number;
+  mode?: WebResearchMode;
+}
+
+const SCRAPE_HEAVY_QUERY_RE = /\b(ordinance|code\s+of\s+ordinances|zoning\s+(map|ordinance|district|lookup)|parcel\s+viewer|gis|planning\s+department|permit\s+fees?|fee\s+schedule|tap\s+fees?|impact\s+fees?|water\s+sewer|utilities|well\s+septic|minimum\s+lot|setbacks?|subdivision|rezoning|registered\s+agent|secretary\s+of\s+state|annual\s+report|bizapedia|corporationwiki|contractor|material\s+prices?|construction\s+costs?)\b/i;
+
+function wantsFirecrawlResearch(queries: string[], opts?: WebResearchOptions): boolean {
+  if (!firecrawlConfigured()) return false;
+  if (!perplexityConfigured()) return true;
+  if (opts?.mode === 'firecrawl' || opts?.mode === 'hard') return true;
+  if (opts?.mode === 'perplexity' || opts?.mode === 'easy') return false;
+  return queries.some((q) => SCRAPE_HEAVY_QUERY_RE.test(q));
+}
+
 type FirecrawlEndpoint = 'search' | 'scrape';
 
 /** One Firecrawl REST call. The same-origin function is tried first so Netlify
@@ -428,7 +445,7 @@ function formatFirecrawlSources(results: FirecrawlResult[], maxSources = 24, max
   }).join('\n\n');
 }
 
-async function firecrawlResearchBlock(queries: string[], opts?: { maxResultsPerQuery?: number; maxSources?: number }): Promise<{ block: string; urls: string[] }> {
+async function firecrawlResearchBlock(queries: string[], opts?: WebResearchOptions): Promise<{ block: string; urls: string[] }> {
   const results = await firecrawlSearchBatch(queries, { maxResultsPerQuery: opts?.maxResultsPerQuery ?? 6 });
   if (!results.length) return { block: '', urls: [] };
   return {
@@ -532,13 +549,20 @@ function formatPplxSources(results: PplxResult[], maxSources = 24, maxSnippetCha
 
 /** The research block injected into a Gemini prompt in place of Google-Search
  *  grounding: many ranked sources with extracted content. '' = nothing found. */
-async function perplexityResearchBlock(queries: string[], opts?: { maxResultsPerQuery?: number; maxSources?: number }): Promise<{ block: string; urls: string[] }> {
-  if (firecrawlConfigured()) {
+async function perplexityResearchBlock(queries: string[], opts?: WebResearchOptions): Promise<{ block: string; urls: string[] }> {
+  const firecrawlFirst = wantsFirecrawlResearch(queries, opts);
+  if (firecrawlFirst) {
     const firecrawl = await firecrawlResearchBlock(queries, opts).catch(() => ({ block: '', urls: [] as string[] }));
     if (firecrawl.block) return firecrawl;
   }
   const results = await perplexitySearchBatch(queries, { maxResultsPerQuery: opts?.maxResultsPerQuery ?? 6 });
-  if (!results.length) return { block: '', urls: [] };
+  if (!results.length) {
+    if (!firecrawlFirst && firecrawlConfigured() && opts?.mode !== 'easy' && opts?.mode !== 'perplexity') {
+      const firecrawl = await firecrawlResearchBlock(queries, opts).catch(() => ({ block: '', urls: [] as string[] }));
+      if (firecrawl.block) return firecrawl;
+    }
+    return { block: '', urls: [] };
+  }
   return {
     block: `\n\nLIVE WEB SEARCH RESULTS (Perplexity Search API — ranked, current, with extracted page content). Base every figure on THESE sources and cite their URLs in "sources"; do not invent anything beyond them:\n\n${formatPplxSources(results, opts?.maxSources ?? 24)}`,
     urls: results.map((r) => r.url),
@@ -2573,7 +2597,7 @@ Rules: NEVER invent names, addresses, IDs, or dates — use null for anything no
       `"${name}" bizapedia`,
       `"${name}" corporationwiki manager member`,
       `"${name}" LLC ${state} annual report officers`,
-    ], { maxResultsPerQuery: 6, maxSources: 18 }).catch(() => ({ block: '', urls: [] as string[] }));
+    ], { maxResultsPerQuery: 6, maxSources: 18, mode: 'hard' }).catch(() => ({ block: '', urls: [] as string[] }));
     llcResearch = block;
   }
 
@@ -3967,7 +3991,7 @@ async function zoningViaGemini(promptText: string, geminiKey: string, searchQuer
     let effectivePrompt = promptText;
     let usePerplexity = false;
     if (searchQueries && searchQueries.length && liveWebResearchConfigured()) {
-      const { block } = await perplexityResearchBlock(searchQueries, { maxResultsPerQuery: 6, maxSources: 18 });
+      const { block } = await perplexityResearchBlock(searchQueries, { maxResultsPerQuery: 6, maxSources: 18, mode: 'hard' });
       if (block) { effectivePrompt = promptText + block; usePerplexity = true; }
     }
     const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=${geminiKey}`;
@@ -3997,7 +4021,7 @@ async function zoningViaDeepSeek(promptText: string, searchQueries?: string[]): 
   try {
     let effectivePrompt = promptText;
     if (searchQueries && searchQueries.length && liveWebResearchConfigured()) {
-      const { block } = await perplexityResearchBlock(searchQueries, { maxResultsPerQuery: 6, maxSources: 18 });
+      const { block } = await perplexityResearchBlock(searchQueries, { maxResultsPerQuery: 6, maxSources: 18, mode: 'hard' });
       if (block) { effectivePrompt = promptText + block; }
     }
     const body = JSON.stringify({
@@ -6848,7 +6872,7 @@ async function groundedDeepSeekText(prompt: string, systemText: string, searchQu
     // Pull a WIDE set of sources for the utilities lookup — more results per
     // query and a higher source cap so DeepSeek synthesizes from many fee
     // schedules / contractor pages, not one or two.
-    const { block, urls } = await perplexityResearchBlock(searchQueries, { maxResultsPerQuery: 10, maxSources: 40 });
+    const { block, urls } = await perplexityResearchBlock(searchQueries, { maxResultsPerQuery: 10, maxSources: 40, mode: 'hard' });
     if (diag) { diag.perplexitySources = urls.length; diag.perplexityUrls = urls; }
     if (block) effectivePrompt = prompt + block;
   }
@@ -6874,7 +6898,8 @@ async function groundedDeepSeekText(prompt: string, systemText: string, searchQu
  *  DeepSeek real web access inside the fusion. Never throws; returns a short
  *  status string on error. */
 async function webSearchViaGemini(query: string, geminiKey: string): Promise<string> {
-  if (firecrawlConfigured()) {
+  const firecrawlFirst = wantsFirecrawlResearch([query]);
+  if (firecrawlFirst) {
     try {
       const results = await firecrawlSearchBatch([query], { maxResultsPerQuery: 8 });
       if (results.length) {
@@ -6891,6 +6916,15 @@ async function webSearchViaGemini(query: string, geminiKey: string): Promise<str
           + `\nSources: ${results.slice(0, 8).map((r) => r.url).join(' | ')}`;
       }
       return '(no results found)';
+    } catch { /* fall through to grounding */ }
+  }
+  if (!firecrawlFirst && firecrawlConfigured()) {
+    try {
+      const results = await firecrawlSearchBatch([query], { maxResultsPerQuery: 8 });
+      if (results.length) {
+        return results.slice(0, 8).map((r, i) => `[${i + 1}] ${r.title}${r.date ? ` (${r.date})` : ''} - ${(r.markdown || r.snippet).slice(0, 700)}`).join('\n')
+          + `\nSources: ${results.slice(0, 8).map((r) => r.url).join(' | ')}`;
+      }
     } catch { /* fall through to grounding */ }
   }
   const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=${geminiKey}`;
@@ -7200,7 +7234,7 @@ ${reportData.comps && reportData.comps.length > 0
       `${county} County NC residential building permit fees`,
       `residential lot land prices ${county} County NC ${yr}`,
       `${reportData.zoningCode ? `${reportData.zoningCode} zoning district ${county} County NC minimum lot size` : `${county} County NC zoning ordinance minimum lot size`}`,
-    ], { maxResultsPerQuery: 5, maxSources: 30 }).catch(() => ({ block: '', urls: [] as string[] }));
+    ], { maxResultsPerQuery: 5, maxSources: 30, mode: 'hard' }).catch(() => ({ block: '', urls: [] as string[] }));
     if (block) {
       reportContextFull = `${reportContext}\n### 6. LIVE WEB RESEARCH PACK${block}`;
       researchUrls = urls;
