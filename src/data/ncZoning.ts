@@ -355,7 +355,7 @@ async function identifyZoning(service: ZoningService, lng: number, lat: number):
       returnGeometry: "false",
       f: "json",
     });
-    return fetch(`${service.url}/identify?${params.toString()}`)
+    return fetch(`${service.url}/identify?${params.toString()}`, { cache: 'no-store' })
       .then((res) => (res.ok ? res.json() : null))
       .then((data) => (Array.isArray(data?.results) && data.results.length ? extractZoning(data.results) : null))
       .catch((e) => { console.warn(`Zoning identify failed for ${service.url}:`, e); return null; });

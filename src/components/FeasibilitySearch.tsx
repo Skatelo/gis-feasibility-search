@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import type { FormEvent, KeyboardEvent, FC } from 'react';
 import { createRoot } from 'react-dom/client';
-import { executeLandAnalysis, chatWithGemini, chatFollowUp, getUserKeys, getMapboxToken, detectNcCounty, lookupParcelById, fetchConstructionCostEstimate, fetchLandClearingEstimate, fetchUtilitiesEstimate, fetchGoogleDistanceMatrixComps, fetchParcelsInBbox, getCompPrefs, getReportAutoGenerate, enformionConfigured, enformionContactEnrich, enformionPersonSearch, enformionBusinessSearch, looksLikeBusiness, enformionDiagMessage, getLastEnformionShape, getLastEnformionDetail, enformionPropertySearch, ncAddressSuggestions } from '../services/feasibilityService';
+import { executeLandAnalysis, chatWithGemini, chatFollowUp, getUserKeys, getMapboxToken, detectNcCounty, lookupParcelById, fetchConstructionCostEstimate, fetchLandClearingEstimate, fetchUtilitiesEstimate, fetchGoogleDistanceMatrixComps, fetchParcelsInBbox, getCompPrefs, getReportAutoGenerate, clearAddressSearchCache, enformionConfigured, enformionContactEnrich, enformionPersonSearch, enformionBusinessSearch, looksLikeBusiness, enformionDiagMessage, getLastEnformionShape, getLastEnformionDetail, enformionPropertySearch, ncAddressSuggestions } from '../services/feasibilityService';
 import type { SkipTraceContact, EnformionPropertyRecord } from '../services/feasibilityService';
 import type { ChatMessage, ChatAttachment } from '../services/feasibilityService';
 import { saveReport, getReportEtaMs, recordReportDuration } from '../services/reportStore';
@@ -1034,8 +1034,8 @@ export const FeasibilitySearch: FC = () => {
   //  no separate "Generate Cost Estimate" button.)
 
   // Re-run the comps for the current parcel at the chosen max DRIVING-mile
-  // radius (3 / 5 / 10). EVERY pill click triggers a FRESH comps run for that
-  // radius (cache bypassed), so the comp set always reflects the chosen miles.
+  // radius (3 / 5 / 10). Every run is fresh, so the comp set always reflects
+  // the latest submitted search and chosen radius.
   // The report itself stays as generated. Failures surface in the card.
   const changeCompRadius = async (newRadius: number) => {
     if (compsRefetching) return; // one run at a time
@@ -1057,7 +1057,6 @@ export const FeasibilitySearch: FC = () => {
         d.countyName || '',
         undefined,
         newRadius,
-        true, // fresh run — never serve the cached set for a radius click
       );
       if (seq !== searchSeqRef.current) return; // a new search superseded this
       setData((prev) => (prev ? { ...prev, comps: run.comps, compRunSummary: run.summary } : prev));
@@ -2854,6 +2853,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
     }
 
     const seq = ++searchSeqRef.current; // invalidates any in-flight previous search
+    clearAddressSearchCache(); // repeat submissions must perform fresh geocode/zoning/comp lookups
     searchedAddressRef.current = addressToSearch.trim(); // full "street, city, state" for Enformion
     // Comp-search preferences (Account & API Settings) drive the search radius +
     // the initial property-type filter for this run.
@@ -3003,10 +3003,9 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
 
   const handleHistoryClick = (item: any) => {
     const address = typeof item === 'string' ? item : item.address;
-    const county = typeof item === 'string' ? undefined : item.county;
     setSearchMode('address');
     setAddressInput(address);
-    handleSearch(address, county);
+    handleSearch(address);
   };
 
   const handleCopy = (text: string, id: string) => {
