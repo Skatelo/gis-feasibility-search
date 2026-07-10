@@ -23,6 +23,11 @@ function groupCostItems(items: CostLineItem[]): [string, CostLineItem[]][] {
   }
   return order.map((k) => [k, groups[k]]);
 }
+
+const optionalCurrency = (value?: number): string =>
+  typeof value === 'number' && Number.isFinite(value)
+    ? `$${new Intl.NumberFormat().format(value)}`
+    : 'Unavailable';
 import { getZoningServices, hasCountyZoning } from '../data/ncZoning';
 import { fetchOsmFeatures } from '../data/osmFeatures';
 import {
@@ -63,6 +68,7 @@ import {
   TrendingUp,
   ImageOff,
   Landmark,
+  Building2,
   Hammer,
   Trees,
   Droplets,
@@ -709,6 +715,7 @@ export const FeasibilitySearch: FC = () => {
   const [enfLoading, setEnfLoading] = useState(false);
   const [enfErrors, setEnfErrors] = useState<{ property?: string }>({});
   const enfIdle = !enfProperty && !enfErrors.property && !enfLoading;
+  const showEnformionPropertyPanel: boolean = false;
   // Manual report mode: report awaits the "Generate AI Report" button
   const [reportPending, setReportPending] = useState(false);
   // Owner skip trace (Enformion) — phones/emails for the parcel owner
@@ -1016,9 +1023,8 @@ export const FeasibilitySearch: FC = () => {
     return estPromise;
   };
 
-  // Fire every per-parcel lookup for a fresh search: cost + takeoff, tree
-  // clearing, utilities, and Enformion records — each in its own card/section
-  // with its own error + Retry handling.
+  // Fire the free/background per-parcel lookups for a fresh search. Enformion is
+  // deliberately absent: it runs only when the user clicks the paid Skip Trace.
   const generateCostEstimates = (reportData: SiteFeasibilityData, seq: number): Promise<ConstructionCostEstimate | null> => {
     // Land-clearing / site-prep estimate (rule-based + satellite vision).
     runLandClearingLookup(reportData, seq);
@@ -3381,17 +3387,27 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                   </div>
                 </div>
               )}
+              {data.geometryStatus === 'stale-hidden' && (
+                <div className="card" style={{ background: 'var(--warning-bg, #fef3c7)', border: '1px solid var(--warning-border, #f59e0b)', color: 'var(--warning-text, #78350f)', padding: '10px 15px', borderRadius: 'var(--radius-md)', marginBottom: '15px', display: 'flex', alignItems: 'center', gap: '10px' }}>
+                  <AlertCircle size={20} style={{ color: '#d97706', flexShrink: 0 }} />
+                  <div style={{ fontSize: '0.78rem', lineHeight: '1.4' }}>
+                    <strong>Stale statewide parcel boundary hidden</strong><br />
+                    The SCDOT polygon did not match the current county assessor record.
+                    {data.parcelSourceUrl && <> <a href={data.parcelSourceUrl} target="_blank" rel="noreferrer">Verify on the official county map</a>.</>}
+                  </div>
+                </div>
+              )}
               {/* Screenshot-Style Parcel Header Card */}
               <div className="card registry-header-card">
                 {/* Big Title Name */}
                 <h3 className="registry-title-name">
-                  {data.ownerName || "Property Owner"}
+                  {data.ownerName || "Owner unavailable"}
                 </h3>
                 <div className="registry-title-address">
                   {data.inputAddress}
                 </div>
                 <div className="registry-title-acres">
-                  {data.gisAcres.toFixed(2)} acres
+                  {data.gisAcres > 0 ? `${data.gisAcres.toFixed(2)} acres` : 'Acreage unavailable'}
                 </div>
 
                 {/* Quick Action Buttons */}
@@ -3462,7 +3478,15 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
 
               {/* Card 1: Owner Information */}
               <div className="card registry-card">
-                <h3 className="registry-card-header">Owner Information</h3>
+                <h3 className="registry-card-header">
+                  {data.ownerRecordType === 'deed'
+                    ? 'Latest Deed Grantee'
+                    : data.ownerRecordType === 'assessor'
+                      ? 'Assessor Owner'
+                      : data.ownerRecordType === 'gis'
+                        ? 'GIS Tax-Roll Owner'
+                        : 'Owner Verification'}
+                </h3>
                 <div className="registry-list">
                   <div className="registry-row">
                     <div className="registry-label-with-icon">
@@ -3484,12 +3508,19 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                       {copiedId === "mailAddress" ? <Check size={14} className="success-icon" /> : <Copy size={14} />}
                     </button>
                   </div>
+                  <div className="registry-row">
+                    <div className="registry-label-with-icon">
+                      <Database size={16} className="registry-icon-blue" />
+                      <span>{data.parcelSourceName || (data.parcelVerificationStatus === 'verified' ? 'Official county record' : 'County verification unavailable')}</span>
+                    </div>
+                    {data.parcelSourceUrl && <a href={data.parcelSourceUrl} target="_blank" rel="noreferrer">Official record</a>}
+                  </div>
 
                   {/* Skip Trace Owner (Enformion) — phones & emails for this owner */}
                   <div className="owner-skip">
-                    <button type="button" className="owner-skip-btn" onClick={skipTraceOwner} disabled={ownerSkipLoading || !data.ownerName}>
+                    <button type="button" className="owner-skip-btn" onClick={skipTraceOwner} disabled={ownerSkipLoading || !data.ownerName} title="Optional paid lookup: this may consume Enformion credits">
                       {ownerSkipLoading ? <Loader2 size={14} className="spinner" /> : <Fingerprint size={14} />}
-                      {ownerSkipLoading ? 'Skip tracing…' : 'Skip Trace Owner'}
+                      {ownerSkipLoading ? 'Skip tracing…' : 'Skip Trace Owner (Paid)'}
                     </button>
                     {ownerSkip && (ownerSkip.phones.length > 0 || ownerSkip.emails.length > 0 || (ownerSkip.officers && ownerSkip.officers.length > 0) || (ownerSkip.relatives && ownerSkip.relatives.length > 0)) && (
                       <div className="owner-skip-result">
@@ -3534,7 +3565,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
 
               {/* Enformion Property Search V2: deed owners, recorded mortgages
                   & sale transactions for the searched address. */}
-              {enformionConfigured() && (
+              {showEnformionPropertyPanel && enformionConfigured() && (
                 <div className="card registry-card enf-records-card">
                   <h3 className="registry-card-header" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                     <FileText size={16} style={{ color: 'var(--primary)' }} />
@@ -3727,7 +3758,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                       <LayoutGrid size={16} className="registry-icon-blue" />
                       <span className="field-label">Total acres</span>
                     </div>
-                    <strong className="field-value">{data.gisAcres.toFixed(2)}</strong>
+                    <strong className="field-value">{data.gisAcres > 0 ? data.gisAcres.toFixed(2) : 'Unavailable'}</strong>
                   </div>
 
                   {/* SQFT */}
@@ -3736,7 +3767,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                       <Ruler size={16} className="registry-icon-blue" />
                       <span className="field-label">Land sqft.</span>
                     </div>
-                    <strong className="field-value">{new Intl.NumberFormat().format(data.grossSf)}</strong>
+                    <strong className="field-value">{data.grossSf > 0 ? new Intl.NumberFormat().format(data.grossSf) : 'Unavailable'}</strong>
                   </div>
 
                   {/* Assessed Year */}
@@ -3745,7 +3776,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                       <Calendar size={16} className="registry-icon-blue" />
                       <span className="field-label">Assessed year</span>
                     </div>
-                    <strong className="field-value">{data.assessedYear || 2025}</strong>
+                    <strong className="field-value">{data.assessedYear || 'Unavailable'}</strong>
                   </div>
 
                   {/* Assessed Value */}
@@ -3757,7 +3788,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                         <HelpCircle size={14} />
                       </span>
                     </div>
-                    <strong className="field-value">${new Intl.NumberFormat().format(data.assessedPropertyValue || 0)}</strong>
+                    <strong className="field-value">{optionalCurrency(data.assessedPropertyValue)}</strong>
                   </div>
 
                   {/* Land Value */}
@@ -3769,8 +3800,41 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                         <HelpCircle size={14} />
                       </span>
                     </div>
-                    <strong className="field-value">${new Intl.NumberFormat().format(data.landValue || 0)}</strong>
+                    <strong className="field-value">{optionalCurrency(data.landValue)}</strong>
                   </div>
+
+                  {/* County */}
+                  <div className="registry-row">
+                    <div className="registry-label-with-icon">
+                      <Building2 size={16} className="registry-icon-blue" />
+                      <span className="field-label">Value of improvements</span>
+                    </div>
+                    <strong className="field-value">{optionalCurrency(data.improvementValue)}</strong>
+                  </div>
+
+                  <div className="registry-row">
+                    <div className="registry-label-with-icon">
+                      <DollarSign size={16} className="registry-icon-blue" />
+                      <span className="field-label">Total market value</span>
+                    </div>
+                    <strong className="field-value">{optionalCurrency(data.marketValue)}</strong>
+                  </div>
+
+                  {data.building && (
+                    <div className="registry-row">
+                      <div className="registry-label-with-icon">
+                        <Building2 size={16} className="registry-icon-blue" />
+                        <span className="field-label">Building information</span>
+                      </div>
+                      <strong className="field-value text-right">
+                        {[
+                          data.building.livingSqft && `${data.building.livingSqft.toLocaleString()} sqft`,
+                          data.building.stories && `${data.building.stories} stor${data.building.stories === 1 ? 'y' : 'ies'}`,
+                          data.building.baths && `${data.building.baths} bath`,
+                        ].filter(Boolean).join(' · ') || 'Unavailable'}
+                      </strong>
+                    </div>
+                  )}
 
                   {/* County */}
                   <div className="registry-row">
@@ -3790,7 +3854,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                         <HelpCircle size={14} />
                       </span>
                     </div>
-                    <strong className="field-value">{data.contactByMail || "No"}</strong>
+                    <strong className="field-value">{data.contactByMail || "Unavailable"}</strong>
                   </div>
 
                   {/* Parcel ID */}
@@ -3808,7 +3872,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                       <FileText size={16} className="registry-icon-blue" />
                       <span className="field-label">Type of deed</span>
                     </div>
-                    <strong className="field-value">{data.deedType || "Warranty Deed"}</strong>
+                    <strong className="field-value">{data.deedType || "Unavailable"}</strong>
                   </div>
 
                   {/* Census Tract */}
@@ -3835,7 +3899,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                         <HelpCircle size={14} />
                       </span>
                     </div>
-                    <strong className="field-value">${new Intl.NumberFormat().format(data.priceSoldFor || 0)}</strong>
+                    <strong className="field-value">{optionalCurrency(data.priceSoldFor)}</strong>
                   </div>
 
                   {/* Date of sale */}
@@ -3862,7 +3926,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                       <DollarSign size={16} className="registry-icon-blue" />
                       <span className="field-label">Tax amount</span>
                     </div>
-                    <strong className="field-value">${new Intl.NumberFormat().format(data.taxAmount || 0)}</strong>
+                    <strong className="field-value">{optionalCurrency(data.taxAmount)}</strong>
                   </div>
 
                   {/* Tax year */}
@@ -3871,7 +3935,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                       <Calendar size={16} className="registry-icon-blue" />
                       <span className="field-label">Tax year</span>
                     </div>
-                    <strong className="field-value">{data.taxYear || 2025}</strong>
+                    <strong className="field-value">{data.taxYear || 'Unavailable'}</strong>
                   </div>
 
                   {/* Sale price (full) */}
@@ -3880,7 +3944,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                       <DollarSign size={16} className="registry-icon-blue" />
                       <span className="field-label">Sale price (full)</span>
                     </div>
-                    <strong className="field-value">{data.salePriceFull || "Financial consideration"}</strong>
+                    <strong className="field-value">{data.salePriceFull || "Unavailable"}</strong>
                   </div>
 
                   {/* Legal description */}
@@ -3901,7 +3965,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                         <HelpCircle size={14} />
                       </span>
                     </div>
-                    <strong className="field-value">${new Intl.NumberFormat().format(data.totalValueCalculated || 0)}</strong>
+                    <strong className="field-value">{optionalCurrency(data.totalValueCalculated)}</strong>
                   </div>
 
                   {/* Type of transaction */}
@@ -3910,7 +3974,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                       <Tag size={16} className="registry-icon-blue" />
                       <span className="field-label">Type of transaction</span>
                     </div>
-                    <strong className="field-value">{data.typeOfTransaction || "Resale"}</strong>
+                    <strong className="field-value">{data.typeOfTransaction || "Unavailable"}</strong>
                   </div>
                 </div>
               </div>
