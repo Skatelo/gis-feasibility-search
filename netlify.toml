@@ -6,6 +6,8 @@
 # Serverless functions (e.g. the RentCast proxy that avoids browser CORS).
 [functions]
   directory = "netlify/functions"
+  node_bundler = "esbuild"
+  external_node_modules = ["@crawlee/cheerio", "mammoth", "pdf-parse", "read-excel-file", "saxen"]
 
 # Serve index.html for every path so client routing + the Supabase OAuth
 # redirect (detectSessionInUrl) work after deploy. Netlify routes

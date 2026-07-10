@@ -27,8 +27,6 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
   const [showGeminiKey2, setShowGeminiKey2] = useState(false);
   const [perplexityKey, setPerplexityKey] = useState('');
   const [showPerplexityKey, setShowPerplexityKey] = useState(false);
-  const [firecrawlKey, setFirecrawlKey] = useState('');
-  const [showFirecrawlKey, setShowFirecrawlKey] = useState(false);
   const [mapboxToken, setMapboxToken] = useState('');
   const [showMapboxToken, setShowMapboxToken] = useState(false);
   const [enformionName, setEnformionName] = useState('');
@@ -59,7 +57,6 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
       setGeminiKey(activeUser.keys?.gemini || '');
       setGeminiKey2(activeUser.keys?.gemini2 || '');
       setPerplexityKey(activeUser.keys?.perplexity || '');
-      setFirecrawlKey(activeUser.keys?.firecrawl || '');
       setMapboxToken(activeUser.keys?.mapbox || '');
       setEnformionName(activeUser.keys?.enformionApName || '');
       setEnformionPassword(activeUser.keys?.enformionApPassword || '');
@@ -97,7 +94,6 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
       gemini: geminiKey.trim(),
       gemini2: geminiKey2.trim(),
       perplexity: perplexityKey.trim(),
-      firecrawl: firecrawlKey.trim(),
       mapbox: mapboxToken.trim(),
       enformionApName: enformionName.trim(),
       enformionApPassword: enformionPassword.trim(),
@@ -291,7 +287,7 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
                   {showPerplexityKey ? <EyeOff size={16} /> : <Eye size={16} />}
                 </button>
               </div>
-              <p className="field-help">When set, every live web lookup (utilities &amp; fee schedules, tree-service rates, construction costs, material prices, zoning web lookup, LLC skip trace, the AI report's research) runs on the Perplexity Search API — parallel batched queries returning many ranked sources — instead of Gemini's Google-Search grounding. Faster, more sources, immune to grounding outages. Get a key at perplexity.ai/settings/api.</p>
+              <p className="field-help">Perplexity handles fast searches and finds candidate sources. Hard research is automatically handed to the built-in Crawlee scraper, which reads the source pages and linked PDF, DOCX, XLSX, CSV, JSON, XML, and text documents. Get a key at perplexity.ai/settings/api.</p>
             </div>
 
             {/* Mapbox — satellite base map for the parcel aerial view */}
@@ -440,32 +436,6 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
                 </button>
               </div>
               <p className="field-help">Enriches the Investor Buyer List with REAL last-sale prices &amp; dates from RentCast (api.rentcast.io), on demand for the buyers you choose. RentCast bills per request and free plans are limited, so enrichment is opt-in and capped. Get a key at app.rentcast.io.</p>
-            </div>
-
-            {/* Firecrawl - preferred live web data source for search + scrape */}
-            <div className="settings-field-group">
-              <div className="field-label-row">
-                <label htmlFor="firecrawlKey">Firecrawl API Key (web scrape/search)</label>
-                <span className="badge optional">Optional</span>
-              </div>
-              <div className="field-input-container">
-                <Key className="input-icon" size={16} />
-                <input
-                  id="firecrawlKey"
-                  type={showFirecrawlKey ? "text" : "password"}
-                  placeholder="fc-..."
-                  value={firecrawlKey}
-                  onChange={(e) => setFirecrawlKey(e.target.value)}
-                />
-                <button
-                  type="button"
-                  className="field-toggle-btn"
-                  onClick={() => setShowFirecrawlKey(!showFirecrawlKey)}
-                >
-                  {showFirecrawlKey ? <EyeOff size={16} /> : <Eye size={16} />}
-                </button>
-              </div>
-              <p className="field-help">When set, Firecrawl handles scrape-heavy research like zoning pages, ordinances, fee schedules, utility pages, and source packs that need clean page extraction. Perplexity still handles fast/easy searches first.</p>
             </div>
 
           </div>

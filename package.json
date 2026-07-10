@@ -7,13 +7,19 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
+    "test:scraper": "node --test netlify/functions/lib/crawlee-scraper.test.js",
     "preview": "vite preview"
   },
   "dependencies": {
+    "@crawlee/cheerio": "^3.17.0",
     "@supabase/supabase-js": "^2.108.1",
     "lucide-react": "^1.16.0",
+    "mammoth": "^1.12.0",
+    "pdf-parse": "^2.4.5",
     "react": "^19.2.6",
-    "react-dom": "^19.2.6"
+    "react-dom": "^19.2.6",
+    "read-excel-file": "^9.3.0",
+    "saxen": "^11.0.2"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
@@ -24,6 +30,7 @@
     "eslint": "^10.3.0",
     "eslint-plugin-react-hooks": "^7.1.1",
     "eslint-plugin-react-refresh": "^0.5.2",
+    "fflate": "^0.8.3",
     "globals": "^17.6.0",
     "typescript": "~6.0.2",
     "typescript-eslint": "^8.59.2",
