@@ -15,6 +15,10 @@ export interface UserKeys {
    *  runs on the Perplexity Search API (parallel batched queries, many ranked
    *  sources) instead of Gemini's Google-Search grounding. */
   perplexity?: string;
+  /** Firecrawl API key - preferred live web data source for search/scrape.
+   *  When set, Firecrawl feeds the same zoning, costs, utilities, rates, and
+   *  report research paths before the app falls back to Perplexity/Gemini. */
+  firecrawl?: string;
   /** Mapbox public access token (pk.…) — satellite base map for the parcel aerial view. */
   mapbox?: string;
   realtyApi?: string;
@@ -260,7 +264,178 @@ export function perplexityConfigured(): boolean {
   return !!getPerplexityKey();
 }
 
+export function getFirecrawlKey(): string {
+  const envVar = (typeof import.meta !== 'undefined' && import.meta.env)
+    ? import.meta.env.VITE_FIRECRAWL_API_KEY
+    : (globalThis as any).process?.env?.VITE_FIRECRAWL_API_KEY;
+  return (getUserKeys().firecrawl || (envVar as string | undefined) || '').trim();
+}
+
+function firecrawlProxyEnabled(): boolean {
+  const envVar = (typeof import.meta !== 'undefined' && import.meta.env)
+    ? import.meta.env.VITE_FIRECRAWL_PROXY_ENABLED
+    : (globalThis as any).process?.env?.VITE_FIRECRAWL_PROXY_ENABLED;
+  return /^(1|true|yes)$/i.test(String(envVar || '').trim());
+}
+
+export function firecrawlConfigured(): boolean {
+  return !!getFirecrawlKey() || firecrawlProxyEnabled();
+}
+
+export function liveWebResearchConfigured(): boolean {
+  return firecrawlConfigured() || perplexityConfigured();
+}
+
 export interface PplxResult { title: string; url: string; snippet: string; date?: string }
+export interface FirecrawlResult { title: string; url: string; snippet: string; markdown?: string; date?: string }
+
+type FirecrawlEndpoint = 'search' | 'scrape';
+
+/** One Firecrawl REST call. The same-origin function is tried first so Netlify
+ *  deployments can keep FIRECRAWL_API_KEY server-side; direct API fallback keeps
+ *  local/dev setups working when the user's key is saved in Account Settings. */
+async function firecrawlRequest(endpoint: FirecrawlEndpoint, body: Record<string, unknown>, key?: string): Promise<any | null> {
+  const payload = JSON.stringify(body);
+  const directAllowed = !!key;
+  const routes: { url: string; timeout: number; direct: boolean }[] = [
+    { url: `/.netlify/functions/firecrawl?endpoint=${endpoint}`, timeout: endpoint === 'scrape' ? 70000 : 35000, direct: false },
+    ...(directAllowed ? [{ url: `https://api.firecrawl.dev/v2/${endpoint}`, timeout: endpoint === 'scrape' ? 70000 : 35000, direct: true }] : []),
+  ];
+  for (const route of routes) {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const headers: Record<string, string> = { 'Content-Type': 'application/json', Accept: 'application/json' };
+        if (key) headers.Authorization = `Bearer ${key}`;
+        const res = await fetchWithTimeout(route.url, route.timeout, { method: 'POST', headers, body: payload });
+        if (res.ok) return await res.json();
+        if ((res.status === 429 || res.status >= 500) && attempt === 0) {
+          await new Promise((r) => setTimeout(r, 1500));
+          continue;
+        }
+        if (res.status < 500 && res.status !== 429) {
+          const detail = await res.text().catch(() => '');
+          console.warn(`Firecrawl ${endpoint} HTTP ${res.status}:`, detail.slice(0, 200));
+          if (!route.direct) break;
+          return null;
+        }
+        break;
+      } catch {
+        if (attempt === 0) {
+          await new Promise((r) => setTimeout(r, 800));
+          continue;
+        }
+      }
+    }
+  }
+  return null;
+}
+
+function flattenFirecrawlSearchResults(data: any): FirecrawlResult[] {
+  const out: FirecrawlResult[] = [];
+  const push = (r: any) => {
+    if (!r || typeof r !== 'object') return;
+    const metadata = r.metadata || {};
+    const url = String(r.url || r.sourceURL || metadata.sourceURL || metadata.url || '').trim();
+    if (!url) return;
+    const markdown = typeof r.markdown === 'string' ? r.markdown : undefined;
+    const description = r.description || r.snippet || metadata.description || '';
+    out.push({
+      title: String(r.title || metadata.title || url),
+      url,
+      snippet: String(description || markdown || '').trim(),
+      markdown,
+      date: r.publishedDate || r.date || metadata.publishedTime || metadata.modifiedTime || undefined,
+    });
+  };
+
+  const candidates = [
+    data?.data?.web,
+    data?.data?.results,
+    data?.data,
+    data?.web,
+    data?.results,
+  ];
+  for (const c of candidates) {
+    if (Array.isArray(c)) {
+      c.forEach(push);
+      if (out.length) break;
+    }
+  }
+  return out;
+}
+
+export async function firecrawlSearchBatch(
+  queries: string[],
+  opts?: { maxResultsPerQuery?: number; country?: string },
+): Promise<FirecrawlResult[]> {
+  const key = getFirecrawlKey();
+  const qs = queries.map((q) => q.trim()).filter(Boolean);
+  if ((!key && !firecrawlProxyEnabled()) || qs.length === 0) return [];
+  const bodies = qs.map((query) => ({
+    query,
+    limit: Math.min(20, Math.max(1, opts?.maxResultsPerQuery ?? 6)),
+    sources: ['web'],
+    country: opts?.country ?? 'US',
+    scrapeOptions: {
+      formats: ['markdown'],
+      onlyMainContent: true,
+      removeBase64Images: true,
+    },
+  }));
+  const responses = await Promise.all(bodies.map((b) => firecrawlRequest('search', b, key)));
+  const seen = new Set<string>();
+  const merged: FirecrawlResult[] = [];
+  for (const resp of responses) {
+    for (const r of flattenFirecrawlSearchResults(resp)) {
+      if (!seen.has(r.url)) {
+        seen.add(r.url);
+        merged.push(r);
+      }
+    }
+  }
+  return merged;
+}
+
+export async function firecrawlScrapeUrl(url: string): Promise<FirecrawlResult | null> {
+  const key = getFirecrawlKey();
+  const target = url.trim();
+  if ((!key && !firecrawlProxyEnabled()) || !target) return null;
+  const resp = await firecrawlRequest('scrape', {
+    url: target,
+    formats: ['markdown'],
+    onlyMainContent: true,
+    removeBase64Images: true,
+    timeout: 60000,
+  }, key);
+  const data = resp?.data || resp;
+  const metadata = data?.metadata || {};
+  const scrapedUrl = String(data?.url || data?.sourceURL || metadata.sourceURL || metadata.url || target);
+  const markdown = typeof data?.markdown === 'string' ? data.markdown : '';
+  if (!scrapedUrl || !markdown) return null;
+  return {
+    title: String(data?.title || metadata.title || scrapedUrl),
+    url: scrapedUrl,
+    snippet: markdown.slice(0, 1200),
+    markdown,
+    date: data?.publishedDate || metadata.publishedTime || metadata.modifiedTime || undefined,
+  };
+}
+
+function formatFirecrawlSources(results: FirecrawlResult[], maxSources = 24, maxSnippetChars = 1200): string {
+  return results.slice(0, maxSources).map((r, i) => {
+    const body = (r.markdown || r.snippet || '').slice(0, maxSnippetChars);
+    return `[${i + 1}] ${r.title}${r.date ? ` (${r.date})` : ''}\nURL: ${r.url}\n${body}`;
+  }).join('\n\n');
+}
+
+async function firecrawlResearchBlock(queries: string[], opts?: { maxResultsPerQuery?: number; maxSources?: number }): Promise<{ block: string; urls: string[] }> {
+  const results = await firecrawlSearchBatch(queries, { maxResultsPerQuery: opts?.maxResultsPerQuery ?? 6 });
+  if (!results.length) return { block: '', urls: [] };
+  return {
+    block: `\n\nLIVE WEB SEARCH RESULTS (Firecrawl Search API - ranked, current, with extracted page content). Base every figure on THESE sources and cite their URLs in "sources"; do not invent anything beyond them:\n\n${formatFirecrawlSources(results, opts?.maxSources ?? 24)}`,
+    urls: results.map((r) => r.url),
+  };
+}
 
 /** One POST to the Search API (one batch of up to 5 queries). Same-origin proxy
  *  FIRST — /.netlify/functions/perplexity works both in prod (Netlify function)
@@ -358,6 +533,10 @@ function formatPplxSources(results: PplxResult[], maxSources = 24, maxSnippetCha
 /** The research block injected into a Gemini prompt in place of Google-Search
  *  grounding: many ranked sources with extracted content. '' = nothing found. */
 async function perplexityResearchBlock(queries: string[], opts?: { maxResultsPerQuery?: number; maxSources?: number }): Promise<{ block: string; urls: string[] }> {
+  if (firecrawlConfigured()) {
+    const firecrawl = await firecrawlResearchBlock(queries, opts).catch(() => ({ block: '', urls: [] as string[] }));
+    if (firecrawl.block) return firecrawl;
+  }
   const results = await perplexitySearchBatch(queries, { maxResultsPerQuery: opts?.maxResultsPerQuery ?? 6 });
   if (!results.length) return { block: '', urls: [] };
   return {
@@ -852,10 +1031,10 @@ const countyParcelLayers: Record<string, string> = {
   anderson: SC_STATEWIDE_PARCEL_LAYER,
   bamberg: SC_STATEWIDE_PARCEL_LAYER,
   barnwell: SC_STATEWIDE_PARCEL_LAYER,
-  beaufort_sc: SC_STATEWIDE_PARCEL_LAYER,
+  beaufort_sc: "https://gis.beaufortcountysc.gov/server/rest/services/ArchiveParcels/MapServer/14", // 2024 parcels (Owner1 / GIS_ACRES), verified live
   berkeley: "https://services.arcgis.com/M2JiPNPcfxhLjlp7/arcgis/rest/services/ParcelsAndAddress/FeatureServer/1",
   calhoun: "https://services5.arcgis.com/B3Zo1xqTw8CidOoF/arcgis/rest/services/WebParcels/FeatureServer/0",
-  charleston: "https://services.arcgis.com/DN2fPfpggEPlLhP6/arcgis/rest/services/Mt_P_Way_all_data/FeatureServer/25",
+  charleston: SC_STATEWIDE_PARCEL_LAYER, // was Mt_P_Way_all_data/25 — a Mount-Pleasant-only layer w/ no owner; use statewide until a county owner service is confirmed
   cherokee_sc: SC_STATEWIDE_PARCEL_LAYER,
   chester: SC_STATEWIDE_PARCEL_LAYER,
   chesterfield: SC_STATEWIDE_PARCEL_LAYER,
@@ -866,13 +1045,13 @@ const countyParcelLayers: Record<string, string> = {
   dorchester: "https://gisportal.dorchestercounty.net/hosting/rest/services/County_Basemap/MapServer/3",
   edgefield: SC_STATEWIDE_PARCEL_LAYER,
   fairfield: SC_STATEWIDE_PARCEL_LAYER,
-  florence: "http://arc2000.florenceco.org/ArcGIS/rest/services/Florence_County_Maps_WebMercator/MapServer/5",
-  georgetown: "https://gis1.georgetowncountysc.org/portal/rest/services/GCGIS_OpenData/FeatureServer/2",
+  florence: "https://services1.arcgis.com/40L6yX6OtdCifNez/arcgis/rest/services/TaxParcelInfo/FeatureServer/0", // was dead http:// (mixed-content); OWNERNAME / CALCULATED_ACREAGE, verified live
+  georgetown: SC_STATEWIDE_PARCEL_LAYER, // county GIS splits geometry (Parcels layer, no owner) from attributes (PARCELATTRIBUTES table, no geometry) — un-joinable in one query; statewide has both owner + geometry
   greenville: "https://citygis.greenvillesc.gov/arcgis/rest/services/AddressSearch/Property/MapServer/3",
-  greenwood: "https://services1.arcgis.com/x5wCko8UnSi4h0CB/arcgis/rest/services/Online_Comprehensive_Map_WFL1/FeatureServer/2",
+  greenwood: SC_STATEWIDE_PARCEL_LAYER, // was Online_Comprehensive_Map/2 — outline-only (6 fields, no owner); use statewide
   hampton: "https://services8.arcgis.com/6eabNhFouHU5vuYk/arcgis/rest/services/Parcels_Published_view/FeatureServer/1",
-  horry: "https://gisportal.horrycounty.org/server/rest/services/OpenData/Parcels/FeatureServer/0",
-  jasper: "https://services6.arcgis.com/UXJOITFCLbn0Ibm0/arcgis/rest/services/Jasper_County_Parcels_View/FeatureServer/2",
+  horry: SC_STATEWIDE_PARCEL_LAYER, // was OpenData/Parcels/0 — open-data layer strips owner (15 fields, no owner/acres); use statewide
+  jasper: SC_STATEWIDE_PARCEL_LAYER, // was Parcels_View/2 — public view has no owner-name field; use statewide
   kershaw: SC_STATEWIDE_PARCEL_LAYER,
   lancaster: "https://services.arcgis.com/TL5Ii4EYksDBPH1o/arcgis/rest/services/Lancaster_Parcels/FeatureServer/0",
   laurens: "https://www.laurenscountygis.org/arcgis/rest/services/Pebble/TaxParcel/MapServer/5",
@@ -882,12 +1061,12 @@ const countyParcelLayers: Record<string, string> = {
   marlboro: SC_STATEWIDE_PARCEL_LAYER,
   mccormick: SC_STATEWIDE_PARCEL_LAYER,
   newberry: SC_STATEWIDE_PARCEL_LAYER,
-  oconee: "https://arcserver2.oconeesc.com/arcgis/rest/services/PARCELDATA/MapServer/1",
+  oconee: "https://arcserver2.oconeesc.com/arcgis/rest/services/PARCELDATA_owner_Assr/MapServer/1", // was PARCELDATA/1 (no owner); _owner_Assr layer has current_owner / GIS_ACRES, verified live
   orangeburg: "https://services2.arcgis.com/bUKn95BqgpYYTnx3/arcgis/rest/services/Main_Public_Tax_Parcel_Map_WFL1/FeatureServer/0",
   pickens: "https://services1.arcgis.com/59960rq18IxUcAVI/arcgis/rest/services/Energov_AGOL/FeatureServer/7",
   richland: "https://services1.arcgis.com/Mnt8FoJcogKtoVBs/arcgis/rest/services/EnergovInformationPublic/FeatureServer/13",
   saluda: SC_STATEWIDE_PARCEL_LAYER,
-  spartanburg: "https://services9.arcgis.com/HoRra3ATPLGmyjn6/arcgis/rest/services/Spartanburg_County_Parcels_1_7_2019/FeatureServer/0",
+  spartanburg: "https://maps.spartanburgcounty.org/server/rest/services/DisplayMap0_11/MapServer/3", // was stale 2019 snapshot (no owner); live county Parcels has OwnerName / DEEDACREAGE, verified live
   sumter: SC_STATEWIDE_PARCEL_LAYER,
   union_sc: SC_STATEWIDE_PARCEL_LAYER,
   williamsburg: SC_STATEWIDE_PARCEL_LAYER,
@@ -1051,8 +1230,8 @@ export function normalizeCountyParcelAttrs(a: Record<string, any>): Record<strin
     }
   }
   return {
-    parno: get(/^pin_?num$/i, /^parno$/i, /parcel_?id/i, /^parcel_?id$/i, /^pid$/i, /^pin$/i, /^pin14$/i, /^nad83_?pin$/i, /parcel_?num/i, /^gis_?pin$/i, /gpin/i, /nc_?pin/i, /^newpin$/i, /^geo_?pin$/i, /^par_?code$/i, /^tms$/i, /^pin/i, /t_map_number/i, /tax_?map_?number/i, /^taxmapid$/i, /^map_?number$/i, /^tax_?pin$/i, /^tms_?number$/i, /^cmplnn2?$/i) ?? "N/A",
-    gisacres: get(/gis_?acres/i, /calc.*acre/i, /calculated_?acreage/i, /^calc_?ac(re)?$/i, /^cacres$/i, /acres_?gis/i, /deed_?ac(res?|re)/i, /^acres$/i, /acreage/i, /legal_?acres/i, /tax_?acres/i, /total_?acres/i, /poly_?acres/i, /map_?acres/i, /assessed_?ac$/i, /^total_?calc/i, /land_?area/i, /^pacrea$/i, /^calculated$/i, /gross.*acres/i),
+    parno: get(/^pin_?num$/i, /^parno$/i, /parcel_?id/i, /^parcel_?id$/i, /^pid$/i, /^pin$/i, /^pin14$/i, /^nad83_?pin$/i, /parcel_?num/i, /^gis_?pin$/i, /gpin/i, /nc_?pin/i, /^newpin$/i, /^geo_?pin$/i, /^par_?code$/i, /^tms$/i, /_tms$/i, /tms_?number/i, /^pin/i, /t_map_number/i, /tax_?map_?number/i, /^taxmapid$/i, /^map_?number$/i, /^tax_?pin$/i, /^tms_?number$/i, /^cmplnn2?$/i) ?? "N/A",
+    gisacres: get(/gis_?acres/i, /calc.*acre/i, /calculated_?acreage/i, /^calc_?ac(re)?$/i, /^cacres$/i, /acres_?gis/i, /deed(?:ed)?_?ac(?:res?|re)?/i, /^acres$/i, /acreage/i, /legal_?acres/i, /tax_?acres/i, /total_?acres/i, /tot_?number_?acres/i, /(?:^|_)number_?acres/i, /poly_?acres/i, /map_?acres/i, /assessed_?ac$/i, /^total_?calc/i, /land_?area/i, /^pacrea$/i, /^calculated$/i, /gross.*acres/i),
     ownname: ownname ?? get(/ownership/i, /owner_?ship/i) ?? "N/A",
     ownname2: ownname2 ?? "",
     siteadd,
@@ -1487,12 +1666,18 @@ export async function executeLandAnalysis(
         const statewideAttrs = await queryScStatewideParcelAttributes(lng, lat, parcelWhere);
         if (statewideAttrs) {
           const localAttrs = localRes.wgs84Feature.properties || {};
-          localRes.wgs84Feature.properties = {
-            ...localAttrs,
-            ...statewideAttrs,
-            siteadd: localAttrs.siteadd || statewideAttrs.siteadd,
-            gisacres: localAttrs.gisacres || statewideAttrs.gisacres,
-          };
+          // County-local data is authoritative (it is the live source of record and is
+          // spatially aligned to THIS parcel). The statewide SCDOT snapshot is only used
+          // to FILL fields the county layer left blank/N-A — it must never overwrite a
+          // good county owner/zoning/value, which previously produced "right outline,
+          // wrong owner" results when the two layers disagreed at a point.
+          const isBlank = (v: any) => v == null || String(v).trim() === '' ||
+            String(v).trim().toLowerCase() === 'null' || String(v).trim() === 'N/A';
+          const merged: Record<string, any> = { ...statewideAttrs };
+          for (const [k, v] of Object.entries(localAttrs)) {
+            if (!isBlank(v) || !(k in merged) || isBlank(merged[k])) merged[k] = v;
+          }
+          localRes.wgs84Feature.properties = merged;
         }
         parcelFeature = localRes.wgs84Feature;
         statePlaneFeature = localRes.statePlaneFeature;
@@ -2382,7 +2567,7 @@ Rules: NEVER invent names, addresses, IDs, or dates — use null for anything no
   // PERPLEXITY MODE: batched parallel searches over the SoS registry mirrors
   // feed the synthesis (no google_search tool); else legacy grounding.
   let llcResearch = '';
-  if (perplexityConfigured()) {
+  if (liveWebResearchConfigured()) {
     const { block } = await perplexityResearchBlock([
       `"${name}" ${state} secretary of state registered agent`,
       `"${name}" bizapedia`,
@@ -3781,7 +3966,7 @@ async function zoningViaGemini(promptText: string, geminiKey: string, searchQuer
   try {
     let effectivePrompt = promptText;
     let usePerplexity = false;
-    if (searchQueries && searchQueries.length && perplexityConfigured()) {
+    if (searchQueries && searchQueries.length && liveWebResearchConfigured()) {
       const { block } = await perplexityResearchBlock(searchQueries, { maxResultsPerQuery: 6, maxSources: 18 });
       if (block) { effectivePrompt = promptText + block; usePerplexity = true; }
     }
@@ -3811,7 +3996,7 @@ async function zoningViaDeepSeek(promptText: string, searchQueries?: string[]): 
   if (!key) return null;
   try {
     let effectivePrompt = promptText;
-    if (searchQueries && searchQueries.length && perplexityConfigured()) {
+    if (searchQueries && searchQueries.length && liveWebResearchConfigured()) {
       const { block } = await perplexityResearchBlock(searchQueries, { maxResultsPerQuery: 6, maxSources: 18 });
       if (block) { effectivePrompt = promptText + block; }
     }
@@ -5532,7 +5717,7 @@ async function groundedGeminiText(geminiKey: string, prompt: string, systemText:
   // sources came back, so callers can tell a Perplexity miss from a Gemini miss.
   let effectivePrompt = prompt;
   let usePerplexity = false;
-  if (searchQueries && searchQueries.length && perplexityConfigured()) {
+  if (searchQueries && searchQueries.length && liveWebResearchConfigured()) {
     if (diag) diag.perplexityAttempted = true;
     const { block, urls } = await perplexityResearchBlock(searchQueries);
     if (diag) { diag.perplexitySources = urls.length; diag.perplexityUrls = urls; }
@@ -6658,7 +6843,7 @@ async function groundedDeepSeekText(prompt: string, systemText: string, searchQu
   const key = getDeepSeekKey();
   if (!key) return null;
   let effectivePrompt = prompt;
-  if (searchQueries && searchQueries.length && perplexityConfigured()) {
+  if (searchQueries && searchQueries.length && liveWebResearchConfigured()) {
     if (diag) diag.perplexityAttempted = true;
     // Pull a WIDE set of sources for the utilities lookup — more results per
     // query and a higher source cap so DeepSeek synthesizes from many fee
@@ -6689,6 +6874,15 @@ async function groundedDeepSeekText(prompt: string, systemText: string, searchQu
  *  DeepSeek real web access inside the fusion. Never throws; returns a short
  *  status string on error. */
 async function webSearchViaGemini(query: string, geminiKey: string): Promise<string> {
+  if (firecrawlConfigured()) {
+    try {
+      const results = await firecrawlSearchBatch([query], { maxResultsPerQuery: 8 });
+      if (results.length) {
+        return results.slice(0, 8).map((r, i) => `[${i + 1}] ${r.title}${r.date ? ` (${r.date})` : ''} - ${(r.markdown || r.snippet).slice(0, 700)}`).join('\n')
+          + `\nSources: ${results.slice(0, 8).map((r) => r.url).join(' | ')}`;
+      }
+    } catch { /* fall through to Perplexity/Gemini */ }
+  }
   if (perplexityConfigured()) {
     try {
       const results = await perplexitySearchBatch([query], { maxResultsPerQuery: 8, maxTokensPerPage: 900 });
@@ -6993,7 +7187,7 @@ ${reportData.comps && reportData.comps.length > 0
   // google_search grounding tool. Many ranked sources with extracted content.
   let researchUrls: string[] = [];
   let reportContextFull = reportContext;
-  if (perplexityConfigured()) {
+  if (liveWebResearchConfigured()) {
     const county = reportData.countyName || 'North Carolina';
     const city = (String(reportData.inputAddress || '').split(',')[1] || '').trim() || county;
     const yr = new Date().getFullYear();
@@ -7196,7 +7390,7 @@ PARCEL: ${reportData.inputAddress} · ${parcelCountyLabel} · ${acres} acres · 
   // the google_search tool.
   let followUpResearch = '';
   const lastQuestion = [...messages].reverse().find((m) => m.role === 'user')?.content?.slice(0, 300) || '';
-  if (perplexityConfigured() && lastQuestion) {
+  if (liveWebResearchConfigured() && lastQuestion) {
     const { block } = await perplexityResearchBlock([
       lastQuestion,
       `${lastQuestion} ${reportData.countyName ? `${reportData.countyName} County NC` : 'North Carolina'}`,
