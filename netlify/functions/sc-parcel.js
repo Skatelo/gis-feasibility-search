@@ -1,5 +1,3 @@
-import { crawlSources } from './lib/crawlee-scraper.js';
-import { crawlOfficialParcelPage } from './lib/sc-official-browser.js';
 import { parseQpublicParcelText, unionReportUrl } from './lib/sc-parcel-parser.js';
 import { queryUnionTreasurer } from './lib/sc-union-treasurer.js';
 
@@ -52,6 +50,12 @@ export const handler = async (event) => {
 
   const reportUrl = county.toLowerCase() === 'union' && parcelId ? unionReportUrl(parcelId) : portalUrl;
   try {
+    // Keep the structured county/treasurer path light. Browser dependencies are
+    // loaded only when an official portal truly requires the Crawlee fallback.
+    const [{ crawlSources }, { crawlOfficialParcelPage }] = await Promise.all([
+      import('./lib/crawlee-scraper.js'),
+      import('./lib/sc-official-browser.js'),
+    ]);
     const crawled = await crawlSources({
       urls: [reportUrl],
       queries: ['parcel owner value building tax district'],
