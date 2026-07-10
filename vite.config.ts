@@ -17,6 +17,17 @@ export default defineConfig({
         changeOrigin: true,
         rewrite: () => '/search',
       },
+      // Dev-only Firecrawl mirror for plain `npm run dev`. Production uses the
+      // Netlify function, which can read FIRECRAWL_API_KEY server-side.
+      '/.netlify/functions/firecrawl': {
+        target: 'https://api.firecrawl.dev',
+        changeOrigin: true,
+        rewrite: (path) => {
+          const url = new URL(path, 'http://localhost');
+          const endpoint = url.searchParams.get('endpoint') === 'scrape' ? 'scrape' : 'search';
+          return `/v2/${endpoint}`;
+        },
+      },
     },
   },
 })
