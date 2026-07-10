@@ -1,7 +1,7 @@
 import type { SiteFeasibilityData, SlopeProfile, CompProperty, FloodZoneInfo, WetlandsInfo, ConstructionCostEstimate, CostLineItem, MaterialTakeoff, MaterialTakeoffItem, LandClearingEstimate, TreeRemovalLine, ClearingMethod, UtilitiesEstimate, UtilityLine, PermitFeeLine } from '../types/feasibility';
 import { fetchCountyZoningCode, hasCountyZoning, normalizeCountyKey } from '../data/ncZoning';
 import { getSupabase, isSupabaseConfigured } from './supabaseClient';
-import { fetchOfficialScParcel, shouldHideStatewideGeometry } from './scParcelVerification';
+import { fetchOfficialScParcel, mergeOfficialScParcelRecords, officialRecordFromCountyGis, shouldHideStatewideGeometry } from './scParcelVerification';
 
 export interface UserKeys {
   googleMaps?: string;
@@ -1084,7 +1084,7 @@ export function normalizeCountyParcelAttrs(a: Record<string, any>): Record<strin
 
   let ownname = get(/^ownname$/i, /^owner$/i, /ownername/i, /owner_?name/i, /^owner_?1$/i, /^acctname1?$/i, /^taxpayer$/i,
     /^name_?1$/i, /^n_?name$/i, /^ownam1$/i, /^own1$/i, /jan1_?name1?/i, /current_?owners?$/i, /^current_?ow$/i,
-    /property_?owner/i, /^paname$/i, /primary_?owner/i, /owners_?name$/i, /^acct_?name$/i, /^name$/i, /ownership$/i,
+    /^curr_?name_?1$/i, /property_?owner/i, /^paname$/i, /primary_?owner/i, /owners_?name$/i, /^acct_?name$/i, /^name$/i, /ownership$/i,
     /cama_temp_name$/i);
   if (!ownname) {
     const last = get(/own.*lst.*n/i, /owner.*last/i, /lastname/i, /own_?last/i);
@@ -1102,7 +1102,7 @@ export function normalizeCountyParcelAttrs(a: Record<string, any>): Record<strin
   // house-number + street-name pieces (several county schemas split it).
   let siteadd = get(/site_?address/i, /^siteadd/i, /whole_?address/i, /situs/i, /location_?addr/i, /parcel_?addr/i,
     /property_?address/i, /^phys_?addr/i, /physaddres/i, /^phylocat/i, /^prop_?locat/i, /physical_?(street_?address|location)$/i,
-    /^locaddress/i, /^street_?address$/i, /legal_?addr/i, /^str_?addr/i, /^address$/i, /prop_?add/i, /^loc$/i,
+    /^physstradd$/i, /^locationaddress$/i, /^locaddress/i, /^street_?address$/i, /legal_?addr/i, /^str_?addr/i, /^address$/i, /prop_?add/i, /^loc$/i,
     /^street$/i, /^locadd$/i, /street_?name/i);
   if (!siteadd) {
     const hn = get(/house_?num/i, /housenumbe/i, /house_?nr/i, /street_?nbr/i, /phys.?lc.?street_?number/i, /^stnum$/i);
@@ -1118,18 +1118,18 @@ export function normalizeCountyParcelAttrs(a: Record<string, any>): Record<strin
   }
   let mailadd = get(/^mailadd$/i, /^mail_?address$/i, /^mailing_?(add|addr|address)$/i, /^mailing$/i,
     /^curr_?addr$/i, /^current_?ad$/i, /postal_?address/i, /^owner_?address$/i, /^taxpayer_?address$/i,
-    /^acct_?addr$/i);
+    /^curr_?addr_?1$/i, /^ownmailingline1$/i, /^acct_?addr$/i);
   if (!mailadd) mailadd = joinFirstAddressGroup();
   if (!mailadd) {
     mailadd = get(/mailaddr?1/i, /^addr1$/i, /curr_?addr1/i, /mailing/i, /mail_?add/i, /^address_?1$/i, /^address$/i,
       /taxpayer_?addr(ess)?_?1?/i, /^owadr1$/i, /owner_?addr(ess)?_?1?$/i);
   }
   let mcity = get(/mail.*city/i, /^mcity$/i, /curr_?city/i, /loccity/i, /^city$/i, /mailing_?city/i,
-    /^owner_?city$/i, /^mail_?addr_?city$/i);
+    /^owncity$/i, /^owner_?city$/i, /^mail_?addr_?city$/i);
   let mstate = get(/mail.*state/i, /^mstate$/i, /curr_?state/i, /^state$/i, /mailing_?st/i, /mailing_?state/i,
-    /^owner_?stat$/i, /^mail_?addr_?state$/i, /^st$/i);
+    /^ownstate$/i, /^owner_?stat$/i, /^mail_?addr_?state$/i, /^st$/i);
   let mzip = get(/mail.*zip/i, /^mzip$/i, /curr_?zip/i, /zipnum/i, /^zip(code)?$/i, /mailing_?zip/i,
-    /^owner_?zip$/i, /^mail_?addr_?zip$/i);
+    /^ownzip$/i, /^curr_?zipco$/i, /^owner_?zip$/i, /^mail_?addr_?zip$/i);
   if (!mcity || !mstate || !mzip) {
     const combined = getCombinedCityStateZip();
     if (combined) {
@@ -1151,6 +1151,11 @@ export function normalizeCountyParcelAttrs(a: Record<string, any>): Record<strin
     scity: get(/^scity$/i, /loccity/i, /^city$/i, /mailing_?city/i),
     parval: get(/^parval$/i, /total_?value_?assd/i, /assessed_?value/i, /total_?value/i, /total_?prop_?value/i, /^totval$/i, /tot_?mark_?val/i, /market_?value/i, /appraised/i, /^totmkt$/i, /mkt_?total/i, /^mkt_?total$/i, /^tax_?value$/i, /^netval/i, /^par_?value$/i, /^adj_?value$/i, /^mkt_?value$/i, /total_?asses/i, /^assessed_?va?/i, /^cost_?tot/i, /^tot_?val/i, /^cur_?tot_?tot$/i, /m_value/i, /^apr_?tot_?val$/i, /^fair_?mkt_?val$/i, /^tot_?market_?appr$/i, /^tax_?mkt_?val$/i, /^cama_temp_tot_taxable_appr$/i),
     landval: get(/^landval$/i, /land_?val(ue)?/i, /tot_?land_?val/i, /l_value/i, /^apr_?land_?val$/i, /^taxable_?land$/i),
+    improvementvalue: get(/improvement_?value/i, /imprv_?value/i, /^fmv_?imprv$/i, /building_?value/i, /assessed_?improvements/i),
+    marketvalue: get(/^market_?value$/i, /^fmv_?total$/i, /total_?market_?value/i, /total_?calculated/i),
+    taxablevalue: get(/^taxable_?value$/i, /assessed_?property_?value/i),
+    totalassessedvalue: get(/^total_?assessed_?value$/i, /total_?assessed_?parcel_?value/i),
+    taxcodearea: get(/^tax_?district$/i, /^tax_?distri/i, /^district$/i, /school_?dist/i),
     saledate: get(/^sale_?date$/i, /^saledate$/i, /deed_?date/i, /transfer_?date/i),
     reviseyear: get(/revis.*year/i, /^yearid$/i, /parcel_?year/i, /tax_?year/i, /^year_?$/i),
     sourceref: sourceref ?? "N/A",
@@ -1735,7 +1740,10 @@ export async function executeLandAnalysis(
     }
   }
 
-  const officialScRecord = selectedState === 'SC'
+  const countyGisScRecord = selectedState === 'SC'
+    ? officialRecordFromCountyGis(countyName, info)
+    : null;
+  const remoteOfficialScRecord = selectedState === 'SC' && !countyGisScRecord
     ? await fetchOfficialScParcel(
         countyName,
         addressString,
@@ -1743,6 +1751,7 @@ export async function executeLandAnalysis(
         { lat, lng },
       )
     : null;
+  const officialScRecord = mergeOfficialScParcelRecords(remoteOfficialScRecord, countyGisScRecord);
   let geometryStatus: SiteFeasibilityData['geometryStatus'] = selectedState === 'SC'
     ? (info.recordsource === 'county-gis' ? 'verified' : info.recordsource === 'scdot' ? 'statewide-candidate' : 'unavailable')
     : 'verified';
@@ -1755,11 +1764,15 @@ export async function executeLandAnalysis(
       Math.abs(officialScRecord.acres - candidateAcres) / officialScRecord.acres > 0.1;
     const identityConflicts = info.recordsource === 'scdot' &&
       shouldHideStatewideGeometry(candidateParcelId, officialScRecord.parcelId);
-    if (identityConflicts || acreageConflicts) {
+    const statewideNotConfirmed = info.recordsource === 'scdot' &&
+      /treasurer/i.test(officialScRecord.sourceName || '') && !officialScRecord.acres;
+    if (identityConflicts || acreageConflicts || statewideNotConfirmed) {
       parcelFeature.geometry = null;
       statePlaneFeature = null;
       geometryStatus = 'stale-hidden';
-      parcelConflicts.push('The statewide SCDOT polygon conflicts with the current county assessor record and was hidden.');
+      parcelConflicts.push(statewideNotConfirmed
+        ? 'The current county tax record could not confirm the statewide SCDOT acreage, so the candidate boundary was hidden.'
+        : 'The statewide SCDOT polygon conflicts with the current county assessor record and was hidden.');
     }
 
     info = {

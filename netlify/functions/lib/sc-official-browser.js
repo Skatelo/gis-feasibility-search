@@ -15,7 +15,6 @@ export async function crawlOfficialParcelPage(url, { parcelId = '', address = ''
   const config = new Configuration({ persistStorage: false, purgeOnStart: true });
 
   const crawler = new PlaywrightCrawler({
-    maxRequestsPerCrawl: 1,
     maxRequestRetries: 0,
     minConcurrency: 1,
     maxConcurrency: 1,
@@ -49,7 +48,7 @@ export async function crawlOfficialParcelPage(url, { parcelId = '', address = ''
 
       const body = await page.locator('body').innerText().catch(() => '');
       const hasRestrictedControl = await page.locator('iframe[src*="captcha"]:visible, iframe[src*="turnstile"]:visible, input[type="password"]:visible').count();
-      if (hasRestrictedControl || /verify you are human|captcha|payment required|sign in to continue/i.test(body)) {
+      if (hasRestrictedControl || /verify you are human|captcha|payment required|sign in to continue|performing security verification|security service to protect against malicious bots|verification is taking longer/i.test(body)) {
         blocked = true;
         return;
       }

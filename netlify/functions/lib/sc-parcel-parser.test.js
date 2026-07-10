@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 
 import { normalizeParcelId, parseQpublicParcelText, unionReportUrl } from './sc-parcel-parser.js';
+import { parseUnionTreasurerDetail } from './sc-union-treasurer.js';
 
 const UNION_REPORT = `
 Parcel Number
@@ -62,6 +63,26 @@ test('Union report URL pads the county suffix without caching a result', () => {
   assert.match(url, /KeyValue=049-00-00-112%20000$/);
   assert.equal(normalizeParcelId('049-00-00-112 000'), '0490000112000');
   assert.notEqual(normalizeParcelId('049-00-00-112'), normalizeParcelId('049-00-00-112 000'));
+});
+
+test('Union treasurer detail resolves current owner, parcel, assessment, and tax', () => {
+  const html = `<body>
+    Tax Information Name: PARKER REGINA G Tax Year: 2025 District/Levy: 19 / 350.5
+    Total Appraisal: 110,860 Total Assessed: 4,430
+    Property Information Record Type: Real Estate Map Number: 049-00-00-112 000 Acres: .00 Lots: 1 Buildings: 1
+    Property Address 116 WRIGHT SIMS ROAD Taxes County Tax: $1,552.72 Total Taxes: $675.29
+  </body>`;
+  const result = parseUnionTreasurerDetail(html, 'https://uniontreasurer.qpaybill.com/detail');
+  assert.equal(result.status, 'verified');
+  assert.equal(result.ownerName, 'PARKER REGINA G');
+  assert.equal(result.parcelId, '049-00-00-112 000');
+  assert.equal(result.taxCodeArea, '19');
+  assert.equal(result.assessedPropertyValue, 110860);
+  assert.equal(result.totalAssessedValue, 4430);
+  assert.equal(result.taxAmount, 675.29);
+  assert.equal(result.taxYear, 2025);
+  assert.equal(result.building.buildingCount, 1);
+  assert.equal(result.acres, undefined);
 });
 
 test('SC manifest contains every county and normal searches do not invoke Enformion property matching', async () => {

@@ -1,6 +1,7 @@
 import { crawlSources } from './lib/crawlee-scraper.js';
 import { crawlOfficialParcelPage } from './lib/sc-official-browser.js';
 import { parseQpublicParcelText, unionReportUrl } from './lib/sc-parcel-parser.js';
+import { queryUnionTreasurer } from './lib/sc-union-treasurer.js';
 
 export const config = {
   path: '/.netlify/functions/sc-parcel',
@@ -35,6 +36,16 @@ export const handler = async (event) => {
   let portalHost = '';
   try { portalHost = new URL(portalUrl).hostname; } catch { return response(400, { error: 'Invalid portalUrl' }); }
   const isSchneider = /(^|\.)((qpublic|beacon)\.)?schneidercorp\.com$/i.test(portalHost);
+
+  if (county.toLowerCase() === 'union' && address) {
+    try {
+      const treasurerRecord = await queryUnionTreasurer(address);
+      if (treasurerRecord) return response(200, { success: true, data: treasurerRecord });
+    } catch {
+      // Continue to the assessor fallback when the treasurer is unavailable.
+    }
+  }
+
   if (!isSchneider || (!parcelId && !address)) {
     return response(200, { success: true, data: { status: 'unavailable', sourceUrl: portalUrl } });
   }
