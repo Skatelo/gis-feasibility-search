@@ -41,13 +41,16 @@ export function normalizeScParcelId(value: unknown): string {
 export function parcelIdsMatch(left: unknown, right: unknown): boolean {
   const a = normalizeScParcelId(left);
   const b = normalizeScParcelId(right);
-  return !!a && !!b && a === b;
+  if (!a || !b) return false;
+  if (a === b) return true;
+  const [shorter, longer] = a.length < b.length ? [a, b] : [b, a];
+  return longer.startsWith(shorter) && /^0+$/.test(longer.slice(shorter.length));
 }
 
 export function shouldHideStatewideGeometry(statewideParcelId: unknown, officialParcelId: unknown): boolean {
   const statewide = normalizeScParcelId(statewideParcelId);
   const official = normalizeScParcelId(officialParcelId);
-  return !!statewide && !!official && statewide !== official;
+  return !!statewide && !!official && !parcelIdsMatch(statewide, official);
 }
 
 function cleanText(value: unknown): string | undefined {
@@ -122,13 +125,16 @@ export function mergeOfficialScParcelRecords(
   const definedRemote = Object.fromEntries(
     Object.entries(remote).filter(([, value]) => value !== undefined),
   ) as Partial<OfficialScParcelRecord>;
+  const definedRemoteBuilding = Object.fromEntries(
+    Object.entries(remote.building || {}).filter(([, value]) => value !== undefined),
+  );
   return {
     ...countyGis,
     ...definedRemote,
     status: 'verified',
     building: {
       ...(countyGis.building || {}),
-      ...(remote.building || {}),
+      ...definedRemoteBuilding,
     },
   };
 }
@@ -139,6 +145,7 @@ export async function fetchOfficialScParcel(
   parcelId: string,
   coordinates: { lat: number; lng: number },
   fetcher: typeof fetch = fetch,
+  options: { candidateOwner?: string; skipBrowser?: boolean } = {},
 ): Promise<OfficialScParcelRecord | null> {
   const source = scCountySource(countyName);
   if (!source) return null;
@@ -155,6 +162,9 @@ export async function fetchOfficialScParcel(
         coordinates,
         portalUrl: source.portalUrl,
         alternateUrl: source.alternateUrl,
+        treasurerUrl: source.treasurerUrl,
+        candidateOwner: options.candidateOwner,
+        skipBrowser: options.skipBrowser === true,
       }),
     });
     if (!result.ok) return { status: 'unavailable', sourceUrl: source.portalUrl };

@@ -1839,14 +1839,20 @@ export async function executeLandAnalysis(
   const countyGisScRecord = selectedState === 'SC'
     ? officialRecordFromCountyGis(countyName, info)
     : null;
-  // The assessor-portal scraper still runs when the county GIS record exists but
-  // carries no owner (e.g. Anderson scrubs owner names from its GIS layers).
-  const remoteOfficialScRecord = selectedState === 'SC' && (!countyGisScRecord || !countyGisScRecord.ownerName)
+  // Structured treasurer and WTHGIS adapters can enrich a county GIS response
+  // with current tax and assessment facts. When GIS already supplied an owner,
+  // skip only the expensive browser fallback, not those structured adapters.
+  const remoteOfficialScRecord = selectedState === 'SC'
     ? await fetchOfficialScParcel(
         countyName,
         addressString,
         String(info.parno || ''),
         { lat, lng },
+        fetch,
+        {
+          candidateOwner: String(info.ownname || ''),
+          skipBrowser: !!countyGisScRecord?.ownerName,
+        },
       )
     : null;
   const officialScRecord = mergeOfficialScParcelRecords(remoteOfficialScRecord, countyGisScRecord);

@@ -1,5 +1,6 @@
 import { parseQpublicParcelText, unionReportUrl } from './lib/sc-parcel-parser.js';
-import { queryUnionTreasurer } from './lib/sc-union-treasurer.js';
+import { queryQpayTreasurer } from './lib/sc-union-treasurer.js';
+import { queryWthgisParcel } from './lib/sc-wthgis.js';
 
 export const config = {
   path: '/.netlify/functions/sc-parcel',
@@ -17,6 +18,30 @@ const HEADERS = {
 
 function response(statusCode, body) {
   return { statusCode, headers: HEADERS, body: JSON.stringify(body) };
+}
+
+function isAllowedHost(value, suffix) {
+  try {
+    const host = new URL(value).hostname.toLowerCase();
+    return host === suffix || host.endsWith(`.${suffix}`);
+  } catch {
+    return false;
+  }
+}
+
+function mergeVerified(primary, fallback) {
+  if (!primary) return fallback;
+  if (!fallback) return primary;
+  const definedPrimary = Object.fromEntries(Object.entries(primary).filter(([, value]) => value !== undefined));
+  const definedPrimaryBuilding = Object.fromEntries(
+    Object.entries(primary.building || {}).filter(([, value]) => value !== undefined),
+  );
+  return {
+    ...fallback,
+    ...definedPrimary,
+    status: 'verified',
+    building: { ...(fallback.building || {}), ...definedPrimaryBuilding },
+  };
 }
 
 function isSchneiderUrl(value) {
@@ -69,16 +94,25 @@ export const handler = async (event) => {
   const address = String(body.address || '').trim();
   const portalUrl = String(body.portalUrl || '').trim();
   const alternateUrl = String(body.alternateUrl || '').trim();
+  const treasurerUrl = String(body.treasurerUrl || '').trim();
+  const candidateOwner = String(body.candidateOwner || '').trim();
+  const skipBrowser = body.skipBrowser === true;
   if (!county || !portalUrl) return response(400, { error: 'county and portalUrl are required' });
   try { new URL(portalUrl); } catch { return response(400, { error: 'Invalid portalUrl' }); }
 
-  if (county.toLowerCase() === 'union' && address) {
-    try {
-      const treasurerRecord = await queryUnionTreasurer(address);
-      if (treasurerRecord) return response(200, { success: true, data: treasurerRecord });
-    } catch {
-      // Continue to the assessor fallback when the treasurer is unavailable.
-    }
+  const qpayPromise = treasurerUrl && address && isAllowedHost(treasurerUrl, 'qpaybill.com')
+    ? queryQpayTreasurer(treasurerUrl, address, county, parcelId).catch(() => null)
+    : Promise.resolve(null);
+  const wthPromise = isAllowedHost(portalUrl, 'wthgis.com')
+    ? queryWthgisParcel({ portalUrl, address, parcelId, candidateOwner, county }).catch(() => null)
+    : Promise.resolve(null);
+  const [qpayRecord, wthRecord] = await Promise.all([qpayPromise, wthPromise]);
+  const structuredRecord = mergeVerified(qpayRecord, wthRecord);
+  if (structuredRecord) {
+    return response(200, { success: true, data: structuredRecord });
+  }
+  if (skipBrowser) {
+    return response(200, { success: true, data: { status: 'unavailable', sourceUrl: portalUrl } });
   }
 
   // A county's primary portal may be its own viewer while the scrapeable
