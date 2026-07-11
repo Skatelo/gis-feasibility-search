@@ -8,7 +8,9 @@ function compactText(value) {
 }
 
 function number(value) {
-  const parsed = Number(String(value || '').replace(/[^0-9.-]/g, ''));
+  const cleaned = String(value ?? '').replace(/[^0-9.-]/g, '').trim();
+  if (!cleaned) return undefined;
+  const parsed = Number(cleaned);
   return Number.isFinite(parsed) ? parsed : undefined;
 }
 
@@ -47,21 +49,44 @@ function addressCandidates(value) {
   return [...new Set(candidates)].slice(0, 4);
 }
 
+function idText($, suffix) {
+  return compactText($(`[id$="_${suffix}"]`).first().text());
+}
+
+function sumPositiveIdValues($, pattern) {
+  let total = 0;
+  let found = false;
+  $('[id]').each((_, element) => {
+    const id = $(element).attr('id') || '';
+    if (!pattern.test(id)) return;
+    const value = number($(element).text());
+    if (value !== undefined && value > 0) {
+      total += value;
+      found = true;
+    }
+  });
+  return found ? total : undefined;
+}
+
 export function parseQpayTreasurerDetail(html, sourceUrl, county = '') {
   const $ = load(String(html || ''));
   $('br').replaceWith(' ');
   const text = compactText($('body').text());
-  const ownerName = match(text, /Name:\s*(.*?)(?=\s+(?:Address|Tax Year):)/i);
+  const ownerName = idText($, 'lblName') || match(text, /Name:\s*(.*?)(?=\s+(?:Address|Tax Year):)/i);
   const mailingAddress = match(text, /Name:\s*.*?\s+Address:\s*(.*?)\s+Tax Year:/i);
-  const parcelId = match(text, /Map Number:\s*(.*?)\s+Acres:/i);
-  const taxYear = number(match(text, /Tax Year:\s*(\d{4})/i));
-  const taxAmount = number(match(text, /Total Taxes:\s*\$?([0-9,.]+)/i));
-  const assessedPropertyValue = number(match(text, /Total Appraisal:\s*\$?([0-9,.]+)/i));
-  const totalAssessedValue = number(match(text, /Total Assessed:\s*\$?([0-9,.]+)/i));
-  const taxCodeArea = match(text, /District\/Levy:\s*([^/\s]+)\s*\//i);
-  const acres = number(match(text, /Acres:\s*([0-9.]+)/i));
+  const parcelId = idText($, 'lblMapNo') || match(text, /Map Number:\s*(.*?)\s+Acres:/i);
+  const taxYear = number(idText($, 'lblTaxYr') || match(text, /Tax Year:\s*(\d{4})/i));
+  const taxAmount = number(idText($, 'lblTotalTaxes') || match(text, /Total Taxes:\s*\$?([0-9,.]+)/i));
+  const assessedPropertyValue = number(idText($, 'lblMarketVal') || match(text, /Total Appraisal:\s*\$?([0-9,.]+)/i));
+  const totalAssessedValue = number(idText($, 'lblAssmt') || match(text, /Total Assessed:\s*\$?([0-9,.]+)/i));
+  const district = idText($, 'lblDistrict');
+  const taxCodeArea = compactText(district.split('/')[0]) || match(text, /District\/Levy:\s*([^/\s]+)\s*\//i);
+  const acres = number(idText($, 'lblAcres') || match(text, /Acres:\s*([0-9.]+)/i));
   const buildingCount = number(match(text, /Buildings:\s*(\d+)/i));
-  const situsAddress = match(text, /Property Address\s+(.*?)\s+Taxes\s+County Tax:/i);
+  const situsAddress = idText($, 'lblPropAddress') || match(text, /Property Address\s+(.*?)\s+Taxes\s+County Tax:/i);
+  const landValue = sumPositiveIdValues($, /_lblLand\d+$/i);
+  const improvementValue = sumPositiveIdValues($, /_lblBuilding\d+$/i);
+  const marketValue = assessedPropertyValue && assessedPropertyValue > 0 ? assessedPropertyValue : undefined;
 
   if (!ownerName || !parcelId || !taxYear) return null;
   return {
@@ -78,6 +103,9 @@ export function parseQpayTreasurerDetail(html, sourceUrl, county = '') {
     assessedYear: taxYear,
     assessedPropertyValue,
     totalAssessedValue,
+    landValue,
+    improvementValue,
+    marketValue,
     taxableValue: assessedPropertyValue,
     taxCodeArea,
     taxAmount,

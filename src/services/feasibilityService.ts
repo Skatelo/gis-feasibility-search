@@ -1,7 +1,7 @@
 import type { SiteFeasibilityData, SlopeProfile, CompProperty, FloodZoneInfo, WetlandsInfo, ConstructionCostEstimate, CostLineItem, MaterialTakeoff, MaterialTakeoffItem, LandClearingEstimate, TreeRemovalLine, ClearingMethod, UtilitiesEstimate, UtilityLine, PermitFeeLine } from '../types/feasibility';
 import { fetchCountyZoningCode, hasCountyZoning, normalizeCountyKey } from '../data/ncZoning';
 import { getSupabase, isSupabaseConfigured } from './supabaseClient';
-import { fetchOfficialScParcel, mergeOfficialScParcelRecords, officialRecordFromCountyGis, shouldHideStatewideGeometry } from './scParcelVerification';
+import { fetchOfficialScParcel, mergeOfficialScParcelRecords, officialRecordFromCountyGis, scOwnerNamesMatch, shouldHideStatewideGeometry } from './scParcelVerification';
 import { scCountySource } from '../data/scCountySources';
 
 export interface UserKeys {
@@ -1863,20 +1863,29 @@ export async function executeLandAnalysis(
 
   if (selectedState === 'SC' && officialScRecord?.status === 'verified') {
     const candidateParcelId = info.parno;
+    const candidateOwner = String(info.ownname || '').trim();
     const candidateAcres = Number(info.gisacres || 0);
     const acreageConflicts = !!officialScRecord.acres && candidateAcres > 0 &&
       Math.abs(officialScRecord.acres - candidateAcres) / officialScRecord.acres > 0.1;
     const identityConflicts = info.recordsource === 'scdot' &&
       shouldHideStatewideGeometry(candidateParcelId, officialScRecord.parcelId);
+    const hasCandidateOwner = !!candidateOwner && candidateOwner.toUpperCase() !== 'N/A';
+    const ownerConfirmed = hasCandidateOwner && scOwnerNamesMatch(candidateOwner, officialScRecord.ownerName);
+    const ownerConflicts = info.recordsource === 'scdot' && hasCandidateOwner &&
+      !!officialScRecord.ownerName && !ownerConfirmed;
     const statewideNotConfirmed = info.recordsource === 'scdot' &&
-      /treasurer/i.test(officialScRecord.sourceName || '') && !officialScRecord.acres;
-    if (identityConflicts || acreageConflicts || statewideNotConfirmed) {
+      /treasurer/i.test(officialScRecord.sourceName || '') && !officialScRecord.acres && !ownerConfirmed;
+    if (identityConflicts || acreageConflicts || ownerConflicts || statewideNotConfirmed) {
       parcelFeature.geometry = null;
       statePlaneFeature = null;
       geometryStatus = 'stale-hidden';
-      parcelConflicts.push(statewideNotConfirmed
-        ? 'The current county tax record could not confirm the statewide SCDOT acreage, so the candidate boundary was hidden.'
-        : 'The statewide SCDOT polygon conflicts with the current county assessor record and was hidden.');
+      parcelConflicts.push(identityConflicts
+        ? 'The statewide parcel number conflicts with the current county parcel number, so the candidate boundary was hidden.'
+        : acreageConflicts
+          ? 'The statewide acreage conflicts with the current county acreage, so the candidate boundary was hidden.'
+          : ownerConflicts
+            ? 'The current county owner does not match the statewide parcel owner, so the candidate boundary was hidden.'
+            : 'The county tax record could not corroborate the statewide parcel owner or acreage, so the candidate boundary was hidden.');
     }
 
     info = {
@@ -1982,6 +1991,9 @@ export async function executeLandAnalysis(
   }
 
   let gisAcres = info.gisacres ? parseFloat(info.gisacres) : 0;
+  let acreageSource: SiteFeasibilityData['acreageSource'] = officialScRecord?.acres && officialScRecord.acres > 0
+    ? 'assessor'
+    : gisAcres > 0.005 ? 'gis' : 'unavailable';
   // Some counties (e.g. Cumberland) store a missing/garbage gisacres value, so
   // compute the area from the parcel polygon and use it when the recorded value
   // is absent or implausibly off (> 5x difference) from the geometry.
@@ -1989,6 +2001,7 @@ export async function executeLandAnalysis(
     const computedAcres = acresFromGeometry(statePlaneRings, boundaryRings, lat);
     if (computedAcres > 0.0005 && (!(gisAcres > 0.005) || gisAcres / computedAcres > 5 || computedAcres / gisAcres > 5)) {
       gisAcres = computedAcres;
+      acreageSource = 'geometry';
     }
   }
   const grossSf = Math.round(gisAcres * 43560);
@@ -2183,6 +2196,7 @@ export async function executeLandAnalysis(
         : info.recordsource === 'scdot' ? 'SCDOT statewide parcel snapshot — verify with county' : undefined),
     parcelSourceUrl: officialScRecord?.sourceUrl
       || (selectedState === 'SC' ? scCountySource(countyName)?.portalUrl : undefined),
+    parcelMapUrl: selectedState === 'SC' ? scCountySource(countyName)?.portalUrl : undefined,
     parcelSourceAsOf: officialScRecord?.asOf,
     ownerRecordType,
     geometryStatus,
@@ -2199,6 +2213,7 @@ export async function executeLandAnalysis(
     countyName: countyName,
     grossSf,
     gisAcres,
+    acreageSource,
     zoningCode,
     zoningDescription,
     zoningSource,

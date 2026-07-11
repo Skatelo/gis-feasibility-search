@@ -86,6 +86,34 @@ test('Union treasurer detail resolves current owner, parcel, assessment, and tax
   assert.equal(result.acres, undefined);
 });
 
+test('qPay detail exposes published land, improvement, market, and situs fields', () => {
+  const html = `<body>
+    <span id="ctl00_MainContent_lblName">GIST JAY NOLAND JR</span>
+    <span id="ctl00_MainContent_lblTaxYr">2025</span>
+    <span id="ctl00_MainContent_lblDistrict">19 / 350.5</span>
+    <span id="ctl00_MainContent_lblMarketVal">11,500</span>
+    <span id="ctl00_MainContent_lblAssmt">690</span>
+    <span id="ctl00_MainContent_lblLand6">6,300</span>
+    <span id="ctl00_MainContent_lblBuilding6">5,200</span>
+    <span id="ctl00_MainContent_lblMapNo">049-00-00-038 000</span>
+    <span id="ctl00_MainContent_lblAcres">.00</span>
+    <span id="ctl00_MainContent_lblPropAddress">3658 JONESVILLE LOCKHART HWY</span>
+    <span id="ctl00_MainContent_lblTotalTaxes">$274.01</span>
+  </body>`;
+  const result = parseUnionTreasurerDetail(html, 'https://uniontreasurer.qpaybill.com/detail');
+
+  assert.equal(result.ownerName, 'GIST JAY NOLAND JR');
+  assert.equal(result.parcelId, '049-00-00-038 000');
+  assert.equal(result.situsAddress, '3658 JONESVILLE LOCKHART HWY');
+  assert.equal(result.landValue, 6300);
+  assert.equal(result.improvementValue, 5200);
+  assert.equal(result.marketValue, 11500);
+  assert.equal(result.assessedPropertyValue, 11500);
+  assert.equal(result.totalAssessedValue, 690);
+  assert.equal(result.taxAmount, 274.01);
+  assert.equal(result.acres, undefined);
+});
+
 test('qPay rejects a newer address result for the wrong parcel', async () => {
   let call = 0;
   const fetcher = async () => {
