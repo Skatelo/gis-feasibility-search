@@ -3392,8 +3392,8 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                   <AlertCircle size={20} style={{ color: '#d97706', flexShrink: 0 }} />
                   <div style={{ fontSize: '0.78rem', lineHeight: '1.4' }}>
                     <strong>Stale statewide parcel boundary hidden</strong><br />
-                    The SCDOT polygon did not match the current county assessor record.
-                    {data.parcelSourceUrl && <> <a href={data.parcelSourceUrl} target="_blank" rel="noreferrer">Verify on the official county map</a>.</>}
+                    {data.parcelConflicts?.[0] || 'The SCDOT polygon did not match the current county assessor record.'}
+                    {(data.parcelMapUrl || data.parcelSourceUrl) && <> <a href={data.parcelMapUrl || data.parcelSourceUrl} target="_blank" rel="noreferrer">Verify on the official county map</a>.</>}
                   </div>
                 </div>
               )}
@@ -3758,7 +3758,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                   <div className="registry-row">
                     <div className="registry-label-with-icon">
                       <LayoutGrid size={16} className="registry-icon-blue" />
-                      <span className="field-label">Total acres</span>
+                      <span className="field-label">{data.acreageSource === 'geometry' ? 'GIS-calculated acres' : data.acreageSource === 'assessor' ? 'Assessor acres' : data.acreageSource === 'gis' ? 'GIS acres' : 'Total acres'}</span>
                     </div>
                     <strong className="field-value">{data.gisAcres > 0 ? data.gisAcres.toFixed(2) : 'Unavailable'}</strong>
                   </div>

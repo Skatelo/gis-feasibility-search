@@ -237,6 +237,7 @@ export interface SiteFeasibilityData {
   countyName: string;
   grossSf: number;
   gisAcres: number;
+  acreageSource?: 'assessor' | 'gis' | 'geometry' | 'unavailable';
   zoningCode: string;
   coordinates: Coordinates;
   boundaryRings?: number[][][];
@@ -253,6 +254,7 @@ export interface SiteFeasibilityData {
   parcelVerificationStatus?: 'verified' | 'unavailable' | 'blocked';
   parcelSourceName?: string;
   parcelSourceUrl?: string;
+  parcelMapUrl?: string;
   parcelSourceAsOf?: string;
   /** 'statewide' = owner from the SCDOT statewide parcel snapshot (no county
    *  source could confirm it) — shown labeled so it isn't read as the live roll. */

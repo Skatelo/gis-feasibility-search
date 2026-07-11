@@ -53,6 +53,24 @@ export function shouldHideStatewideGeometry(statewideParcelId: unknown, official
   return !!statewide && !!official && !parcelIdsMatch(statewide, official);
 }
 
+function normalizedOwnerTokens(value: unknown): string[] {
+  const ignored = new Set(['ET', 'AL', 'ETAL']);
+  return String(value ?? '')
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, ' ')
+    .trim()
+    .split(/\s+/)
+    .filter((token) => token && !ignored.has(token))
+    .sort();
+}
+
+/** County systems disagree on surname-first display and optional suffixes. */
+export function scOwnerNamesMatch(left: unknown, right: unknown): boolean {
+  const a = normalizedOwnerTokens(left);
+  const b = normalizedOwnerTokens(right);
+  return a.length > 0 && a.length === b.length && a.every((token, index) => token === b[index]);
+}
+
 function cleanText(value: unknown): string | undefined {
   const text = String(value ?? '').trim();
   return text && text.toUpperCase() !== 'N/A' && text.toLowerCase() !== 'null' ? text : undefined;
