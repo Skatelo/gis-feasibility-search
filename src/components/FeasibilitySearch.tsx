@@ -3485,7 +3485,9 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                       ? 'Assessor Owner'
                       : data.ownerRecordType === 'gis'
                         ? 'GIS Tax-Roll Owner'
-                        : 'Owner Verification'}
+                        : data.ownerRecordType === 'statewide'
+                          ? 'Statewide GIS Owner (verify with county)'
+                          : 'Owner Verification'}
                 </h3>
                 <div className="registry-list">
                   <div className="registry-row">

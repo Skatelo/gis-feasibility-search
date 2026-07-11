@@ -254,7 +254,9 @@ export interface SiteFeasibilityData {
   parcelSourceName?: string;
   parcelSourceUrl?: string;
   parcelSourceAsOf?: string;
-  ownerRecordType?: 'assessor' | 'deed' | 'gis' | 'unavailable';
+  /** 'statewide' = owner from the SCDOT statewide parcel snapshot (no county
+   *  source could confirm it) — shown labeled so it isn't read as the live roll. */
+  ownerRecordType?: 'assessor' | 'deed' | 'gis' | 'statewide' | 'unavailable';
   geometryStatus?: 'verified' | 'statewide-candidate' | 'stale-hidden' | 'unavailable';
   parcelConflicts?: string[];
 
