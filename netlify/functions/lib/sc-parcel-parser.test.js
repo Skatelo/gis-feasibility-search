@@ -273,3 +273,22 @@ test('SC manifest contains every county and normal searches do not invoke Enform
   assert.doesNotMatch(automaticSearchBlock, /enformionPropertySearch|fetchEnformionRecords|ContactEnrich|PersonSearch|BusinessSearch/);
   assert.match(component, /Skip Trace Owner \(Paid\)/);
 });
+
+test('SC map, zoning, utilities, and clearing estimates require visible provenance', async () => {
+  const service = await readFile(new URL('../../../src/services/feasibilityService.ts', import.meta.url), 'utf8');
+  const component = await readFile(new URL('../../../src/components/FeasibilitySearch.tsx', import.meta.url), 'utf8');
+  const proxy = await readFile(new URL('../perplexity-chat.js', import.meta.url), 'utf8');
+  const viteConfig = await readFile(new URL('../../../vite.config.ts', import.meta.url), 'utf8');
+
+  assert.match(service, /matchMethod.*parcel-gis\|official-address-result\|official-parcel-report/s);
+  assert.match(service, /mode: 'hard'/);
+  assert.match(service, /parcelSource must be an official parcel-specific result/);
+  assert.match(service, /SCDOT statewide snapshot owner/);
+  assert.doesNotMatch(service, /UTIL_ESTIMATE|TREE_RATE_FALLBACK|CLEARING_FALLBACK/);
+  assert.match(service, /A number without its line-specific source URL is invalid/);
+  assert.match(component, /Current tax-roll owner/);
+  assert.match(component, /No current local pricing source was verified; no dollar estimate is shown/);
+  assert.match(component, /Official zoning sources/);
+  assert.match(proxy, /Cache-Control': 'no-store'/);
+  assert.match(viteConfig, /perplexity-chat[\s\S]*chat\/completions/);
+});

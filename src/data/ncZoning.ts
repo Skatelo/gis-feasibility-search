@@ -209,7 +209,10 @@ Object.assign(ncZoningRegistry.counties, SC_ZONING_OVERRIDES);
 
 /** Normalize a county display name to its registry key (e.g. "New Hanover" -> "new_hanover"). */
 export function normalizeCountyKey(name: string): string {
-  return name.trim().toLowerCase().replace(/\s+/g, "_");
+  const normalized = name.trim().toLowerCase();
+  const state = normalized.match(/,\s*(nc|sc)$/)?.[1];
+  const county = normalized.replace(/,\s*(nc|sc)$/, '').replace(/\s+/g, "_");
+  return state === 'sc' ? `${county},_sc` : county;
 }
 
 /** Returns the zoning config for a county, or undefined if not in the registry. */
@@ -240,6 +243,7 @@ export function getZoningServices(name: string): ZoningService[] {
 export interface ResolvedZoning {
   code: string;
   description: string | null;
+  sourceUrl?: string;
 }
 
 // --- Zoning attribute extraction --------------------------------------------
@@ -360,7 +364,8 @@ async function identifyZoning(service: ZoningService, lng: number, lat: number):
       .then((data) => (Array.isArray(data?.results) && data.results.length ? extractZoning(data.results) : null))
       .catch((e) => { console.warn(`Zoning identify failed for ${service.url}:`, e); return null; });
   }));
-  return results.find((z) => z) || null; // index 0 (tight) wins when both hit
+  const hit = results.find((z) => z) || null; // index 0 (tight) wins when both hit
+  return hit ? { ...hit, sourceUrl: service.url } : null;
 }
 
 /**

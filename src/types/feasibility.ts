@@ -146,9 +146,11 @@ export interface LandClearingEstimate {
   clearingFactors: string[];       // the cost-driving factors (diameter, stumps, haul-off)
   satelliteUrl: string;            // top-down image used for the count
   streetViewUrl?: string;          // ground-level street view used for tree size
+  imagerySources: string[];        // public map/view links supporting the visual estimate
   locality: string;
   pricingSources: string[];        // real-time pricing sources
-  realTimePricing: boolean;        // true = grounded local rates; false = fallback
+  pricingStatus: 'verified' | 'unavailable';
+  realTimePricing: boolean;        // true = grounded local rates; false = no verified price
   generatedAt: number;
 }
 
@@ -166,6 +168,8 @@ export interface UtilityLine {
   detail?: string;
   /** true only when the figure came from a live, cited local source. */
   verified: boolean;
+  /** Source supporting this line's availability and/or dollar amount. */
+  sourceUrl?: string;
   /** true when low/high is a typical NC estimate used because no verified local
    *  figure was found (so a price always shows). */
   estimated?: boolean;
@@ -180,6 +184,8 @@ export interface PermitFeeLine {
   high: number;
   note?: string;
   verified: boolean;
+  /** Adopted fee schedule supporting this exact figure. */
+  sourceUrl?: string;
   /** true when the figure is a typical NC estimate (no verified local schedule). */
   estimated?: boolean;
 }
@@ -246,6 +252,14 @@ export interface SiteFeasibilityData {
   /** Where the zoning came from: the county's GIS, or a web search fallback. */
   zoningSource?: 'county-gis' | 'web';
   zoningSourceUrl?: string;
+  zoningSources?: string[];
+  zoningVerificationStatus?: 'official-gis' | 'official-research' | 'conflict' | 'unavailable';
+  zoningJurisdiction?: string;
+  zoningStandardsStatus?: 'official' | 'mixed' | 'estimated' | 'unavailable';
+  zoningStandardsSourceUrl?: string;
+  zoningMinimumLotAreaSqft?: number;
+  zoningMaxLotCoveragePct?: number;
+  zoningPermittedUses?: string[];
   gridics?: GridicsData;
   isSimulated?: boolean;
 

@@ -1270,6 +1270,22 @@ code {
   pointer-events: none;
 }
 
+.owner-map-label div {
+  max-width: 230px;
+  background: rgba(17, 24, 39, 0.92);
+  color: #fde68a;
+  font-family: var(--font-heading);
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1.25;
+  padding: 4px 7px;
+  border: 1px solid rgba(253, 230, 138, 0.9);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.45);
+  text-align: center;
+  pointer-events: none;
+}
+
 /* Premium Glowing Accent Bar Panels */
 .search-card {
   position: relative;

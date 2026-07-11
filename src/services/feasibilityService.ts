@@ -1,5 +1,5 @@
 import type { SiteFeasibilityData, SlopeProfile, CompProperty, FloodZoneInfo, WetlandsInfo, ConstructionCostEstimate, CostLineItem, MaterialTakeoff, MaterialTakeoffItem, LandClearingEstimate, TreeRemovalLine, ClearingMethod, UtilitiesEstimate, UtilityLine, PermitFeeLine } from '../types/feasibility';
-import { fetchCountyZoningCode, hasCountyZoning, normalizeCountyKey } from '../data/ncZoning';
+import { fetchCountyZoningCode, getZoningServices, hasCountyZoning, normalizeCountyKey } from '../data/ncZoning';
 import { getSupabase, isSupabaseConfigured } from './supabaseClient';
 import { fetchOfficialScParcel, mergeOfficialScParcelRecords, officialRecordFromCountyGis, scOwnerNamesMatch, shouldHideStatewideGeometry } from './scParcelVerification';
 import { scCountySource } from '../data/scCountySources';
@@ -743,7 +743,14 @@ function ringCentroid(ring: number[][]): [number, number] | null {
  * labels on the satellite map. Returns GeoJSON: parcel outline polygons plus
  * one label point per parcel (owner, address, acres), or null on failure.
  */
-export async function fetchParcelsInBbox(west: number, south: number, east: number, north: number, _countyName?: string): Promise<{ polygons: any; labels: any } | null> {
+export async function fetchParcelsInBbox(
+  west: number,
+  south: number,
+  east: number,
+  north: number,
+  _countyName?: string,
+  subject?: Pick<SiteFeasibilityData, 'parcelId' | 'ownerName' | 'ownerRecordType'>,
+): Promise<{ polygons: any; labels: any } | null> {
   try {
     const centerLat = (south + north) / 2;
     const centerLng = (west + east) / 2;
@@ -761,6 +768,9 @@ export async function fetchParcelsInBbox(west: number, south: number, east: numb
     const feats = Array.isArray(data?.features) ? data.features : [];
     const polygons: any[] = [];
     const labels: any[] = [];
+    const parcelKey = (value: unknown) => String(value || '').toUpperCase().replace(/[^A-Z0-9]/g, '').replace(/000$/, '');
+    const subjectKey = parcelKey(subject?.parcelId);
+    const subjectOwnerIsCurrent = !!subject?.ownerName && ['assessor', 'deed', 'gis'].includes(String(subject?.ownerRecordType || ''));
     for (const f of feats) {
       const rings: number[][][] = f?.geometry?.rings;
       if (!rings || !rings.length) continue;
@@ -772,9 +782,18 @@ export async function fetchParcelsInBbox(west: number, south: number, east: numb
       parno = String((state === 'NC' ? f.attributes?.parno : f.attributes?.T_Map_Number) || '');
       siteadd = String((state === 'NC' ? f.attributes?.siteadd : '') || '').trim();
       acresRaw = state === 'NC' ? f.attributes?.gisacres : f.attributes?.Acreage;
-      const owner = rawOwner ? formatOwnerName(rawOwner).toUpperCase() : '';
-      polygons.push({ type: 'Feature', geometry: { type: 'Polygon', coordinates: rings }, properties: { parno, owner, siteadd } });
+      const sameAsSubject = !!subjectKey && parcelKey(parno) === subjectKey;
+      const snapshotOwner = rawOwner ? formatOwnerName(rawOwner).toUpperCase() : '';
+      const owner = sameAsSubject && subjectOwnerIsCurrent ? String(subject?.ownerName || '').toUpperCase() : snapshotOwner;
+      const ownerRecordLabel = state === 'SC'
+        ? sameAsSubject && subjectOwnerIsCurrent
+          ? subject?.ownerRecordType === 'deed' ? 'Latest deed grantee' : 'Current county tax-roll owner'
+          : 'SCDOT statewide snapshot owner'
+        : 'County parcel owner';
+      const ownerLabel = state === 'SC' ? `${sameAsSubject && subjectOwnerIsCurrent ? 'Tax roll' : 'Snapshot'}: ${owner}` : owner;
+      polygons.push({ type: 'Feature', geometry: { type: 'Polygon', coordinates: rings }, properties: { parno, owner, ownerLabel, ownerRecordLabel, siteadd } });
       if (!owner || owner === 'N/A') continue;
+      if (sameAsSubject && subjectOwnerIsCurrent) continue; // the subject gets its verified label from the resolved county record
       // Label at the centroid of the largest ring (outer boundary).
       let biggest = rings[0], biggestArea = -1;
       for (const r of rings) {
@@ -787,7 +806,7 @@ export async function fetchParcelsInBbox(west: number, south: number, east: numb
       labels.push({
         type: 'Feature',
         geometry: { type: 'Point', coordinates: c },
-        properties: { owner, parno, siteadd, acres: Number.isFinite(acres) && acres > 0.005 && acres < 100000 ? Math.round(acres * 100) / 100 : null },
+        properties: { owner, ownerLabel, ownerRecordLabel, parno, siteadd, acres: Number.isFinite(acres) && acres > 0.005 && acres < 100000 ? Math.round(acres * 100) / 100 : null },
       });
     }
     return {
@@ -1975,6 +1994,15 @@ export async function executeLandAnalysis(
   let zoningDescription = "Determining zoning district...";
   let zoningSource: 'county-gis' | 'web' | undefined;
   let zoningSourceUrl: string | undefined;
+  let zoningSources: string[] = [];
+  let zoningVerificationStatus: SiteFeasibilityData['zoningVerificationStatus'] = 'unavailable';
+  let zoningJurisdiction: string | undefined;
+  let zoningStandardsStatus: SiteFeasibilityData['zoningStandardsStatus'] = 'unavailable';
+  let zoningStandardsSourceUrl: string | undefined;
+  let zoningMinimumLotAreaSqft: number | undefined;
+  let zoningMaxLotCoveragePct: number | undefined;
+  let zoningPermittedUses: string[] | undefined;
+  let researchedZoningStandards: ZoningResearchStandards | undefined;
 
   // Calculate perimeter of the parcel in feet from State Plane coordinates
   let perimeter = 0;
@@ -2033,8 +2061,16 @@ export async function executeLandAnalysis(
   // Frontage comes from the real parcel geometry, not the estimate. Computed as
   // a function because it's re-derived once the real zoning district resolves.
   const buildGridics = () => {
-    const standards = estimateZoningStandards(zoningCode, zoningDescription);
-    const { frontFt, rearFt, sideFt } = standards.setbacks;
+    if (!zoningCode || zoningCode === 'N/A') return undefined;
+    const estimated = estimateZoningStandards(zoningCode, zoningDescription);
+    const researched = researchedZoningStandards;
+    const valid = (value: unknown): value is number => Number.isFinite(Number(value));
+    const frontFt = valid(researched?.setbacks?.frontFt) ? Number(researched?.setbacks?.frontFt) : estimated.setbacks.frontFt;
+    const rearFt = valid(researched?.setbacks?.rearFt) ? Number(researched?.setbacks?.rearFt) : estimated.setbacks.rearFt;
+    const sideFt = valid(researched?.setbacks?.sideFt) ? Number(researched?.setbacks?.sideFt) : estimated.setbacks.sideFt;
+    const maxHeightFt = valid(researched?.maxHeightFt) ? Number(researched?.maxHeightFt) : estimated.maxHeightFt;
+    const floorAreaRatio = valid(researched?.floorAreaRatio) ? Number(researched?.floorAreaRatio) : estimated.floorAreaRatio;
+    const coverage = valid(researched?.maxLotCoveragePct) ? Number(researched?.maxLotCoveragePct) / 100 : 0.4;
     const netWidth = Math.max(0, W - 2 * sideFt);
     const netDepth = Math.max(0, D - (frontFt + rearFt));
     // Only report a single Width x Depth when the lot is roughly rectangular
@@ -2046,16 +2082,16 @@ export async function executeLandAnalysis(
       frontageLengthFt: W > 0 ? Math.round(W * 100) / 100 : 0,
       lotWidthFt: isRectangularish ? Math.round(W * 10) / 10 : undefined,
       lotDepthFt: isRectangularish ? Math.round(D * 10) / 10 : undefined,
-      lotType: standards.lotType,
+      lotType: researched?.lotType || estimated.lotType,
       // Max footprint ≈ a typical maximum lot coverage applied to the parcel area.
-      maxBuildingFootprintSqft: Math.round(grossSf * 0.4),
-      maxHeightFt: standards.maxHeightFt,
-      floorAreaRatio: standards.floorAreaRatio,
+      maxBuildingFootprintSqft: Math.round(grossSf * coverage),
+      maxHeightFt,
+      floorAreaRatio,
       setbacks: { frontFt, rearFt, sideFt },
       netBuildableAreaSqft: Math.round(netWidth * netDepth),
     };
   };
-  let gridics = buildGridics();
+  let gridics: SiteFeasibilityData['gridics'] = undefined;
 
   // Owner name. The GIS's dedicated ownfrst/ownlast fields are AUTHORITATIVE for
   // first/last order when populated (counties vary: some store ownname surname-
@@ -2218,6 +2254,14 @@ export async function executeLandAnalysis(
     zoningDescription,
     zoningSource,
     zoningSourceUrl,
+    zoningSources,
+    zoningVerificationStatus,
+    zoningJurisdiction,
+    zoningStandardsStatus,
+    zoningStandardsSourceUrl,
+    zoningMinimumLotAreaSqft,
+    zoningMaxLotCoveragePct,
+    zoningPermittedUses,
     isSimulated,
     coordinates: {
       lat,
@@ -2249,35 +2293,75 @@ export async function executeLandAnalysis(
   // Always resolve the current district for each submitted search. Zoning and
   // official source pages can change, so repeat searches must not reuse a prior run.
   const parcelZoning = String(info.zoning || '').trim();
-  if (parcelZoning && parcelZoning.toUpperCase() !== 'N/A') {
-    zoningCode = parcelZoning;
-    zoningDescription = `${countyName} County GIS parcel zoning district`;
-    zoningSource = 'county-gis';
-    zoningSourceUrl = undefined;
-  } else {
+  {
     onStageChange?.("Resolving zoning (county GIS + AI)...");
-    const gisZoning = await fetchCountyZoningCode(countyName, lng, lat).catch(() => null);
-    const aiZoning = await fetchZoningViaWebSearch(info.siteadd || addressString, countyName, lat, lng, gisZoning?.code || null).catch(() => null);
+    const pointZoning = await fetchCountyZoningCode(countyName, lng, lat).catch(() => null);
+    const parcelGisZoning = parcelZoning && parcelZoning.toUpperCase() !== 'N/A' &&
+      (selectedState !== 'SC' || info.recordsource === 'county-gis')
+      ? {
+          code: parcelZoning,
+          description: `${countyName} parcel zoning district`,
+          sourceUrl: selectedState === 'SC' ? scCountySource(countyName)?.portalUrl : undefined,
+        }
+      : null;
+    const gisZoning = pointZoning || parcelGisZoning;
+    const zoningHint = gisZoning?.code || (parcelZoning && parcelZoning.toUpperCase() !== 'N/A' ? parcelZoning : null);
+    const aiZoning = await fetchZoningViaWebSearch(
+      info.siteadd || addressString,
+      countyName,
+      lat,
+      lng,
+      zoningHint,
+      parcelId,
+    ).catch(() => null);
     const normZ = (s: string) => (s || '').toUpperCase().replace(/\s+/g, '');
+    const sourceList = (...values: (string | undefined)[]) => [...new Set(values.filter((v): v is string => !!v))];
+    const applyResearchStandards = (research: ZoningResult) => {
+      researchedZoningStandards = research.standards;
+      zoningJurisdiction = research.jurisdiction;
+      zoningStandardsSourceUrl = research.standards?.sourceUrl;
+      zoningMinimumLotAreaSqft = research.standards?.minimumLotAreaSqft;
+      zoningMaxLotCoveragePct = research.standards?.maxLotCoveragePct;
+      zoningPermittedUses = research.standards?.permittedUses;
+      const values = [
+        research.standards?.maxHeightFt,
+        research.standards?.floorAreaRatio,
+        research.standards?.setbacks?.frontFt,
+        research.standards?.setbacks?.rearFt,
+        research.standards?.setbacks?.sideFt,
+        research.standards?.maxLotCoveragePct,
+      ];
+      const verifiedCount = values.filter((value) => Number.isFinite(Number(value))).length;
+      zoningStandardsStatus = verifiedCount === values.length ? 'official' : verifiedCount > 0 ? 'mixed' : 'estimated';
+    };
 
     if (gisZoning && aiZoning && normZ(gisZoning.code) === normZ(aiZoning.code)) {
       // Both agree → authoritative GIS code, AI-confirmed.
       zoningCode = gisZoning.code;
       zoningDescription = `${gisZoning.description || aiZoning.description || `${countyName} County GIS zoning district`} (county GIS — AI-confirmed)`;
       zoningSource = 'county-gis';
-      zoningSourceUrl = aiZoning.sourceUrl;
+      zoningSourceUrl = gisZoning.sourceUrl || aiZoning.sourceUrl;
+      zoningSources = sourceList(gisZoning.sourceUrl, ...aiZoning.sources);
+      zoningVerificationStatus = 'official-gis';
+      applyResearchStandards(aiZoning);
     } else if (gisZoning) {
       // GIS has the authoritative code (AI couldn't confirm or differed → keep GIS, flag).
       zoningCode = gisZoning.code;
       zoningDescription = `${gisZoning.description || `${countyName} County GIS zoning district`}${aiZoning ? ` (county GIS; AI suggested ${aiZoning.code} — verify)` : ''}`;
       zoningSource = 'county-gis';
-      zoningSourceUrl = aiZoning?.sourceUrl;
+      zoningSourceUrl = gisZoning.sourceUrl;
+      zoningSources = sourceList(gisZoning.sourceUrl, ...(aiZoning?.sources || []));
+      zoningVerificationStatus = aiZoning ? 'conflict' : 'official-gis';
+      zoningStandardsStatus = 'estimated';
     } else if (aiZoning) {
       // City parcel / GIS gap → the AI lookup fills it in.
       zoningCode = aiZoning.code;
-      zoningDescription = `${aiZoning.description} (AI web lookup — verify)`;
+      zoningDescription = `${aiZoning.description} (official parcel source verified by AI research)`;
       zoningSource = 'web';
       zoningSourceUrl = aiZoning.sourceUrl;
+      zoningSources = aiZoning.sources;
+      zoningVerificationStatus = 'official-research';
+      applyResearchStandards(aiZoning);
     } else {
       // Never show "See map" — neither source resolved it; the report's grounded
       // zoning section verifies it against the authoritative county GIS.
@@ -2285,11 +2369,27 @@ export async function executeLandAnalysis(
       zoningDescription = hasCountyZoning(countyName)
         ? `Not auto-resolved at the parcel point — to be verified against ${countyName} County GIS`
         : "No published county zoning GIS; web lookup found nothing";
+      zoningVerificationStatus = 'unavailable';
+      zoningStandardsStatus = 'unavailable';
     }
   }
 
   gridics = buildGridics(); // re-derive setback/height estimates from the real district
-  onPartial?.({ zoningCode, zoningDescription, zoningSource, zoningSourceUrl, gridics });
+  onPartial?.({
+    zoningCode,
+    zoningDescription,
+    zoningSource,
+    zoningSourceUrl,
+    zoningSources,
+    zoningVerificationStatus,
+    zoningJurisdiction,
+    zoningStandardsStatus,
+    zoningStandardsSourceUrl,
+    zoningMinimumLotAreaSqft,
+    zoningMaxLotCoveragePct,
+    zoningPermittedUses,
+    gridics,
+  });
 
   // STAGE 4 — comps (need the zoning use-category, so they start after zoning).
   // Pass the full input address (it has the city/ZIP) so the comp search targets
@@ -2310,6 +2410,14 @@ export async function executeLandAnalysis(
     zoningDescription,
     zoningSource,
     zoningSourceUrl,
+    zoningSources,
+    zoningVerificationStatus,
+    zoningJurisdiction,
+    zoningStandardsStatus,
+    zoningStandardsSourceUrl,
+    zoningMinimumLotAreaSqft,
+    zoningMaxLotCoveragePct,
+    zoningPermittedUses,
     gridics,
     slopeProfile,
     floodZone,
@@ -4031,13 +4139,77 @@ async function geocodeAddress(address: string, apiKey: string): Promise<{ lat: n
  * source URL. Returns null if nothing credible is found. The result is clearly
  * labeled as a web lookup ("verify") in the UI — it is not authoritative.
  */
-type ZoningResult = { code: string; description: string; sourceUrl?: string };
+type ZoningMatchMethod = 'parcel-gis' | 'official-address-result' | 'official-parcel-report';
+type ZoningResearchStandards = Partial<ZoningStandards> & {
+  minimumLotAreaSqft?: number;
+  maxLotCoveragePct?: number;
+  permittedUses?: string[];
+  sourceUrl: string;
+};
+type ZoningResult = {
+  code: string;
+  description: string;
+  sourceUrl: string;
+  sources: string[];
+  jurisdiction?: string;
+  matchMethod: ZoningMatchMethod;
+  standards?: ZoningResearchStandards;
+};
 
-const ZONING_SYSTEM = "You are a zoning research assistant. Find the official zoning district code for a specific parcel from government/official sources (county/city GIS, zoning map, ordinance). Report the specific district code; never answer 'see map'. Only report a code you can support from a credible official source; otherwise return null. Never fabricate.";
+const ZONING_SYSTEM = "You are a zoning research assistant. Use only supplied official evidence. A district code requires an official parcel-specific GIS/address/report URL and a matchMethod; an ordinance alone cannot assign a parcel. Dimensional standards require an adopted ordinance URL. Return the requested JSON, use null for unsupported fields, and never fabricate.";
 
-/** Parse the zoning JSON ({zoningCode, zoningDescription, source}) out of a model
- *  reply, rejecting non-answers ("see map" / "varies" / null). */
-function parseZoningResult(text: string): ZoningResult | null {
+function cleanEvidenceUrl(value: unknown): string | null {
+  if (typeof value !== 'string' || !/^https?:\/\//i.test(value.trim())) return null;
+  try {
+    const url = new URL(value.trim());
+    url.hash = '';
+    return url.toString();
+  } catch { return null; }
+}
+
+function isOfficialZoningUrl(value: string, countyName = ''): boolean {
+  try {
+    const url = new URL(value);
+    const host = url.hostname.toLowerCase();
+    const countyToken = countyBaseName(countyName).toLowerCase().replace(/[^a-z0-9]/g, '');
+    const compactHost = host.replace(/[^a-z0-9]/g, '');
+    const registeredService = getZoningServices(countyName).some((service) => {
+      try { return new URL(service.url).hostname.toLowerCase() === host; } catch { return false; }
+    });
+    return registeredService
+      || /\.(gov|us)$/.test(host)
+      || host === 'arcgis.com' || host.endsWith('.arcgis.com')
+      || host.endsWith('.municode.com') || host.endsWith('.amlegal.com') || host.endsWith('.ecode360.com')
+      || host.endsWith('.schneidercorp.com') || host.endsWith('.wthgis.com')
+      || /(^|\.)(cityof|townof|countyof)/.test(host)
+      || (!!countyToken && countyToken.length >= 4 && compactHost.includes(countyToken));
+  } catch { return false; }
+}
+
+function evidenceUrlAllowed(value: string, evidenceUrls: string[], countyName: string): boolean {
+  if (!isOfficialZoningUrl(value, countyName)) return false;
+  if (!evidenceUrls.length) return true;
+  try {
+    const candidate = new URL(value);
+    return evidenceUrls.some((raw) => {
+      try {
+        const evidence = new URL(raw);
+        return candidate.hostname.toLowerCase() === evidence.hostname.toLowerCase();
+      } catch { return false; }
+    });
+  } catch { return false; }
+}
+
+function boundedNumber(value: unknown, min: number, max: number, allowZero = false): number | undefined {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n < min || n > max || (!allowZero && n === 0)) return undefined;
+  return Math.round(n * 100) / 100;
+}
+
+/** Parse a parcel-specific zoning response and reject unsupported district codes
+ *  or allowance numbers. A zoning ordinance alone can describe a district, but
+ *  it cannot prove that the searched parcel is assigned to that district. */
+function parseZoningResult(text: string, evidenceUrls: string[] = [], countyName = ''): ZoningResult | null {
   const m = text.match(/```json\s*([\s\S]*?)\s*```/) || text.match(/\{[\s\S]*\}/);
   const jsonStr = m ? (m[1] || m[0]) : '';
   if (!jsonStr) return null;
@@ -4047,10 +4219,47 @@ function parseZoningResult(text: string): ZoningResult | null {
     if (!code || typeof code !== 'string') return null;
     const c = code.trim();
     if (!c || /^(null|n\/?a|unknown|see\s*map|varies|tbd)$/i.test(c)) return null;
+    const method = String(obj?.matchMethod || '').trim().toLowerCase() as ZoningMatchMethod;
+    if (!['parcel-gis', 'official-address-result', 'official-parcel-report'].includes(method)) return null;
+    const parcelSource = cleanEvidenceUrl(obj?.parcelSource || obj?.source);
+    if (!parcelSource || !evidenceUrlAllowed(parcelSource, evidenceUrls, countyName)) return null;
+
+    const rawSources = [
+      parcelSource,
+      cleanEvidenceUrl(obj?.ordinanceSource),
+      ...(Array.isArray(obj?.sources) ? obj.sources.map(cleanEvidenceUrl) : []),
+    ].filter((url): url is string => !!url && evidenceUrlAllowed(url, evidenceUrls, countyName));
+    const sources = [...new Set(rawSources)];
+    const ordinanceSource = cleanEvidenceUrl(obj?.ordinanceSource);
+    const standardsObj = obj?.standards && typeof obj.standards === 'object' ? obj.standards : {};
+    let standards: ZoningResearchStandards | undefined;
+    if (ordinanceSource && evidenceUrlAllowed(ordinanceSource, evidenceUrls, countyName)) {
+      const permittedUses = Array.isArray(obj?.permittedUses)
+        ? obj.permittedUses.map((v: unknown) => String(v).trim()).filter(Boolean).slice(0, 8)
+        : undefined;
+      standards = {
+        lotType: typeof standardsObj.lotType === 'string' ? standardsObj.lotType.slice(0, 80) : undefined,
+        maxHeightFt: boundedNumber(standardsObj.maxHeightFt, 1, 1000),
+        floorAreaRatio: boundedNumber(standardsObj.floorAreaRatio, 0.01, 50),
+        setbacks: {
+          frontFt: boundedNumber(standardsObj.frontSetbackFt, 0, 1000, true) ?? NaN,
+          rearFt: boundedNumber(standardsObj.rearSetbackFt, 0, 1000, true) ?? NaN,
+          sideFt: boundedNumber(standardsObj.sideSetbackFt, 0, 1000, true) ?? NaN,
+        },
+        minimumLotAreaSqft: boundedNumber(standardsObj.minimumLotAreaSqft, 1, 100000000),
+        maxLotCoveragePct: boundedNumber(standardsObj.maxLotCoveragePct, 0.01, 100),
+        permittedUses,
+        sourceUrl: ordinanceSource,
+      };
+    }
     return {
       code: c,
       description: (typeof obj.zoningDescription === 'string' && obj.zoningDescription.trim()) || 'Zoning (web lookup)',
-      sourceUrl: typeof obj.source === 'string' ? obj.source : undefined,
+      sourceUrl: parcelSource,
+      sources,
+      jurisdiction: typeof obj.jurisdiction === 'string' && obj.jurisdiction.trim() ? obj.jurisdiction.trim().slice(0, 160) : undefined,
+      matchMethod: method,
+      standards,
     };
   } catch { return null; }
 }
@@ -4059,13 +4268,14 @@ function parseZoningResult(text: string): ZoningResult | null {
  *  + queries): the searching runs on the Perplexity Search API (parallel
  *  batched queries over official zoning sources) and Gemini synthesizes from
  *  those results; fallback is Google-Search grounding. */
-async function zoningViaGemini(promptText: string, geminiKey: string, searchQueries?: string[]): Promise<ZoningResult | null> {
+async function zoningViaGemini(promptText: string, geminiKey: string, searchQueries?: string[], countyName = ''): Promise<ZoningResult | null> {
   try {
     let effectivePrompt = promptText;
     let usePerplexity = false;
+    let evidenceUrls: string[] = [];
     if (searchQueries && searchQueries.length && liveWebResearchConfigured()) {
-      const { block } = await perplexityResearchBlock(searchQueries, { maxResultsPerQuery: 6, maxSources: 18, mode: 'hard' });
-      if (block) { effectivePrompt = promptText + block; usePerplexity = true; }
+      const { block, urls } = await perplexityResearchBlock(searchQueries, { maxResultsPerQuery: 6, maxSources: 18, mode: 'hard' });
+      if (block) { effectivePrompt = promptText + block; evidenceUrls = urls; usePerplexity = true; }
     }
     const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=${geminiKey}`;
     const res = await queueGemini(() => fetch(url, {
@@ -4080,7 +4290,7 @@ async function zoningViaGemini(promptText: string, geminiKey: string, searchQuer
     if (!res.ok) return null;
     const data = await res.json();
     const text = data.candidates?.[0]?.content?.parts?.map((p: any) => p.text).filter(Boolean).join('') || '';
-    return parseZoningResult(text);
+    return parseZoningResult(text, evidenceUrls, countyName);
   } catch (e) {
     console.warn('Zoning web lookup failed:', e);
     return null;
@@ -4088,14 +4298,15 @@ async function zoningViaGemini(promptText: string, geminiKey: string, searchQuer
 }
 
 /** Zoning web lookup via DeepSeek V4 Pro using Perplexity Search API sources. */
-async function zoningViaDeepSeek(promptText: string, searchQueries?: string[]): Promise<ZoningResult | null> {
+async function zoningViaDeepSeek(promptText: string, searchQueries?: string[], countyName = ''): Promise<ZoningResult | null> {
   const key = getDeepSeekKey();
   if (!key) return null;
   try {
     let effectivePrompt = promptText;
+    let evidenceUrls: string[] = [];
     if (searchQueries && searchQueries.length && liveWebResearchConfigured()) {
-      const { block } = await perplexityResearchBlock(searchQueries, { maxResultsPerQuery: 6, maxSources: 18, mode: 'hard' });
-      if (block) { effectivePrompt = promptText + block; }
+      const { block, urls } = await perplexityResearchBlock(searchQueries, { maxResultsPerQuery: 6, maxSources: 18, mode: 'hard' });
+      if (block) { effectivePrompt = promptText + block; evidenceUrls = urls; }
     }
     const body = JSON.stringify({
       model: 'deepseek-v4-pro',
@@ -4110,7 +4321,7 @@ async function zoningViaDeepSeek(promptText: string, searchQueries?: string[]): 
     });
     const msg = await postDeepSeekOnce(body, key);
     const content = msg?.content;
-    if (content) return parseZoningResult(content);
+    if (content) return parseZoningResult(content, evidenceUrls, countyName);
     return null;
   } catch (e) {
     console.warn('Zoning web lookup via DeepSeek failed:', e);
@@ -4123,36 +4334,43 @@ async function zoningViaDeepSeek(promptText: string, searchQueries?: string[]): 
  *  official sources, so we POST the prompt straight to the chat completions
  *  endpoint and parse the zoning JSON from the reply. Returns null on missing
  *  key / no confident answer. */
-async function zoningViaPerplexity(promptText: string): Promise<ZoningResult | null> {
+async function zoningViaPerplexity(promptText: string, searchQueries: string[], countyName = ''): Promise<ZoningResult | null> {
   const key = getPerplexityKey();
   if (!key) return null;
   try {
+    const { block, urls: evidenceUrls } = await perplexityResearchBlock(searchQueries, { maxResultsPerQuery: 6, maxSources: 18, mode: 'hard' });
+    if (!block) return null;
     const body = JSON.stringify({
       model: 'sonar',
       messages: [
         { role: 'system', content: ZONING_SYSTEM },
-        { role: 'user', content: promptText },
+        { role: 'user', content: promptText + block },
       ],
       temperature: 0.2,
       max_tokens: 2000,
     });
-    for (let attempt = 0; attempt < 2; attempt++) {
-      const res = await fetchWithTimeout('https://api.perplexity.ai/chat/completions', 30000, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
-        body,
-      });
-      if (res.ok) {
-        const data = await res.json();
-        const content = data?.choices?.[0]?.message?.content;
-        return content ? parseZoningResult(content) : null;
+    const routes = ['/.netlify/functions/perplexity-chat', 'https://api.perplexity.ai/chat/completions'];
+    for (const route of routes) {
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const res = await fetchWithTimeout(route, 30000, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
+          body,
+        });
+        if (res.ok) {
+          const data = await res.json();
+          const content = data?.choices?.[0]?.message?.content;
+          const citations = Array.isArray(data?.citations)
+            ? data.citations.map((v: unknown) => typeof v === 'string' ? v : String((v as any)?.url || '')).filter(Boolean)
+            : [];
+          return content ? parseZoningResult(content, [...evidenceUrls, ...citations], countyName) : null;
+        }
+        if ((res.status === 429 || res.status >= 500) && attempt === 0) {
+          await new Promise((r) => setTimeout(r, 1500));
+          continue;
+        }
+        if (res.status < 500 && res.status !== 429) break;
       }
-      if ((res.status === 429 || res.status >= 500) && attempt === 0) {
-        await new Promise((r) => setTimeout(r, 1500));
-        continue;
-      }
-      console.warn(`Zoning web lookup via Perplexity HTTP ${res.status}.`);
-      return null;
     }
     return null;
   } catch (e) {
@@ -4173,6 +4391,7 @@ export async function fetchZoningViaWebSearch(
   lat?: number,
   lng?: number,
   gisHint?: string | null,
+  parcelId?: string,
 ): Promise<ZoningResult | null> {
   const perplexityKey = getPerplexityKey();
   const deepSeekKey = getDeepSeekKey();
@@ -4187,6 +4406,7 @@ export async function fetchZoningViaWebSearch(
 
   const countyLine = countyName ? ` It is in ${countyBaseName(countyName)} County, ${stateFull}.` : '';
   const coordLine = (lat != null && lng != null) ? ` The parcel is at coordinates ${lat.toFixed(6)}, ${lng.toFixed(6)}.` : '';
+  const parcelLine = parcelId && parcelId.toUpperCase() !== 'N/A' ? ` The parcel ID is "${parcelId}".` : '';
   const hintLine = gisHint
     ? `\nThe county GIS zoning layer returns "${gisHint}" at this parcel point — this is usually authoritative. CONFIRM it against the official zoning map, and only return a different code if you find clear official evidence the parcel's actual zoning is different (e.g. it sits inside a municipality with its own zoning).`
     : '';
@@ -4198,26 +4418,54 @@ Return ONLY a JSON object inside a markdown code block:
 \`\`\`
 Rules: "zoningCode" must be the actual district code that jurisdiction uses for THIS parcel (e.g. R-1, RA, C-2, PUD, MX, RR). Determine the specific code — do NOT answer "see the map" or "varies". If after a genuine search you truly cannot confirm it from a credible official/government source, return {"zoningCode": null}. Never guess or fabricate a code.`;
 
+  const researchPrompt = `${lookupPrompt}
+
+Also verify the CURRENT dimensional standards and return this expanded JSON shape instead:
+{
+  "zoningCode": "R-1",
+  "zoningDescription": "Single-Family Residential",
+  "jurisdiction": "Official zoning authority",
+  "matchMethod": "parcel-gis|official-address-result|official-parcel-report",
+  "parcelSource": "https://official parcel-specific source...",
+  "ordinanceSource": "https://official adopted ordinance...",
+  "standards": {
+    "lotType": "interior",
+    "maxHeightFt": 35,
+    "floorAreaRatio": null,
+    "frontSetbackFt": 30,
+    "rearSetbackFt": 25,
+    "sideSetbackFt": 10,
+    "minimumLotAreaSqft": 20000,
+    "maxLotCoveragePct": 40
+  },
+  "permittedUses": ["Single-family detached dwelling"],
+  "sources": ["https://..."]
+}
+The ordinance alone does not prove the parcel's district. parcelSource must be an official parcel-specific result, and matchMethod must explain the match. Every allowance must be supported by ordinanceSource; use null for missing values. Use only URLs present in the supplied live evidence.${parcelLine}`;
+
   // Parallel batched Perplexity searches over the official zoning sources.
   const cityPart = (address.split(',')[1] || '').trim();
   const queries = [
-    `zoning district "${address}"`,
+    `zoning district "${address}"${parcelId ? ` parcel ${parcelId}` : ''}`,
     `${countyName ? `${countyBaseName(countyName)} County ${state}` : cityPart ? `${cityPart} ${state}` : stateFull} zoning map GIS parcel viewer`,
-    `${countyName ? `${countyBaseName(countyName)} County` : cityPart} ${state} zoning ordinance districts${gisHint ? ` ${gisHint}` : ''}`,
+    `${countyName ? `${countyBaseName(countyName)} County` : cityPart} ${state} zoning ordinance ${gisHint || ''} setbacks height minimum lot permitted uses`,
     `${cityPart || countyBaseName(countyName || '') || ''} ${state} planning department zoning lookup`.trim(),
   ];
 
   // Perplexity's `sonar` model runs its own live web search over official sources
   // — try it first when a key is configured, then fall back to DeepSeek/Gemini.
   if (perplexityKey) {
-    const pplxResult = await zoningViaPerplexity(lookupPrompt);
+    const pplxResult = await zoningViaPerplexity(researchPrompt, queries, countyName);
     if (pplxResult) return pplxResult;
   }
 
-  if (deepSeekKey) {
-    return await zoningViaDeepSeek(lookupPrompt, queries);
+  if (deepSeekKey && perplexityKey) {
+    const deepSeekResult = await zoningViaDeepSeek(researchPrompt, queries, countyName);
+    if (deepSeekResult) return deepSeekResult;
+    if (!geminiApiKey) return null;
+    return await zoningViaGemini(researchPrompt, geminiApiKey, queries, countyName);
   } else if (geminiApiKey) {
-    return await zoningViaGemini(lookupPrompt, geminiApiKey, queries);
+    return await zoningViaGemini(researchPrompt, geminiApiKey, queries, countyName);
   }
   return null;
 }
@@ -6146,8 +6394,6 @@ Use CURRENT LOCAL prices from credible sources; cite them; never invent a price 
 // ===========================================================================
 
 // Fallback per-tree rates (Southeast US, used only if the live lookup fails).
-const TREE_RATE_FALLBACK = { small: 350, medium: 800, large: 1500, stumpGrind: 175 };
-
 /** Static-map zoom that frames a parcel of the given acreage roughly full-bleed. */
 function landZoomForAcres(acres: number): number {
   if (acres <= 0.3) return 19;
@@ -6295,12 +6541,17 @@ Use CURRENT LOCAL prices from credible tree-service / land-clearing / excavation
     const small = num(o.small), medium = num(o.medium), large = num(o.large);
     if (!small && !medium && !large) return null;
     const modelSources = Array.isArray(o.sources) ? o.sources.map((s: any) => String(s)) : [];
-    const sources = filterLocalSources([...modelSources, ...(diag.perplexityUrls || [])], [baseCounty, `${baseCounty.toLowerCase()}county`, stateFullLower, stateLower]);
+    const discoveredHosts = new Set((diag.perplexityUrls || []).map((url) => {
+      try { return new URL(url).hostname.toLowerCase(); } catch { return ''; }
+    }).filter(Boolean));
+    const sources = filterLocalSources([...modelSources, ...(diag.perplexityUrls || [])], [baseCounty, `${baseCounty.toLowerCase()}county`, stateFullLower, stateLower])
+      .filter((url) => !diag.perplexityAttempted || discoveredHosts.size === 0 || discoveredHosts.has(new URL(url).hostname.toLowerCase()));
+    if (!sources.length) return null;
     return {
-      small: small || TREE_RATE_FALLBACK.small,
-      medium: medium || TREE_RATE_FALLBACK.medium,
-      large: large || TREE_RATE_FALLBACK.large,
-      stumpGrind: num(o.stumpGrind) || TREE_RATE_FALLBACK.stumpGrind,
+      small,
+      medium,
+      large,
+      stumpGrind: num(o.stumpGrind),
       mulchPerAcre: num(o.mulchPerAcre),
       mulchDayRate: num(o.mulchDayRate),
       clearingPerAcre: num(o.clearingPerAcre),
@@ -6311,17 +6562,14 @@ Use CURRENT LOCAL prices from credible tree-service / land-clearing / excavation
   } catch { return null; }
 }
 
-// Fallback method rates (Southeast US) when the live lookup omits them.
-const CLEARING_FALLBACK = { mulchPerAcre: 2200, mulchDayRate: 2500, clearingPerAcre: 4500, clearingDayRate: 4000, haulOff: 600 };
-
 /** Build the two bulk-clearing method options (forestry mulching vs. traditional
  *  excavator) with cost RANGES, applying day-rate minimums on small lots. */
 function buildClearingMethods(acres: number, treeCount: number, largeCount: number, r: TreeRates): ClearingMethod[] {
-  const mulchPerAcre = r.mulchPerAcre || CLEARING_FALLBACK.mulchPerAcre;
-  const mulchDay = r.mulchDayRate || CLEARING_FALLBACK.mulchDayRate;
-  const clearPerAcre = r.clearingPerAcre || CLEARING_FALLBACK.clearingPerAcre;
-  const clearDay = r.clearingDayRate || CLEARING_FALLBACK.clearingDayRate;
-  const haul = r.haulOff || CLEARING_FALLBACK.haulOff;
+  const mulchPerAcre = r.mulchPerAcre;
+  const mulchDay = r.mulchDayRate;
+  const clearPerAcre = r.clearingPerAcre;
+  const clearDay = r.clearingDayRate;
+  const haul = r.haulOff;
 
   // Forestry mulching: per-acre cost, floored by the 1–2 day machine minimum.
   const mulchAcreCost = acres * mulchPerAcre;
@@ -6350,7 +6598,7 @@ function buildClearingMethods(acres: number, treeCount: number, largeCount: numb
       high: clearHigh,
       note: 'Best for building foundations — includes root extraction; haul-off/dump fees raise the top of the range.',
     },
-  ];
+  ].filter((method) => method.low > 0 && method.high > 0);
 }
 
 /**
@@ -6386,11 +6634,11 @@ export async function fetchLandClearingEstimate(reportData: SiteFeasibilityData)
   if (!vision) throw new Error('The satellite tree count didn\'t answer (a slow or rate-limited moment) — tap Retry.');
   const rates = await ratesPromise;
 
-  const r: TreeRates = rates || { ...TREE_RATE_FALLBACK, mulchPerAcre: 0, mulchDayRate: 0, clearingPerAcre: 0, clearingDayRate: 0, haulOff: 0, sources: [] as string[] };
+  const r: TreeRates = rates || { small: 0, medium: 0, large: 0, stumpGrind: 0, mulchPerAcre: 0, mulchDayRate: 0, clearingPerAcre: 0, clearingDayRate: 0, haulOff: 0, sources: [] as string[] };
   const sizes = ['small', 'medium', 'large'] as const;
   const trees: TreeRemovalLine[] = sizes
     .map((size) => ({ size, count: vision[size], unitCost: r[size], cost: Math.round(vision[size] * r[size]) }))
-    .filter((t) => t.count > 0);
+    .filter((t) => t.count > 0 && t.unitCost > 0);
   const treeCount = vision.small + vision.medium + vision.large;
   const treeRemovalCost = trees.reduce((s, t) => s + t.cost, 0);
   const stumpGrindCost = Math.round(treeCount * r.stumpGrind);
@@ -6398,13 +6646,21 @@ export async function fetchLandClearingEstimate(reportData: SiteFeasibilityData)
   // Bulk machine-clearing METHODS (forestry mulching vs. traditional excavator),
   // each with a real-time cost range; plus the key cost-driving factors.
   const clearingMethods = buildClearingMethods(acres, treeCount, vision.large, r);
-  const haul = r.haulOff || CLEARING_FALLBACK.haulOff;
+  const haul = r.haulOff;
   const clearingFactors = [
     vision.large >= Math.max(5, treeCount * 0.3)
       ? `Tree diameter: ~${vision.large} large/mature trees (>12 in) — too big for a mulcher, so an excavator + chainsaw crew is needed, pushing cost toward the high end.`
       : `Tree diameter: mostly small/medium trees — a forestry mulcher can clear these quickly (often a 1-day job).`,
-    `Stump management: mulching leaves the root balls in the ground. For a slab/utilities, add stump grinding (~$${r.stumpGrind.toLocaleString()}/stump × ${treeCount.toLocaleString()} ≈ $${stumpGrindCost.toLocaleString()}).`,
-    `Haul-off: leaving mulch on-site is cheapest; hauling the debris off adds roughly $${haul.toLocaleString()}+ in dump fees & fuel.`,
+    r.stumpGrind > 0
+      ? `Stump management: mulching leaves the root balls in the ground. The cited local rate is about $${r.stumpGrind.toLocaleString()} per stump; ${treeCount.toLocaleString()} stumps would be about $${stumpGrindCost.toLocaleString()}.`
+      : 'Stump management: mulching leaves root balls in place; no current local stump-grinding price was verified.',
+    haul > 0
+      ? `Haul-off: leaving mulch on site is cheapest; the cited local debris allowance is about $${haul.toLocaleString()}.`
+      : 'Haul-off: no current local debris-hauling price was verified.',
+  ];
+  const imagerySources = [
+    `https://www.google.com/maps/@${lat},${lng},19z/data=!3m1!1e3`,
+    ...(streetViewUrl ? [`https://www.google.com/maps?layer=c&cbll=${lat},${lng}`] : []),
   ];
 
   return {
@@ -6421,8 +6677,10 @@ export async function fetchLandClearingEstimate(reportData: SiteFeasibilityData)
     clearingFactors,
     satelliteUrl,
     streetViewUrl: streetViewUrl || undefined,
+    imagerySources,
     locality,
     pricingSources: r.sources,
+    pricingStatus: rates ? 'verified' : 'unavailable',
     realTimePricing: !!rates,
     generatedAt: Date.now(),
   };
@@ -6436,18 +6694,6 @@ export async function fetchLandClearingEstimate(reportData: SiteFeasibilityData)
  * citable local source — there are NO baseline/fallback numbers and no guesses.
  * Returns null only when keys/address are missing.
  */
-// Typical current NC ranges used ONLY as a labeled fallback so a price always
-// shows when the live local lookup can't verify an exact figure.
-const UTIL_ESTIMATE = {
-  waterTap: [1500, 6000] as [number, number],
-  sewerTap: [3000, 9000] as [number, number],
-  well: [6000, 15000] as [number, number],
-  septic: [8000, 20000] as [number, number],
-  zoningPermit: [50, 150] as [number, number],
-  drivewayPermit: [50, 150] as [number, number],
-  buildingPermits: [1500, 4000] as [number, number],
-};
-
 // National cost-aggregator / average-price sites — never address-specific, so
 // they're the "irrelevant to the address" sources to drop from local pricing.
 const NATIONAL_AGGREGATORS = [
@@ -6523,11 +6769,12 @@ DETERMINE AVAILABILITY SEPARATELY for water and for sewer — a parcel can be pu
 Name the local water/sewer authority if known.
 Return ONLY a JSON object in a \`\`\`json code block:
 \`\`\`json
-{ "publicWater": "available|not-available|unknown", "waterTap": 0, "waterTapDetail": "", "publicSewer": "available|not-available|unknown", "sewerTap": 0, "sewerTapDetail": "", "well": 0, "septic": 0, "zoningPermitFee": 0, "drivewayPermitFee": 0, "buildingPermitLow": 0, "buildingPermitHigh": 0, "permitNote": "", "provider": "", "sources": ["https://..."] }
+{ "publicWater": "available|not-available|unknown", "publicWaterSource": "https://...", "waterTap": 0, "waterTapDetail": "", "waterTapSource": "https://...", "publicSewer": "available|not-available|unknown", "publicSewerSource": "https://...", "sewerTap": 0, "sewerTapDetail": "", "sewerTapSource": "https://...", "well": 0, "wellSource": "https://...", "septic": 0, "septicSource": "https://...", "zoningPermitFee": 0, "zoningPermitSource": "https://...", "drivewayPermitFee": 0, "drivewayPermitSource": "https://...", "buildingPermitLow": 0, "buildingPermitHigh": 0, "buildingPermitSource": "https://...", "permitNote": "", "provider": "", "sources": ["https://..."] }
 \`\`\`
 STRICT PRICING RULES — REAL FIGURES ONLY:
 - Each cost is ONE EXACT DOLLAR AMOUNT, never a range. Public taps: the exact published fee for the standard residential size. Well & septic: the single most typical current LOCAL installed cost for this county.
 - Every dollar figure MUST come from a page you actually found with Google Search: the utility authority's CURRENT published fee schedule / rate ordinance for tap-connection-impact fees, the jurisdiction's CURRENT adopted permit fee schedule, or named LOCAL well-drilling & septic contractors' current pricing for this county.
+- Put that exact page in the matching *Source field. A number without its line-specific source URL is invalid and must be 0.
 - List in "sources" EVERY distinct source URL you used across all the lines — aim for 6–12 different local sources (fee schedules, rate ordinances, contractor pages), not just one or two. A figure without a source URL is not allowed.
 - If you cannot find a verifiable current local figure for a line, you MUST leave it 0. NEVER estimate, NEVER use national/regional averages, NEVER guess.`;
   const utilitiesSystem = `You are a site-development utilities and permit-fee analyst for ${stateFull} — any city, town, or county. Use web search to find the LOCAL water/sewer provider for the given jurisdiction, its CURRENT published tap/connection/impact fee schedule, the jurisdiction's CURRENT adopted residential permit fee schedule, and current local well & septic contractor pricing. Determine public-water and public-sewer availability SEPARATELY (a parcel may be public water + septic, well + public sewer, both, or neither) and report EACH cost as a single exact dollar amount. Return only the JSON. Every number must be traceable to a cited source URL; leave any unverifiable number 0 — never estimate or use regional averages.`;
@@ -6559,11 +6806,8 @@ STRICT PRICING RULES — REAL FIGURES ONLY:
     text = await groundedGeminiText(geminiKey, prompt, utilitiesSystem, 90000, queries, diag);
   }
 
-  // ALWAYS produce pricing. If the live search fails or answers oddly, fall back
-  // to a fully-estimated result (availability from the jurisdiction, prices from
-  // the typical-NC ranges) instead of erroring — the user asked to always see a
-  // price. `o` stays {} so `resolve()` uses the jurisdiction and every line takes
-  // its labeled estimate.
+  // Keep the section visible if research fails, but do not manufacture
+  // availability or prices; unsupported fields remain unavailable.
   let o: any = {};
   if (text) {
     const m = text.match(/```json\s*([\s\S]*?)\s*```/) || text.match(/\{[\s\S]*\}/);
@@ -6576,90 +6820,113 @@ STRICT PRICING RULES — REAL FIGURES ONLY:
     if (s.includes('not') || s === 'no' || s === 'false' || s === 'unavailable') return 'not-available';
     return 'unknown';
   };
-  // The AI's read, but when it's UNKNOWN fall back to the parcel's jurisdiction:
-  // inside a municipality → assume public service; unincorporated → well/septic.
-  const resolve = (v: any): 'available' | 'not-available' | 'unknown' => {
-    const s = norm(v);
-    return s !== 'unknown' ? s : (incorporated ? 'available' : 'not-available');
+  // City limits do not prove that water or sewer mains reach this parcel.
+  // Address-level availability needs its own supporting source.
+  const modelSources = Array.isArray(o.sources) ? o.sources.map((s: any) => String(s)) : [];
+  const evidencePool = (diag.perplexityUrls || []).filter((url) => /^https?:\/\//i.test(url));
+  const lineSource = (value: any): string | undefined => {
+    const candidate = String(value || '').trim();
+    if (!/^https?:\/\//i.test(candidate)) return undefined;
+    try {
+      const parsed = new URL(candidate);
+      if (NATIONAL_AGGREGATORS.some((host) => parsed.hostname.toLowerCase().includes(host))) return undefined;
+      const supported = evidencePool.length > 0
+        ? evidencePool.some((raw) => {
+            try { return new URL(raw).hostname.toLowerCase() === parsed.hostname.toLowerCase(); } catch { return false; }
+          })
+        : filterLocalSources([candidate], [place || '', baseCounty, `${baseCounty}county`, zip, state]).length > 0;
+      return supported ? candidate : undefined;
+    } catch { return undefined; }
   };
-  const publicWater = resolve(o.publicWater);
-  const publicSewer = resolve(o.publicSewer);
+  const publicWaterSource = lineSource(o.publicWaterSource);
+  const publicSewerSource = lineSource(o.publicSewerSource);
+  const publicWater = publicWaterSource ? norm(o.publicWater) : 'unknown';
+  const publicSewer = publicSewerSource ? norm(o.publicSewer) : 'unknown';
 
   // REAL PRICES ONLY: a line is "verified" only when the grounded search
   // returned an actual figure. Each cost is now a SINGLE EXACT amount (low ===
   // high) — an exact published tap fee, or the single typical local well/septic
   // cost. Unverified lines carry NO dollar amount (no averages, no guesses). A
   // legacy low/high pair is tolerated and collapsed to one figure for resilience.
-  const exact = (val: any, legacyLow?: any, legacyHigh?: any): { low: number; high: number; verified: boolean } => {
+  const exact = (val: any, sourceValue: any, legacyLow?: any, legacyHigh?: any): { low: number; high: number; verified: boolean; sourceUrl?: string } => {
     let v = num(val);
     if (!v) { const lo = num(legacyLow), hi = num(legacyHigh); v = (lo && hi) ? Math.round((lo + hi) / 2) : (lo || hi); }
-    if (!v) return { low: 0, high: 0, verified: false };
-    return { low: v, high: v, verified: true };
+    const sourceUrl = lineSource(sourceValue);
+    if (!v || !sourceUrl) return { low: 0, high: 0, verified: false };
+    return { low: v, high: v, verified: true, sourceUrl };
   };
 
   const detailOf = (v: any) => { const s = String(v || '').trim(); return s ? s.slice(0, 120) : undefined; };
-  // When no verified figure exists, ALWAYS still show a price using a typical NC
-  // range, clearly labeled as an estimate (estimated:true) — never a blank line.
-  const withFallback = (r: { low: number; high: number; verified: boolean }, range: [number, number]) =>
-    r.verified ? r : { low: range[0], high: range[1], verified: false, estimated: true };
-
+  // A missing source leaves the line unavailable instead of inserting a range.
   const lines: UtilityLine[] = [];
   // WATER: public tap fee when served, else private well.
   if (publicWater === 'available') {
-    const r = withFallback(exact(o.waterTap, o.waterTapLow, o.waterTapHigh), UTIL_ESTIMATE.waterTap);
+    const r = exact(o.waterTap, o.waterTapSource, o.waterTapLow, o.waterTapHigh);
     lines.push({ name: 'Public water tap fee', kind: 'water', isPublic: true, status: 'available', ...r, detail: detailOf(o.waterTapDetail), note: 'municipal water tap / connection / impact fee' });
-  } else {
-    const r = withFallback(exact(o.well, o.wellLow, o.wellHigh), UTIL_ESTIMATE.well);
+  } else if (publicWater === 'not-available') {
+    const r = exact(o.well, o.wellSource, o.wellLow, o.wellHigh);
     lines.push({ name: 'Private well', kind: 'water', isPublic: false, status: publicWater, ...r, note: 'drill + pump + connection (no public water)' });
+  } else {
+    lines.push({ name: 'Water service', kind: 'water', isPublic: false, status: 'unknown', low: 0, high: 0, verified: false, sourceUrl: publicWaterSource, note: 'Address-level public water availability was not verified.' });
   }
   // SEWER: public tap fee when served, else septic.
   if (publicSewer === 'available') {
-    const r = withFallback(exact(o.sewerTap, o.sewerTapLow, o.sewerTapHigh), UTIL_ESTIMATE.sewerTap);
+    const r = exact(o.sewerTap, o.sewerTapSource, o.sewerTapLow, o.sewerTapHigh);
     lines.push({ name: 'Public sewer tap fee', kind: 'sewer', isPublic: true, status: 'available', ...r, detail: detailOf(o.sewerTapDetail), note: 'municipal sewer tap / connection / impact fee' });
-  } else {
-    const r = withFallback(exact(o.septic, o.septicLow, o.septicHigh), UTIL_ESTIMATE.septic);
+  } else if (publicSewer === 'not-available') {
+    const r = exact(o.septic, o.septicSource, o.septicLow, o.septicHigh);
     lines.push({ name: 'Septic system', kind: 'sewer', isPublic: false, status: publicSewer, ...r, note: 'perc/soil test + conventional system install (no public sewer)' });
+  } else {
+    lines.push({ name: 'Sewer service', kind: 'sewer', isPublic: false, status: 'unknown', low: 0, high: 0, verified: false, sourceUrl: publicSewerSource, note: 'Address-level public sewer availability was not verified.' });
   }
 
   // Residential permit fees from the jurisdiction's adopted fee schedule —
   // verified figures only, same no-guessing rule as the tap fees.
   const permits: PermitFeeLine[] = [];
   const zp = num(o.zoningPermitFee);
-  permits.push(zp
-    ? { name: 'Residential zoning permit', low: zp, high: zp, verified: true }
-    : { name: 'Residential zoning permit', low: UTIL_ESTIMATE.zoningPermit[0], high: UTIL_ESTIMATE.zoningPermit[1], verified: false, estimated: true });
+  const zpSource = lineSource(o.zoningPermitSource);
+  permits.push(zp && zpSource
+    ? { name: 'Residential zoning permit', low: zp, high: zp, verified: true, sourceUrl: zpSource }
+    : { name: 'Residential zoning permit', low: 0, high: 0, verified: false });
   const dp = num(o.drivewayPermitFee);
-  permits.push(dp
-    ? { name: 'Driveway permit', low: dp, high: dp, verified: true }
-    : { name: 'Driveway permit', low: UTIL_ESTIMATE.drivewayPermit[0], high: UTIL_ESTIMATE.drivewayPermit[1], verified: false, estimated: true });
+  const dpSource = lineSource(o.drivewayPermitSource);
+  permits.push(dp && dpSource
+    ? { name: 'Driveway permit', low: dp, high: dp, verified: true, sourceUrl: dpSource }
+    : { name: 'Driveway permit', low: 0, high: 0, verified: false });
   const bl = num(o.buildingPermitLow), bh = num(o.buildingPermitHigh);
-  permits.push((bl || bh)
+  const buildingPermitSource = lineSource(o.buildingPermitSource);
+  permits.push((bl || bh) && buildingPermitSource
     ? {
         name: 'Building + trade permits (new SFH, ~1,400–1,800 sqft)',
         low: bl || bh, high: Math.max(bl, bh),
         note: detailOf(o.permitNote) || 'calculated from square footage / construction valuation — exact amount depends on the plans',
         verified: true,
+        sourceUrl: buildingPermitSource,
       }
     : {
         name: 'Building + trade permits (new SFH, ~1,400–1,800 sqft)',
-        low: UTIL_ESTIMATE.buildingPermits[0], high: UTIL_ESTIMATE.buildingPermits[1],
+        low: 0, high: 0,
         note: `typical ${state} total for building + electrical + plumbing + mechanical permits — confirm with the jurisdiction`,
-        verified: false, estimated: true,
+        verified: false,
       });
 
   // Developer-prepaid caveat — tap fees on subdivision lots are often already
   // satisfied by the developer's infrastructure installation.
+  if (!permits[2].verified) permits[2].note = 'No adopted local fee schedule was verified for this calculation.';
   const tapNote = (publicWater === 'available' || publicSewer === 'available')
     ? 'These tap fees are not necessarily still owed: if this lot is in a subdivision where the developer already installed and paid for the taps, the fees may be satisfied. Ask the utility whether taps were purchased for this lot before budgeting — it can change the development cost by thousands.'
     : undefined;
 
   const real = lines.some((l) => l.verified) || permits.some((p) => p.verified);
-  // Totals sum every priced line (verified or estimated) so a total always shows.
+  // Totals sum verified priced lines; unavailable lines remain zero internally.
   const totalLow = lines.reduce((s, l) => s + l.low, 0);
   const totalHigh = lines.reduce((s, l) => s + l.high, 0);
   const bothPublic = publicWater === 'available' && publicSewer === 'available';
-  const neitherPublic = publicWater !== 'available' && publicSewer !== 'available';
-  const summary = bothPublic
+  const neitherPublic = publicWater === 'not-available' && publicSewer === 'not-available';
+  const availabilityUnknown = publicWater === 'unknown' || publicSewer === 'unknown';
+  const summary = availabilityUnknown
+    ? 'Address-level utility availability is not verified; confirm service with the cited provider.'
+    : bothPublic
     ? 'Public water + sewer available — budget tap/impact fees.'
     : neitherPublic
       ? 'No public water/sewer — this parcel needs a private well + septic.'
@@ -6667,7 +6934,6 @@ STRICT PRICING RULES — REAL FIGURES ONLY:
 
   // Sources RELEVANT to this address only: filter strictly to domains/paths matching the city,
   // county, zip code, or specific local utility provider name (including regional acronyms like cfpua).
-  const modelSources = Array.isArray(o.sources) ? o.sources.map((s: any) => String(s)) : [];
   const cityTok = (String(reportData.inputAddress || '').split(',')[1] || '').trim();
   
   const extraLocalTokens: string[] = [];
@@ -6698,7 +6964,7 @@ STRICT PRICING RULES — REAL FIGURES ONLY:
   if (o.waterTapDetail) addExtraTokens(o.waterTapDetail);
   if (o.sewerTapDetail) addExtraTokens(o.sewerTapDetail);
 
-  const sources = filterLocalSources(
+  const localSources = filterLocalSources(
     [...modelSources, ...(diag.perplexityUrls || [])],
     [
       place || '',
@@ -6709,6 +6975,12 @@ STRICT PRICING RULES — REAL FIGURES ONLY:
       ...extraLocalTokens
     ].filter(Boolean)
   );
+  const sources = [...new Set([
+    ...localSources,
+    ...lines.map((line) => line.sourceUrl).filter((url): url is string => !!url),
+    ...permits.map((permit) => permit.sourceUrl).filter((url): url is string => !!url),
+    'https://tigerweb.geo.census.gov/arcgis/rest/services/TIGERweb/Places_CouSub_ConCity_SubMCD/MapServer/4',
+  ])];
   return {
     locality: zip ? `ZIP ${zip} - ${countyDisplayName(`${county}, ${state}`)}` : countyDisplayName(`${county}, ${state}`),
     jurisdiction, incorporated,

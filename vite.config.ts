@@ -12,6 +12,11 @@ export default defineConfig({
       // functions, so forward that path to the API here. The app's Authorization
       // header (the user's Perplexity key) and JSON body pass straight through,
       // so `npm run dev` gets live Perplexity search without `netlify dev`.
+      '/.netlify/functions/perplexity-chat': {
+        target: 'https://api.perplexity.ai',
+        changeOrigin: true,
+        rewrite: () => '/chat/completions',
+      },
       '/.netlify/functions/perplexity': {
         target: 'https://api.perplexity.ai',
         changeOrigin: true,

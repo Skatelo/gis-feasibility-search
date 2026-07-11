@@ -28,6 +28,34 @@ const optionalCurrency = (value?: number): string =>
   typeof value === 'number' && Number.isFinite(value)
     ? `$${new Intl.NumberFormat().format(value)}`
     : 'Unavailable';
+
+const ownerMapLabel = (data: SiteFeasibilityData): string | null => {
+  if (!data.ownerName) return null;
+  const prefix = data.ownerRecordType === 'deed'
+    ? 'Latest deed grantee'
+    : data.ownerRecordType === 'assessor'
+      ? 'Current tax-roll owner'
+      : data.ownerRecordType === 'gis'
+        ? 'County GIS owner'
+        : data.ownerRecordType === 'statewide'
+          ? 'State snapshot owner'
+          : 'Owner';
+  return `${prefix}: ${data.ownerName}`;
+};
+
+const SourceLinks: FC<{ label: string; sources?: string[]; emptyText?: string }> = ({ label, sources, emptyText }) => {
+  const links = [...new Set((sources || []).filter((url) => /^https?:\/\//i.test(url)))];
+  return (
+    <div className="cost-sources">
+      <span className="cost-sources-label">{label}:</span>
+      {links.length > 0 ? links.map((url) => (
+        <a key={url} href={url} target="_blank" rel="noreferrer">
+          {(() => { try { return new URL(url).hostname.replace(/^www\./, ''); } catch { return 'source'; } })()}
+        </a>
+      )) : <span style={{ fontSize: '0.72rem', color: 'var(--warning, #d97706)' }}>{emptyText || 'No supporting source was verified.'}</span>}
+    </div>
+  );
+};
 import { getZoningServices, hasCountyZoning } from '../data/ncZoning';
 import { fetchOsmFeatures } from '../data/osmFeatures';
 import {
@@ -1674,6 +1702,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
   const wetlandsLayerRef = useRef<any>(null);
   const zoningLayersRef = useRef<any[]>([]);
   const zoningLabelOverlayRef = useRef<any>(null);
+  const ownerLabelOverlayRef = useRef<any>(null);
   const osmDataLayerRef = useRef<any>(null);
   const osmCacheRef = useRef<{ key: string; fc: any } | null>(null);
 
@@ -1825,7 +1854,11 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
     });
     const hasRealZoning = !!data.zoningSource && data.zoningCode !== 'N/A';
     if (hasRealZoning) {
-      labelFeatures.push({ type: 'Feature', geometry: { type: 'Point', coordinates: [lng, lat] }, properties: { label: data.zoningSource === 'web' ? `Zoning: ${data.zoningCode} (web)` : `Zoning: ${data.zoningCode}`, angle: 0, kind: 'zoning' } });
+      labelFeatures.push({ type: 'Feature', geometry: { type: 'Point', coordinates: [lng, lat] }, properties: { label: data.zoningSource === 'web' ? `Zoning: ${data.zoningCode} (verified)` : `Zoning: ${data.zoningCode}`, angle: 0, kind: 'zoning' } });
+    }
+    const currentOwnerLabel = ownerMapLabel(data);
+    if (currentOwnerLabel) {
+      labelFeatures.push({ type: 'Feature', geometry: { type: 'Point', coordinates: [lng, lat] }, properties: { label: currentOwnerLabel, angle: 0, kind: 'owner' } });
     }
     const labelsFC = { type: 'FeatureCollection', features: labelFeatures };
 
@@ -1899,7 +1932,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
         map.addLayer({ id: 'neighbor-parcel-line', type: 'line', source: 'neighbor-parcels', paint: { 'line-color': '#ffa726', 'line-width': 1.3, 'line-opacity': 0.85 } });
         map.addLayer({
           id: 'neighbor-owner-text', type: 'symbol', source: 'neighbor-owner-labels', minzoom: 15,
-          layout: { 'text-field': ['get', 'owner'], 'text-size': 12, 'text-max-width': 7, 'text-font': ['DIN Pro Bold', 'Arial Unicode MS Bold'] },
+          layout: { 'text-field': ['get', 'ownerLabel'], 'text-size': 12, 'text-max-width': 8, 'text-font': ['DIN Pro Bold', 'Arial Unicode MS Bold'] },
           paint: { 'text-color': '#FFD54F', 'text-halo-color': '#000000', 'text-halo-width': 1.8 },
         });
       }
@@ -1917,7 +1950,11 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
               return;
             }
             const b = map.getBounds();
-            const res = await fetchParcelsInBbox(b.getWest(), b.getSouth(), b.getEast(), b.getNorth(), data.countyName);
+            const res = await fetchParcelsInBbox(b.getWest(), b.getSouth(), b.getEast(), b.getNorth(), data.countyName, {
+              parcelId: data.parcelId,
+              ownerName: data.ownerName,
+              ownerRecordType: data.ownerRecordType,
+            });
             if (!res || seq !== neighborSeqRef.current || !map.getSource('neighbor-parcels')) return;
             map.getSource('neighbor-parcels').setData(res.polygons);
             map.getSource('neighbor-owner-labels').setData(res.labels);
@@ -1933,6 +1970,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
             .setLngLat(e.lngLat)
             .setHTML(`<div style="font-family:Arial,sans-serif;padding:4px 6px;color:#000;font-size:12px;line-height:1.45;">
                 <strong style="font-size:12.5px;">${p.owner}</strong><br>
+                <span style="font-size:10px;color:#555;">${p.ownerRecordLabel || 'Parcel owner record'}</span><br>
                 ${p.siteadd ? `${p.siteadd}<br>` : ''}
                 ${p.acres && p.acres !== 'null' ? `${p.acres} acres · ` : ''}PIN ${p.parno || 'N/A'}
               </div>`)
@@ -1961,6 +1999,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
         map.addSource('parcel-labels', { type: 'geojson', data: labelsFC });
         map.addLayer({ id: 'parcel-dim-labels', type: 'symbol', source: 'parcel-labels', filter: ['==', ['get', 'kind'], 'dim'], layout: { 'text-field': ['get', 'label'], 'text-size': 12, 'text-rotate': ['get', 'angle'], 'text-rotation-alignment': 'viewport', 'text-allow-overlap': true, 'text-ignore-placement': true }, paint: { 'text-color': '#ffffff', 'text-halo-color': '#000000', 'text-halo-width': 1.4 } });
         map.addLayer({ id: 'parcel-zoning-label', type: 'symbol', source: 'parcel-labels', filter: ['==', ['get', 'kind'], 'zoning'], layout: { 'text-field': ['get', 'label'], 'text-size': 13, 'text-offset': [0, -1.4], 'text-allow-overlap': true }, paint: { 'text-color': '#00ff88', 'text-halo-color': '#000000', 'text-halo-width': 1.6 } });
+        map.addLayer({ id: 'parcel-owner-label', type: 'symbol', source: 'parcel-labels', filter: ['==', ['get', 'kind'], 'owner'], layout: { 'text-field': ['get', 'label'], 'text-size': 12, 'text-offset': [0, 1.4], 'text-max-width': 14, 'text-allow-overlap': true }, paint: { 'text-color': '#FFD54F', 'text-halo-color': '#000000', 'text-halo-width': 1.8 } });
       }
       if (mapboxPopupRef.current) { mapboxPopupRef.current.remove(); mapboxPopupRef.current = null; }
       mapboxPopupRef.current = new mapboxgl.Popup({ closeOnClick: false, maxWidth: '290px', offset: 10 }).setLngLat([lng, lat]).setHTML(infoHtml).addTo(map);
@@ -2210,6 +2249,10 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
       zoningLabelOverlayRef.current.setMap(null);
       zoningLabelOverlayRef.current = null;
     }
+    if (ownerLabelOverlayRef.current) {
+      ownerLabelOverlayRef.current.setMap(null);
+      ownerLabelOverlayRef.current = null;
+    }
     if (labelsInstanceRef.current) {
       labelsInstanceRef.current.forEach(label => label.setMap(null));
       labelsInstanceRef.current = [];
@@ -2312,6 +2355,44 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
           this.div.parentNode?.removeChild(this.div);
           this.div = null;
         }
+      }
+    }
+
+    class OwnerLabelOverlay extends google.maps.OverlayView {
+      private div: HTMLDivElement | null = null;
+      private position: any;
+      private text: string;
+
+      constructor(position: any, text: string) {
+        super();
+        this.position = position;
+        this.text = text;
+      }
+
+      onAdd() {
+        const div = document.createElement('div');
+        div.className = 'owner-map-label';
+        const inner = document.createElement('div');
+        inner.innerText = this.text;
+        div.appendChild(inner);
+        this.div = div;
+        this.getPanes().overlayMouseTarget.appendChild(div);
+      }
+
+      draw() {
+        if (!this.div) return;
+        const position = this.getProjection().fromLatLngToDivPixel(this.position);
+        if (!position) return;
+        this.div.style.left = position.x + 'px';
+        this.div.style.top = position.y + 'px';
+        this.div.style.position = 'absolute';
+        this.div.style.transform = 'translate(-50%, 45%)';
+      }
+
+      onRemove() {
+        if (!this.div) return;
+        this.div.parentNode?.removeChild(this.div);
+        this.div = null;
       }
     }
 
@@ -2427,7 +2508,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
       });
       
       const subjectMarkerInfoWindow = new google.maps.InfoWindow({
-        content: `<div style="font-family: Arial, sans-serif; font-size: 12px; color: #000; padding: 4px;"><strong>Target Site</strong><br/>${data.inputAddress}</div>`
+        content: `<div style="font-family: Arial, sans-serif; font-size: 12px; color: #000; padding: 4px;"><strong>Target Site</strong><br/>${data.inputAddress}<br/><strong>${ownerMapLabel(data) || 'Owner unavailable'}</strong></div>`
       });
       
       subjectMarker.addListener('click', () => {
@@ -2442,12 +2523,18 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
       const hasRealZoning = !!data.zoningSource && data.zoningCode !== 'N/A';
       if (hasRealZoning) {
         const zoningLabelText = data.zoningSource === 'web'
-          ? `Zoning: ${data.zoningCode} (web)`
+          ? `Zoning: ${data.zoningCode} (verified)`
           : `Zoning: ${data.zoningCode}`;
         zoningLabelOverlayRef.current = new ZoningLabelOverlay(center, zoningLabelText);
         if (showZoning) {
           zoningLabelOverlayRef.current.setMap(googleMapInstanceRef.current);
         }
+      }
+
+      const currentOwnerLabel = ownerMapLabel(data);
+      if (currentOwnerLabel) {
+        ownerLabelOverlayRef.current = new OwnerLabelOverlay(center, currentOwnerLabel);
+        ownerLabelOverlayRef.current.setMap(googleMapInstanceRef.current);
       }
 
       // Comps markers (red circles with index numbers). ONE shared InfoWindow is
@@ -2559,6 +2646,10 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
       if (zoningLabelOverlayRef.current) {
         try { zoningLabelOverlayRef.current.setMap(null); } catch {}
         zoningLabelOverlayRef.current = null;
+      }
+      if (ownerLabelOverlayRef.current) {
+        try { ownerLabelOverlayRef.current.setMap(null); } catch {}
+        ownerLabelOverlayRef.current = null;
       }
       if (labelsInstanceRef.current) {
         try { labelsInstanceRef.current.forEach(label => label.setMap(null)); } catch {}
@@ -3986,7 +4077,11 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '8px', marginBottom: '1rem' }}>
                   <h3 className="registry-card-header" style={{ margin: 0 }}>Zoning & Allowances</h3>
                   <span
-                    title="Setbacks, height, and FAR are typical estimates by use category. Confirm against the local zoning ordinance."
+                    title={data.zoningStandardsStatus === 'official'
+                      ? 'Dimensional standards were read from the cited adopted ordinance.'
+                      : data.zoningStandardsStatus === 'mixed'
+                        ? 'Some standards came from the ordinance; missing fields remain labeled estimates.'
+                        : 'No complete adopted standard was found; displayed screening values are estimates.'}
                     style={{
                       fontSize: '10px',
                       backgroundColor: 'var(--warning-bg, rgba(245, 158, 11, 0.12))',
@@ -3997,7 +4092,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                       border: '1px solid var(--warning-border, rgba(245, 158, 11, 0.35))'
                     }}
                   >
-                    STANDARDS: ESTIMATED
+                    STANDARDS: {(data.zoningStandardsStatus || 'unavailable').toUpperCase()}
                   </span>
                 </div>
 
@@ -4006,7 +4101,13 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                     <span className="field-label">
                       Zoning Classification
                       <span style={{ display: 'block', fontSize: '9px', color: 'var(--text-muted)', fontWeight: 600, letterSpacing: '0.03em' }}>
-                        {data.zoningSource === 'county-gis' ? 'SOURCE: COUNTY GIS' : data.zoningSource === 'web' ? 'SOURCE: WEB LOOKUP — VERIFY' : ''}
+                        {data.zoningVerificationStatus === 'official-gis'
+                          ? 'VERIFIED: OFFICIAL GIS'
+                          : data.zoningVerificationStatus === 'official-research'
+                            ? 'VERIFIED: OFFICIAL PARCEL SOURCE'
+                            : data.zoningVerificationStatus === 'conflict'
+                              ? 'CONFLICT: GIS RETAINED'
+                              : 'NOT VERIFIED'}
                       </span>
                     </span>
                     {data.zoningCode ? (
@@ -4034,6 +4135,17 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                   </div>
                 </div>
 
+                {data.zoningJurisdiction && (
+                  <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginTop: '0.55rem' }}>
+                    Jurisdiction: <strong>{data.zoningJurisdiction}</strong>
+                  </div>
+                )}
+                <SourceLinks
+                  label="Official zoning sources"
+                  sources={[...(data.zoningSources || []), ...(data.zoningSourceUrl ? [data.zoningSourceUrl] : [])]}
+                  emptyText="No parcel-specific official zoning source was verified."
+                />
+
                 {data.gridics && (
                   <>
                     <div className="gridics-stats-grid" style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '15px', marginTop: '12px' }}>
@@ -4052,24 +4164,43 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                         </div>
                       )}
                       <div>
-                        <span className="coord-label" style={{ display: 'block', fontSize: '10px', color: 'var(--text-muted)', marginBottom: '2px' }}>MAX FOOTPRINT (EST.):</span>
+                        <span className="coord-label" style={{ display: 'block', fontSize: '10px', color: 'var(--text-muted)', marginBottom: '2px' }}>{data.zoningMaxLotCoveragePct != null ? 'MAX FOOTPRINT:' : 'MAX FOOTPRINT (EST.):'}</span>
                         <strong style={{ fontSize: '12px', color: 'var(--text-primary)' }}>{data.gridics.maxBuildingFootprintSqft.toLocaleString()} SF</strong>
                       </div>
                       <div>
-                        <span className="coord-label" style={{ display: 'block', fontSize: '10px', color: 'var(--text-muted)', marginBottom: '2px' }}>MAX HEIGHT (EST.):</span>
+                        <span className="coord-label" style={{ display: 'block', fontSize: '10px', color: 'var(--text-muted)', marginBottom: '2px' }}>{data.zoningStandardsStatus === 'official' ? 'MAX HEIGHT:' : 'MAX HEIGHT (EST.):'}</span>
                         <strong style={{ fontSize: '12px', color: 'var(--text-primary)' }}>{data.gridics.maxHeightFt} ft</strong>
                       </div>
                       <div>
-                        <span className="coord-label" style={{ display: 'block', fontSize: '10px', color: 'var(--text-muted)', marginBottom: '2px' }}>FAR (EST.):</span>
+                        <span className="coord-label" style={{ display: 'block', fontSize: '10px', color: 'var(--text-muted)', marginBottom: '2px' }}>{data.zoningStandardsStatus === 'official' ? 'FAR:' : 'FAR (EST.):'}</span>
                         <strong style={{ fontSize: '12px', color: 'var(--text-primary)' }}>{data.gridics.floorAreaRatio}</strong>
                       </div>
                       <div>
-                        <span className="coord-label" style={{ display: 'block', fontSize: '10px', color: 'var(--text-muted)', marginBottom: '2px' }}>TYPICAL SETBACKS (EST.):</span>
+                        <span className="coord-label" style={{ display: 'block', fontSize: '10px', color: 'var(--text-muted)', marginBottom: '2px' }}>{data.zoningStandardsStatus === 'official' ? 'SETBACKS:' : 'TYPICAL SETBACKS (EST.):'}</span>
                         <strong style={{ fontSize: '11px', color: 'var(--text-primary)' }}>
                           F: {data.gridics.setbacks.frontFt} ft | R: {data.gridics.setbacks.rearFt} ft | S: {data.gridics.setbacks.sideFt} ft
                         </strong>
                       </div>
+                      {data.zoningMinimumLotAreaSqft != null && (
+                        <div>
+                          <span className="coord-label" style={{ display: 'block', fontSize: '10px', color: 'var(--text-muted)', marginBottom: '2px' }}>MINIMUM LOT AREA:</span>
+                          <strong style={{ fontSize: '12px', color: 'var(--text-primary)' }}>{data.zoningMinimumLotAreaSqft.toLocaleString()} SF</strong>
+                        </div>
+                      )}
+                      {data.zoningMaxLotCoveragePct != null && (
+                        <div>
+                          <span className="coord-label" style={{ display: 'block', fontSize: '10px', color: 'var(--text-muted)', marginBottom: '2px' }}>MAX LOT COVERAGE:</span>
+                          <strong style={{ fontSize: '12px', color: 'var(--text-primary)' }}>{data.zoningMaxLotCoveragePct}%</strong>
+                        </div>
+                      )}
                     </div>
+
+                    {data.zoningPermittedUses && data.zoningPermittedUses.length > 0 && (
+                      <div style={{ marginTop: '12px', fontSize: '0.76rem', color: 'var(--text-secondary)' }}>
+                        <strong style={{ display: 'block', color: 'var(--text-primary)', marginBottom: '4px' }}>Published permitted uses</strong>
+                        {data.zoningPermittedUses.join(' | ')}
+                      </div>
+                    )}
 
                     <hr style={{ border: '0', borderTop: '1px solid var(--bg-card-border)', margin: '15px 0' }} />
 
@@ -4081,7 +4212,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                         </strong>
                       </div>
                       <span style={{ fontSize: '10px', backgroundColor: 'var(--success-bg)', color: 'var(--success)', padding: '3px 8px', borderRadius: '4px', textTransform: 'uppercase', fontWeight: 'bold', border: '1px solid var(--success-border)' }}>
-                        Estimated
+                        {data.zoningStandardsStatus === 'official' ? 'Ordinance-based' : 'Screening estimate'}
                       </span>
                     </div>
                   </>
@@ -4406,7 +4537,10 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                   {utilitiesLoading && !utilities ? (
                     <div className="cost-loading"><Loader2 size={15} className="spinner" /><span>Checking water/sewer availability, tap fees &amp; permit schedules…</span></div>
                   ) : utilitiesError && !utilities ? (
-                    <div className="enf-err"><AlertCircle size={12} /> {utilitiesError}</div>
+                    <div>
+                      <div className="enf-err"><AlertCircle size={12} /> {utilitiesError}</div>
+                      <SourceLinks label="Sources" emptyText="The lookup failed before a supporting source could be verified." />
+                    </div>
                   ) : utilities ? (
                     <>
                       <div className="util-summary">
@@ -4422,16 +4556,17 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                             <div className="util-row-top">
                               <span className="util-name">{ln.name}</span>
                               <span className={`util-badge ${ln.isPublic ? 'public' : 'private'}`}>
-                                {ln.isPublic ? 'Public hookup' : (ln.kind === 'water' ? 'Well needed' : 'Septic needed')}
+                                {ln.status === 'unknown' ? 'Availability unverified' : ln.isPublic ? 'Public hookup' : (ln.kind === 'water' ? 'Well needed' : 'Septic needed')}
                               </span>
                             </div>
                             {ln.detail && <div className="util-note util-detail">{ln.detail}</div>}
                             {ln.note && <div className="util-note">{ln.note}</div>}
                             <div className="util-cost">
-                              {ln.low === ln.high ? `$${ln.low.toLocaleString()}` : `$${ln.low.toLocaleString()} – $${ln.high.toLocaleString()}`}{' '}
+                              {ln.low > 0 ? (ln.low === ln.high ? `$${ln.low.toLocaleString()}` : `$${ln.low.toLocaleString()} - $${ln.high.toLocaleString()}`) : 'Unavailable'}{' '}
                               {ln.verified
                                 ? <span className="util-verified-tag">{ln.isPublic ? 'exact published fee' : 'typical local cost'}</span>
-                                : <span className="util-verified-tag util-estimate-tag">typical {data?.countyName?.includes(', SC') ? 'SC' : 'NC'} estimate · confirm with {utilities.provider || 'the local provider'}</span>}
+                                : <span className="util-verified-tag util-estimate-tag">no verified source</span>}
+                              {ln.sourceUrl && <a href={ln.sourceUrl} target="_blank" rel="noreferrer" style={{ marginLeft: '6px' }}>source</a>}
                             </div>
                           </div>
                         ))}
@@ -4461,13 +4596,18 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                                 <span className="util-name">{p.name}</span>
                               </div>
                               {p.note && <div className="util-note">{p.note}</div>}
-                              <div className="util-cost">{p.low === p.high ? `$${p.low.toLocaleString()}` : `~$${p.low.toLocaleString()} – $${p.high.toLocaleString()}`} <span className={`util-verified-tag ${p.verified ? '' : 'util-estimate-tag'}`}>{p.verified ? 'fee schedule' : `typical ${data?.countyName?.includes(', SC') ? 'SC' : 'NC'} estimate`}</span></div>
+                              <div className="util-cost">
+                                {p.low > 0 ? (p.low === p.high ? `$${p.low.toLocaleString()}` : `$${p.low.toLocaleString()} - $${p.high.toLocaleString()}`) : 'Unavailable'}{' '}
+                                <span className={`util-verified-tag ${p.verified ? '' : 'util-estimate-tag'}`}>{p.verified ? 'fee schedule' : 'no verified source'}</span>
+                                {p.sourceUrl && <a href={p.sourceUrl} target="_blank" rel="noreferrer" style={{ marginLeft: '6px' }}>source</a>}
+                              </div>
                             </div>
                           ))}
                           {(() => {
                             const pl = utilities.permits.reduce((s, p) => s + p.low, 0);
                             const ph = utilities.permits.reduce((s, p) => s + p.high, 0);
                             const tl = utilities.totalLow + pl, th = utilities.totalHigh + ph;
+                            if (tl <= 0 && th <= 0) return null;
                             return (
                               <div className="util-row util-total">
                                 <span>Estimated development fees (taps + permits)</span>
@@ -4477,16 +4617,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                           })()}
                         </div>
                       )}
-                      {utilities.sources.length > 0 && (
-                        <div className="cost-sources">
-                          <span className="cost-sources-label">Sources:</span>
-                          {utilities.sources.map((s, i) => (
-                            <a key={i} href={s} target="_blank" rel="noreferrer">
-                              {(() => { try { return new URL(s).hostname.replace(/^www\./, ''); } catch { return 'source'; } })()}
-                            </a>
-                          ))}
-                        </div>
-                      )}
+                      <SourceLinks label="Sources" sources={utilities.sources} emptyText="No current local utility or fee source was verified." />
                       <div className="cost-disclaimer">{utilities.realTime ? 'Every dollar figure above was found live in the cited local sources (current fee schedules / local contractor pricing) — no estimates or regional averages are ever shown.' : 'No verifiable current local prices were found online for this location, so no figures are shown — nothing is estimated or guessed.'} Tap/impact fees + well/septic costs vary by lot, depth, and soil — confirm with the utility authority and a local well/septic contractor (a septic perc test is required before building).</div>
                     </>
                   ) : null}
@@ -4514,7 +4645,10 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                   {landClearingLoading && !landClearing ? (
                     <div className="cost-loading"><Loader2 size={15} className="spinner" /><span>Reading tree cover from satellite imagery…</span></div>
                   ) : landClearingError && !landClearing ? (
-                    <div className="enf-err"><AlertCircle size={12} /> {landClearingError}</div>
+                    <div>
+                      <div className="enf-err"><AlertCircle size={12} /> {landClearingError}</div>
+                      <SourceLinks label="Sources" emptyText="The lookup failed before imagery or pricing sources could be verified." />
+                    </div>
                   ) : landClearing ? (
                     <>
                       <div className="clearing-hero">
@@ -4531,9 +4665,10 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                         <div className="clearing-hero-meta">
                           <span className="clearing-treecount">~{landClearing.treeCount.toLocaleString()} trees to remove</span>
                           {landClearing.canopyCoverPct != null && <span className="clearing-canopy">~{landClearing.canopyCoverPct}% tree canopy · {landClearing.density}</span>}
-                          <span className="clearing-acres">{landClearing.acres.toLocaleString()} acres · {landClearing.realTimePricing ? 'live local rates' : 'baseline rates'}</span>
+                          <span className="clearing-acres">{landClearing.acres.toLocaleString()} acres · {landClearing.realTimePricing ? 'live local rates' : 'pricing unavailable'}</span>
                         </div>
                       </div>
+                      {landClearing.pricingStatus === 'verified' ? (
                       <div className="clearing-rows">
                         <div className="clearing-row clearing-row-head"><span>Trees</span><span>Each</span><span>Cost</span></div>
                         {landClearing.trees.map((t, i) => (
@@ -4555,6 +4690,9 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                           <span className="clearing-amt">${landClearing.total.toLocaleString()}</span>
                         </div>
                       </div>
+                      ) : (
+                        <div className="cost-disclaimer">No current local clearing price was supported by a source, so no dollar estimate is shown.</div>
+                      )}
 
                       {/* Bulk machine-clearing methods (forestry mulching vs. traditional) */}
                       {landClearing.clearingMethods.length > 0 && (
@@ -4580,17 +4718,9 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                         </div>
                       )}
 
-                      {landClearing.pricingSources.length > 0 && (
-                        <div className="cost-sources">
-                          <span className="cost-sources-label">Pricing sources:</span>
-                          {landClearing.pricingSources.map((s, i) => (
-                            <a key={i} href={s} target="_blank" rel="noreferrer">
-                              {(() => { try { return new URL(s).hostname.replace(/^www\./, ''); } catch { return 'source'; } })()}
-                            </a>
-                          ))}
-                        </div>
-                      )}
-                      <div className="cost-disclaimer">Trees counted from satellite + street view by AI (estimate). Per-tree removal fits scattered/lot trees; the method ranges (forestry mulching vs. traditional excavator) are usually closer for clearing a whole site. {landClearing.realTimePricing ? 'Priced at current local rates' : 'Regional baseline rates'} — a ground assessment / contractor bid will confirm.</div>
+                      <SourceLinks label="Imagery sources" sources={landClearing.imagerySources} />
+                      <SourceLinks label="Pricing sources" sources={landClearing.pricingSources} emptyText="No current local pricing source was verified; no dollar estimate is shown." />
+                      <div className="cost-disclaimer">Tree count and canopy are AI interpretations of the cited imagery. {landClearing.realTimePricing ? 'Every displayed dollar figure comes from the cited current local pricing pages.' : 'No unsourced regional baseline is displayed.'} A ground assessment and contractor bid are still required.</div>
                     </>
                   ) : null}
                 </div>
