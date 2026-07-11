@@ -1,6 +1,6 @@
 import { load } from 'cheerio';
 
-const SEARCH_URL = 'https://uniontreasurer.qpaybill.com/Taxes/TaxesDefaultType4.aspx';
+const UNION_SEARCH_URL = 'https://uniontreasurer.qpaybill.com/Taxes/TaxesDefaultType4.aspx';
 const REQUEST_TIMEOUT_MS = 6_000;
 
 function compactText(value) {
@@ -16,9 +16,43 @@ function match(text, pattern) {
   return compactText(text.match(pattern)?.[1]);
 }
 
-export function parseUnionTreasurerDetail(html, sourceUrl) {
-  const text = compactText(load(String(html || ''))('body').text());
-  const ownerName = match(text, /Name:\s*(.*?)\s+Tax Year:/i);
+function normalizeParcelId(value) {
+  return String(value || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+}
+
+function parcelIdsCompatible(left, right) {
+  const a = normalizeParcelId(left);
+  const b = normalizeParcelId(right);
+  if (!a || !b) return false;
+  if (a === b) return true;
+  const [shorter, longer] = a.length < b.length ? [a, b] : [b, a];
+  return longer.startsWith(shorter) && /^0+$/.test(longer.slice(shorter.length));
+}
+
+function addressCandidates(value) {
+  const street = compactText(value);
+  const candidates = [street];
+  const suffixes = [
+    ['ROAD', 'RD'], ['STREET', 'ST'], ['AVENUE', 'AVE'], ['DRIVE', 'DR'],
+    ['LANE', 'LN'], ['COURT', 'CT'], ['BOULEVARD', 'BLVD'], ['CIRCLE', 'CIR'],
+    ['HIGHWAY', 'HWY'], ['PARKWAY', 'PKWY'], ['PLACE', 'PL'], ['TERRACE', 'TER'],
+    ['TRAIL', 'TRL'], ['ROUTE', 'RT'],
+  ];
+  for (const [full, short] of suffixes) {
+    const fullPattern = new RegExp(`\\b${full}\\b`, 'i');
+    const shortPattern = new RegExp(`\\b${short}\\b`, 'i');
+    if (fullPattern.test(street)) candidates.push(street.replace(fullPattern, short));
+    else if (shortPattern.test(street)) candidates.push(street.replace(shortPattern, full));
+  }
+  return [...new Set(candidates)].slice(0, 4);
+}
+
+export function parseQpayTreasurerDetail(html, sourceUrl, county = '') {
+  const $ = load(String(html || ''));
+  $('br').replaceWith(' ');
+  const text = compactText($('body').text());
+  const ownerName = match(text, /Name:\s*(.*?)(?=\s+(?:Address|Tax Year):)/i);
+  const mailingAddress = match(text, /Name:\s*.*?\s+Address:\s*(.*?)\s+Tax Year:/i);
   const parcelId = match(text, /Map Number:\s*(.*?)\s+Acres:/i);
   const taxYear = number(match(text, /Tax Year:\s*(\d{4})/i));
   const taxAmount = number(match(text, /Total Taxes:\s*\$?([0-9,.]+)/i));
@@ -33,12 +67,13 @@ export function parseUnionTreasurerDetail(html, sourceUrl) {
   return {
     status: 'verified',
     sourceUrl,
-    sourceName: 'Union County Treasurer tax roll',
+    sourceName: `${county || 'County'} Treasurer tax roll`,
     parcelId,
     normalizedParcelId: parcelId.replace(/[^A-Z0-9]/gi, '').toUpperCase(),
     situsAddress: situsAddress || undefined,
     ownerName,
     ownerRecordType: 'assessor',
+    mailingAddress: mailingAddress || undefined,
     acres: acres && acres > 0 ? acres : undefined,
     assessedYear: taxYear,
     assessedPropertyValue,
@@ -49,6 +84,10 @@ export function parseUnionTreasurerDetail(html, sourceUrl) {
     taxYear,
     building: { buildingCount },
   };
+}
+
+export function parseUnionTreasurerDetail(html, sourceUrl) {
+  return parseQpayTreasurerDetail(html, sourceUrl, 'Union County');
 }
 
 function cookieHeader(headers) {
@@ -67,9 +106,10 @@ function hiddenFields(html) {
   return fields;
 }
 
-export async function queryUnionTreasurer(address, fetcher = fetch) {
+export async function queryQpayTreasurer(searchUrl, address, county, expectedParcelId = '', fetcher = fetch) {
+  const SEARCH_URL = String(searchUrl || '');
   const streetAddress = compactText(address).split(',')[0];
-  if (!streetAddress) return null;
+  if (!streetAddress || !SEARCH_URL) return null;
 
   const request = (url, init = {}) => fetcher(url, {
     ...init,
@@ -99,28 +139,45 @@ export async function queryUnionTreasurer(address, fetcher = fetch) {
       },
       body,
     });
-    if (!response.ok) throw new Error(`Union treasurer returned HTTP ${response.status}`);
+    if (!response.ok) throw new Error(`${county || 'County'} treasurer returned HTTP ${response.status}`);
     html = await response.text();
   };
 
   await post({ __EVENTTARGET: 'ctl00$MainContent$ddlCriteriaList' });
-  await post({
-    __EVENTTARGET: '',
-    'ctl00$MainContent$txtCriteriaBox': streetAddress,
-    'ctl00$MainContent$btnSearch': 'Search',
-  });
+  let detailAttempts = 0;
+  for (const candidate of addressCandidates(streetAddress)) {
+    await post({
+      __EVENTTARGET: '',
+      'ctl00$MainContent$txtCriteriaBox': candidate,
+      'ctl00$MainContent$btnSearch': 'Search',
+    });
 
-  const $ = load(html);
-  const rows = $('tr').toArray().map((row) => {
-    const cells = $(row).find('td').toArray().map((cell) => compactText($(cell).text()));
-    const href = $(row).find('a[href*="TaxesDetailsType4.aspx"]').attr('href');
-    return { cells, href };
-  }).filter((row) => row.href && row.cells.includes('RealEstate'));
-  rows.sort((left, right) => Number(right.cells.find((cell) => /^20\d{2}$/.test(cell))) - Number(left.cells.find((cell) => /^20\d{2}$/.test(cell))));
-  if (!rows[0]?.href) return null;
+    const $ = load(html);
+    const rows = $('tr').toArray().map((row) => {
+      const cells = $(row).find('td').toArray().map((cell) => compactText($(cell).text()));
+      const href = $(row).find('a[href*="TaxesDetailsType4.aspx"]').attr('href');
+      return { cells, href };
+    }).filter((row) => row.href && row.cells.includes('RealEstate'));
+    const year = (row) => Number(row.cells.find((cell) => /^20\d{2}$/.test(cell))) || 0;
+    rows.sort((left, right) => {
+      const leftMatches = expectedParcelId && left.cells.some((cell) => parcelIdsCompatible(cell, expectedParcelId));
+      const rightMatches = expectedParcelId && right.cells.some((cell) => parcelIdsCompatible(cell, expectedParcelId));
+      return Number(rightMatches) - Number(leftMatches) || year(right) - year(left);
+    });
 
-  const detailUrl = new URL(rows[0].href, SEARCH_URL).toString();
-  const detail = await request(detailUrl, { headers: { cookie, referer: SEARCH_URL } });
-  if (!detail.ok) return null;
-  return parseUnionTreasurerDetail(await detail.text(), detailUrl);
+    for (const row of rows) {
+      if (detailAttempts >= 6) return null;
+      detailAttempts += 1;
+      const detailUrl = new URL(row.href, SEARCH_URL).toString();
+      const detail = await request(detailUrl, { headers: { cookie, referer: SEARCH_URL } });
+      if (!detail.ok) continue;
+      const record = parseQpayTreasurerDetail(await detail.text(), detailUrl, `${county} County`);
+      if (record && (!expectedParcelId || parcelIdsCompatible(record.parcelId, expectedParcelId))) return record;
+    }
+  }
+  return null;
+}
+
+export async function queryUnionTreasurer(address, fetcher = fetch) {
+  return queryQpayTreasurer(UNION_SEARCH_URL, address, 'Union', '', fetcher);
 }

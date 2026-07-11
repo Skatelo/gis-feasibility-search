@@ -2,6 +2,7 @@ import type { SiteFeasibilityData, SlopeProfile, CompProperty, FloodZoneInfo, We
 import { fetchCountyZoningCode, hasCountyZoning, normalizeCountyKey } from '../data/ncZoning';
 import { getSupabase, isSupabaseConfigured } from './supabaseClient';
 import { fetchOfficialScParcel, mergeOfficialScParcelRecords, officialRecordFromCountyGis, shouldHideStatewideGeometry } from './scParcelVerification';
+import { scCountySource } from '../data/scCountySources';
 
 export interface UserKeys {
   googleMaps?: string;
@@ -936,13 +937,13 @@ const countyParcelLayers: Record<string, string> = {
   abbeville: SC_STATEWIDE_PARCEL_LAYER,
   aiken: SC_STATEWIDE_PARCEL_LAYER,
   allendale: SC_STATEWIDE_PARCEL_LAYER,
-  anderson: SC_STATEWIDE_PARCEL_LAYER,
+  anderson: "https://propertyviewer.andersoncountysc.org/arcgis/rest/services/QueryMap/MapServer/8", // county scrubs owner from GIS (ACPASS only), but MRKT_VALUE / deed / TAX_DIST / PHYS_ADDR are current, verified live
   bamberg: SC_STATEWIDE_PARCEL_LAYER,
   barnwell: SC_STATEWIDE_PARCEL_LAYER,
   beaufort_sc: "https://gis.beaufortcountysc.gov/server/rest/services/ArchiveParcels/MapServer/14", // 2024 parcels (Owner1 / GIS_ACRES), verified live
   berkeley: "https://services.arcgis.com/M2JiPNPcfxhLjlp7/arcgis/rest/services/ParcelsAndAddress/FeatureServer/1",
   calhoun: "https://services5.arcgis.com/B3Zo1xqTw8CidOoF/arcgis/rest/services/WebParcels/FeatureServer/0",
-  charleston: SC_STATEWIDE_PARCEL_LAYER, // was Mt_P_Way_all_data/25 — a Mount-Pleasant-only layer w/ no owner; use statewide until a county owner service is confirmed
+  charleston: "https://gisccapps.charlestoncounty.org/arcgis/rest/services/GIS_VIEWER/New_Public_Search/MapServer/7", // county Public_Search viewer parcels: PID / OWNER1 / ACREAGE / TAX_DISTRICT / MAIL_*, verified live
   cherokee_sc: SC_STATEWIDE_PARCEL_LAYER,
   chester: SC_STATEWIDE_PARCEL_LAYER,
   chesterfield: SC_STATEWIDE_PARCEL_LAYER,
@@ -954,11 +955,11 @@ const countyParcelLayers: Record<string, string> = {
   edgefield: SC_STATEWIDE_PARCEL_LAYER,
   fairfield: SC_STATEWIDE_PARCEL_LAYER,
   florence: "https://services1.arcgis.com/40L6yX6OtdCifNez/arcgis/rest/services/TaxParcelInfo/FeatureServer/0", // was dead http:// (mixed-content); OWNERNAME / CALCULATED_ACREAGE, verified live
-  georgetown: SC_STATEWIDE_PARCEL_LAYER, // county GIS splits geometry (Parcels layer, no owner) from attributes (PARCELATTRIBUTES table, no geometry) — un-joinable in one query; statewide has both owner + geometry
+  georgetown: "https://gis1.georgetowncountysc.org/portal/rest/services/GCGIS_OpenData/MapServer/2", // geometry + TMS only; Owner1 etc. joined from the PARCELATTRIBUTES table via SC_COUNTY_ATTRIBUTE_JOINS, verified live
   greenville: "https://citygis.greenvillesc.gov/arcgis/rest/services/AddressSearch/Property/MapServer/3",
   greenwood: SC_STATEWIDE_PARCEL_LAYER, // was Online_Comprehensive_Map/2 — outline-only (6 fields, no owner); use statewide
   hampton: "https://services8.arcgis.com/6eabNhFouHU5vuYk/arcgis/rest/services/Parcels_Published_view/FeatureServer/1",
-  horry: SC_STATEWIDE_PARCEL_LAYER, // was OpenData/Parcels/0 — open-data layer strips owner (15 fields, no owner/acres); use statewide
+  horry: "https://www.horrycounty.org/gisweb/rest/services/Public/Parcels/MapServer/1", // county viewer parcels: OwnerName / Acreage / assessed+market+taxable values / deed, verified live (point misses on this server; envelope fallback matches)
   jasper: SC_STATEWIDE_PARCEL_LAYER, // was Parcels_View/2 — public view has no owner-name field; use statewide
   kershaw: SC_STATEWIDE_PARCEL_LAYER,
   lancaster: "https://services.arcgis.com/TL5Ii4EYksDBPH1o/arcgis/rest/services/Lancaster_Parcels/FeatureServer/0",
@@ -973,12 +974,34 @@ const countyParcelLayers: Record<string, string> = {
   orangeburg: "https://services2.arcgis.com/bUKn95BqgpYYTnx3/arcgis/rest/services/Main_Public_Tax_Parcel_Map_WFL1/FeatureServer/0",
   pickens: "https://services1.arcgis.com/59960rq18IxUcAVI/arcgis/rest/services/Energov_AGOL/FeatureServer/7",
   richland: "https://services1.arcgis.com/Mnt8FoJcogKtoVBs/arcgis/rest/services/EnergovInformationPublic/FeatureServer/13",
-  saluda: SC_STATEWIDE_PARCEL_LAYER,
+  saluda: "https://saludacountysc.net/arcgis/rest/services/ParcelViewers/PublicWebsite_Pro/MapServer/4", // parcels pre-joined w/ AssessorData (SDE.DBO.*: Name / Tot_Number_Acres / Tot_Assesd_Value / District), verified live
   spartanburg: "https://maps.spartanburgcounty.org/server/rest/services/DisplayMap0_11/MapServer/3", // was stale 2019 snapshot (no owner); live county Parcels has OwnerName / DEEDACREAGE, verified live
   sumter: SC_STATEWIDE_PARCEL_LAYER,
   union_sc: SC_STATEWIDE_PARCEL_LAYER,
   williamsburg: SC_STATEWIDE_PARCEL_LAYER,
   york: "https://services1.arcgis.com/2AGLxyiJoNiVHKwq/arcgis/rest/services/Parcels/FeatureServer/0",
+};
+
+/** Counties whose GIS splits parcel geometry and assessor attributes across a
+ * spatial layer and a non-spatial table: after the polygon resolves, the table
+ * is queried by parcel id and its attributes merged in (e.g. Georgetown, whose
+ * PARCELATTRIBUTES table carries Owner1/BillingAddress/SaleDate per tax year). */
+interface ScAttributeJoin {
+  tableUrl: string;
+  /** Raw field on the parcel polygon holding the join key (e.g. TMS). */
+  parcelField: string;
+  /** Field on the attribute table matched against the join key. */
+  tableField: string;
+  /** Optional ordering so multi-year tables return the newest roll first. */
+  orderBy?: string;
+}
+const SC_COUNTY_ATTRIBUTE_JOINS: Record<string, ScAttributeJoin> = {
+  georgetown: {
+    tableUrl: "https://gis1.georgetowncountysc.org/portal/rest/services/GCGIS_OpenData/MapServer/7",
+    parcelField: "TMS",
+    tableField: "ParcelID",
+    orderBy: "YearID DESC",
+  },
 };
 
 /** Shoelace area (ft²) of a State Plane ring set, to derive acreage when absent. */
@@ -1024,8 +1047,9 @@ function normalizeScStatewideParcelAttrs(a: Record<string, any>): Record<string,
     mzip: getExact("Mailing_Zip"),
     scity: undefined,
     sstate: "SC",
-    parval: getExact("M_Value"),
-    landval: getExact("L_Value"),
+    // The snapshot stores 0 for unassessed parcels — don't surface "$0".
+    parval: Number(getExact("M_Value")) > 0 ? getExact("M_Value") : undefined,
+    landval: Number(getExact("L_Value")) > 0 ? getExact("L_Value") : undefined,
     saledate: undefined,
     reviseyear: undefined,
     sourceref: "N/A",
@@ -1038,6 +1062,18 @@ function normalizeScStatewideParcelAttrs(a: Record<string, any>): Record<string,
 
 /** Maps a county parcel record (varied field names) onto the statewide schema. */
 export function normalizeCountyParcelAttrs(a: Record<string, any>): Record<string, any> {
+  // SDE/joined layers qualify field names ("SDE.DBO.AssessorData.Name",
+  // "gispublic.DBO.PARCEL_LANDRECORDS_2.area"); strip everything up to the last
+  // dot so the field regexes below can match (e.g. Saluda's parcels+assessor
+  // join). First value wins when two source tables share a short name.
+  if (Object.keys(a).some((k) => k.includes('.') && !/\(\)$/.test(k))) {
+    const stripped: Record<string, any> = {};
+    for (const [k, v] of Object.entries(a)) {
+      const short = k.includes('.') && !/\(\)$/.test(k) ? k.slice(k.lastIndexOf('.') + 1) : k;
+      if (!(short in stripped)) stripped[short] = v;
+    }
+    a = stripped;
+  }
   const keys = Object.keys(a);
   const lowerKeySet = new Set(keys.map((k) => k.toLowerCase()));
   if (["t_map_number", "ownership", "mailing_add"].every((k) => lowerKeySet.has(k)) ||
@@ -1102,15 +1138,21 @@ export function normalizeCountyParcelAttrs(a: Record<string, any>): Record<strin
   // house-number + street-name pieces (several county schemas split it).
   let siteadd = get(/site_?address/i, /^siteadd/i, /whole_?address/i, /situs/i, /location_?addr/i, /parcel_?addr/i,
     /property_?address/i, /^phys_?addr/i, /physaddres/i, /^phylocat/i, /^prop_?locat/i, /physical_?(street_?address|location)$/i,
+    /^physical_?address$/i,
     /^physstradd$/i, /^locationaddress$/i, /^locaddress/i, /^street_?address$/i, /legal_?addr/i, /^str_?addr/i, /^address$/i, /prop_?add/i, /^loc$/i,
     /^street$/i, /^locadd$/i, /street_?name/i);
   if (!siteadd) {
-    const hn = get(/house_?num/i, /housenumbe/i, /house_?nr/i, /street_?nbr/i, /phys.?lc.?street_?number/i, /^stnum$/i);
+    const hn = get(/house_?num/i, /housenumbe/i, /house_?nr/i, /street_?nbr/i, /phys.?lc.?street_?number/i, /^stnum$/i, /^street_?number$/i);
     const sn = get(/^street_?name$/i, /^strname$/i, /^strtname$/i, /phys.?lc.?street_?name/i, /^pastna$/i, /^st_?name$/i);
     const st = get(/^street_?type$/i, /^strtype$/i, /^str_?type$/i, /phys.?lc.?str_?type/i, /^pastab$/i, /^st_?type$/i);
     if (hn && sn) siteadd = [hn, sn, st].filter(Boolean).map((v) => String(v).trim()).join(' ');
+  } else if (!/^\d/.test(String(siteadd).trim())) {
+    // The single-field match can land on a bare street name (e.g. Georgetown's
+    // StreetName); prepend the parcel's own street number when one exists.
+    const hn = get(/house_?num/i, /housenumbe/i, /street_?nbr/i, /^stnum$/i, /^street_?number$/i);
+    if (hn) siteadd = `${String(hn).trim()} ${String(siteadd).trim()}`;
   }
-  let sourceref = get(/^sourceref$/i, /deedref/i);
+  let sourceref = get(/^sourceref$/i, /deedref/i, /^legal_?reference$/i);
   if (!sourceref) {
     const book = get(/deed_?book/i, /^book$/i);
     const page = get(/deed_?page/i, /^page$/i);
@@ -1118,8 +1160,15 @@ export function normalizeCountyParcelAttrs(a: Record<string, any>): Record<strin
   }
   let mailadd = get(/^mailadd$/i, /^mail_?address$/i, /^mailing_?(add|addr|address)$/i, /^mailing$/i,
     /^curr_?addr$/i, /^current_?ad$/i, /postal_?address/i, /^owner_?address$/i, /^taxpayer_?address$/i,
-    /^curr_?addr_?1$/i, /^ownmailingline1$/i, /^acct_?addr$/i);
+    /^curr_?addr_?1$/i, /^ownmailingline1$/i, /^acct_?addr$/i, /^owner_?street$/i, /^billing_?address$/i);
   if (!mailadd) mailadd = joinFirstAddressGroup();
+  if (!mailadd) {
+    // Charleston-style split mailing street: MAIL_ST_NO + MAIL_ST_NAME + MAIL_ST_TYPE.
+    const mn = get(/^mail_?(st|street)_?(no|num|number)$/i);
+    const ms = get(/^mail_?(st|street)_?name$/i);
+    const mt = get(/^mail_?(st|street)_?type$/i);
+    if (mn || ms) mailadd = [mn, ms, mt].filter(hasValue).map((v) => String(v).trim()).join(' ');
+  }
   if (!mailadd) {
     mailadd = get(/mailaddr?1/i, /^addr1$/i, /curr_?addr1/i, /mailing/i, /mail_?add/i, /^address_?1$/i, /^address$/i,
       /taxpayer_?addr(ess)?_?1?/i, /^owadr1$/i, /owner_?addr(ess)?_?1?$/i);
@@ -1127,9 +1176,9 @@ export function normalizeCountyParcelAttrs(a: Record<string, any>): Record<strin
   let mcity = get(/mail.*city/i, /^mcity$/i, /curr_?city/i, /loccity/i, /^city$/i, /mailing_?city/i,
     /^owncity$/i, /^owner_?city$/i, /^mail_?addr_?city$/i);
   let mstate = get(/mail.*state/i, /^mstate$/i, /curr_?state/i, /^state$/i, /mailing_?st/i, /mailing_?state/i,
-    /^ownstate$/i, /^owner_?stat$/i, /^mail_?addr_?state$/i, /^st$/i);
-  let mzip = get(/mail.*zip/i, /^mzip$/i, /curr_?zip/i, /zipnum/i, /^zip(code)?$/i, /mailing_?zip/i,
-    /^ownzip$/i, /^curr_?zipco$/i, /^owner_?zip$/i, /^mail_?addr_?zip$/i);
+    /^ownstate$/i, /^owner_?state?$/i, /^mail_?addr_?state$/i, /^st$/i);
+  let mzip = get(/mail.*zip/i, /^mzip$/i, /curr_?zip/i, /zipnum/i, /^zip_?(code)?$/i, /mailing_?zip/i,
+    /^ownzip$/i, /^curr_?zipco$/i, /^owner_?zip(code)?$/i, /^mail_?addr_?zip$/i);
   if (!mcity || !mstate || !mzip) {
     const combined = getCombinedCityStateZip();
     if (combined) {
@@ -1149,20 +1198,25 @@ export function normalizeCountyParcelAttrs(a: Record<string, any>): Record<strin
     mstate,
     mzip,
     scity: get(/^scity$/i, /loccity/i, /^city$/i, /mailing_?city/i),
-    parval: get(/^parval$/i, /total_?value_?assd/i, /assessed_?value/i, /total_?value/i, /total_?prop_?value/i, /^totval$/i, /tot_?mark_?val/i, /market_?value/i, /appraised/i, /^totmkt$/i, /mkt_?total/i, /^mkt_?total$/i, /^tax_?value$/i, /^netval/i, /^par_?value$/i, /^adj_?value$/i, /^mkt_?value$/i, /total_?asses/i, /^assessed_?va?/i, /^cost_?tot/i, /^tot_?val/i, /^cur_?tot_?tot$/i, /m_value/i, /^apr_?tot_?val$/i, /^fair_?mkt_?val$/i, /^tot_?market_?appr$/i, /^tax_?mkt_?val$/i, /^cama_temp_tot_taxable_appr$/i),
-    landval: get(/^landval$/i, /land_?val(ue)?/i, /tot_?land_?val/i, /l_value/i, /^apr_?land_?val$/i, /^taxable_?land$/i),
-    improvementvalue: get(/improvement_?value/i, /imprv_?value/i, /^fmv_?imprv$/i, /building_?value/i, /assessed_?improvements/i),
-    marketvalue: get(/^market_?value$/i, /^fmv_?total$/i, /total_?market_?value/i, /total_?calculated/i),
-    taxablevalue: get(/^taxable_?value$/i, /assessed_?property_?value/i),
+    parval: get(/^parval$/i, /total_?value_?assd/i, /assessed_?value/i, /total_?value/i, /total_?prop_?value/i, /^totval$/i, /tot_?mark_?val/i, /market_?value/i, /appraised/i, /^totmkt$/i, /mkt_?total/i, /^mkt_?total$/i, /^tax_?value$/i, /^netval/i, /^par_?value$/i, /^adj_?value$/i, /^mkt_?value$/i, /total_?asses/i, /^assessed_?va?/i, /^assessed_?prop$/i, /^tot_?assesd/i, /^cost_?tot/i, /^tot_?val/i, /^cur_?tot_?tot$/i, /m_value/i, /^apr_?tot_?val$/i, /^fair_?mkt_?val$/i, /^tot_?market_?appr$/i, /^tax_?mkt_?val$/i, /^cama_temp_tot_taxable_appr$/i),
+    landval: get(/^landval$/i, /land_?val(ue)?/i, /tot_?land_?val/i, /l_value/i, /^apr_?land_?val$/i, /^taxable_?land$/i, /^market_?land$/i),
+    improvementvalue: get(/improvement_?value/i, /imprv_?value/i, /^fmv_?imprv$/i, /building_?value/i, /assessed_?improvements/i, /^market_?imprv$/i),
+    marketvalue: get(/^market_?value$/i, /^fmv_?total$/i, /total_?market_?value/i, /total_?calculated/i, /^market_?prop$/i, /^mrkt_?value$/i),
+    taxablevalue: get(/^taxable_?value$/i, /assessed_?property_?value/i, /^taxable_?prop$/i),
     totalassessedvalue: get(/^total_?assessed_?value$/i, /total_?assessed_?parcel_?value/i),
-    taxcodearea: get(/^tax_?district$/i, /^tax_?distri/i, /^district$/i, /school_?dist/i),
-    saledate: get(/^sale_?date$/i, /^saledate$/i, /deed_?date/i, /transfer_?date/i),
+    taxcodearea: get(/^taxcodearea$/i, /^tax_?district$/i, /^tax_?distri/i, /^district$/i, /school_?dist/i),
+    saledate: get(/^sale_?date$/i, /^saledate$/i, /deed_?date/i, /transfer_?date/i, /^recorded_?date$/i),
     reviseyear: get(/revis.*year/i, /^yearid$/i, /parcel_?year/i, /tax_?year/i, /^year_?$/i),
     sourceref: sourceref ?? "N/A",
     legdecfull: get(/legal_?desc/i, /^legdec/i, /prop_?desc/i, /^legaldesc$/i, /land_?use/i) ?? "County Parcel",
     structyear: get(/year_?built/i, /yearblt/i, /struct.*year/i, /yrbuilt/i),
     cntyname: get(/^cntyname$/i, /^county$/i, /county_?name/i),
     zoning: get(/^zoning$/i, /^zone$/i, /^zoning_?district$/i, /^zoning_?code$/i, /^zoning_?class$/i, /^zone_?code$/i, /^zoning_?class_?code$/i),
+    // County/statewide merge re-normalizes already-normalized attributes, so
+    // pass these markers straight through instead of dropping them (losing
+    // recordsource silently demoted every county-GIS record to "unverified").
+    recordsource: a.recordsource,
+    officialmailingaddress: get(/^officialmailingaddress$/i),
   }
 }
 
@@ -1198,14 +1252,14 @@ async function queryScStatewideParcelAttributes(lng: number, lat: number, where:
  * State Plane Esri rings, native SR) with attributes normalized to the statewide
  * schema, or null if unavailable / no parcel at the point.
  */
-async function queryCountyParcel(baseUrl: string, lng: number, lat: number) {
-  const common = `geometry=${lng},${lat}&geometryType=esriGeometryPoint&inSR=4326&spatialRel=esriSpatialRelIntersects&where=1%3D1&outFields=*&returnGeometry=true`;
-  try {
+async function queryCountyParcel(baseUrl: string, lng: number, lat: number, joinConfig?: ScAttributeJoin) {
+  const runQuery = async (geometryParams: string) => {
+    const common = `${geometryParams}&inSR=4326&spatialRel=esriSpatialRelIntersects&where=1%3D1&outFields=*&returnGeometry=true`;
     // Independent fetches: the WGS84 boundary is the critical result — don't
     // let a failed native-SR (measurement) query discard a good parcel.
     const [wgsRes, spRes] = await Promise.allSettled([
       fetchWithRetry(`${baseUrl}/query?${common}&outSR=4326&f=geojson`, 2, 10000, { cache: 'no-store' }),
-      fetchWithRetry(`${baseUrl}/query?${common}&f=json`, 2, 10000, { cache: 'no-store' }), // native SR (NC State Plane feet)
+      fetchWithRetry(`${baseUrl}/query?${common}&f=json`, 2, 10000, { cache: 'no-store' }), // native SR (State Plane feet)
     ]);
     if (wgsRes.status !== 'fulfilled') throw wgsRes.reason;
     const wgsJson = await wgsRes.value.json();
@@ -1213,11 +1267,53 @@ async function queryCountyParcel(baseUrl: string, lng: number, lat: number) {
     if (spRes.status === 'fulfilled') {
       try { spJson = await spRes.value.json(); } catch { /* optional */ }
     }
-    const wgsFeat = wgsJson.features?.[0];
+    return { wgsJson, spJson };
+  };
+  try {
+    let { wgsJson, spJson } = await runQuery(`geometry=${lng},${lat}&geometryType=esriGeometryPoint`);
+    if (!wgsJson?.features?.length) {
+      // Some county servers (e.g. Horry's HARN State Plane 10.6) return nothing
+      // for a reprojected point-in-polygon query but match a tiny envelope
+      // around the same coordinate reliably.
+      const d = 0.00012;
+      ({ wgsJson, spJson } = await runQuery(
+        `geometry=${lng - d},${lat - d},${lng + d},${lat + d}&geometryType=esriGeometryEnvelope`,
+      ));
+    }
+    const feats: any[] = wgsJson?.features || [];
+    // The envelope can clip the adjacent roadway/right-of-way parcel; prefer the
+    // first feature whose owner is NOT a road segment (same rule as statewide).
+    let pickedIdx = feats.findIndex((f) => f?.geometry && !isRoadwayOwner(normalizeCountyParcelAttrs(f?.properties || {}).ownname));
+    if (pickedIdx < 0) pickedIdx = feats.findIndex((f) => f?.geometry);
+    const wgsFeat = pickedIdx >= 0 ? feats[pickedIdx] : null;
     if (!wgsFeat || !wgsFeat.geometry) return null;
-    const spFeat = spJson?.features?.[0] || null;
+    // Align the native-SR measurement feature to the SAME parcel by id (the two
+    // projection queries can order their features differently).
+    const spFeats: any[] = Array.isArray(spJson?.features) ? spJson.features : [];
+    const pickedParno = String(normalizeCountyParcelAttrs(wgsFeat.properties || {}).parno || '').trim();
+    const spMatch = (pickedParno && pickedParno.toUpperCase() !== 'N/A')
+      ? spFeats.find((f) => String(normalizeCountyParcelAttrs(f?.attributes || {}).parno || '').trim() === pickedParno)
+      : null;
+    const spFeat = spMatch || spFeats[pickedIdx] || spFeats[0] || null;
 
-    const norm = normalizeCountyParcelAttrs(wgsFeat.properties || {});
+    let rawAttrs: Record<string, any> = wgsFeat.properties || {};
+    if (joinConfig) {
+      const joinKey = String(rawAttrs[joinConfig.parcelField] ?? '').trim();
+      if (joinKey) {
+        try {
+          const where = `${joinConfig.tableField}='${joinKey.replace(/'/g, "''")}'`;
+          const orderBy = joinConfig.orderBy ? `&orderByFields=${encodeURIComponent(joinConfig.orderBy)}` : '';
+          const tblRes = await fetchWithRetry(
+            `${joinConfig.tableUrl}/query?where=${encodeURIComponent(where)}&outFields=*&returnGeometry=false&resultRecordCount=1${orderBy}&f=json`,
+            2, 10000, { cache: 'no-store' },
+          );
+          const tblAttrs = (await tblRes.json())?.features?.[0]?.attributes;
+          if (tblAttrs) rawAttrs = { ...rawAttrs, ...tblAttrs };
+        } catch { /* keep the geometry-only record */ }
+      }
+    }
+
+    const norm = normalizeCountyParcelAttrs(rawAttrs);
     norm.recordsource = baseUrl === SC_STATEWIDE_PARCEL_LAYER ? 'scdot' : 'county-gis';
     if (!norm.gisacres) {
       const sqft = ringAreaSqFt(spFeat?.geometry?.rings);
@@ -1556,7 +1652,7 @@ export async function executeLandAnalysis(
   if (hasScLocalParcelLayer && countyParcelLayer) {
     onStageChange?.("Querying county parcel server...");
     try {
-      const localRes = await queryCountyParcel(countyParcelLayer, lng, lat);
+      const localRes = await queryCountyParcel(countyParcelLayer, lng, lat, SC_COUNTY_ATTRIBUTE_JOINS[countyKeyLower]);
       if (localRes) {
         const statewideAttrs = await queryScStatewideParcelAttributes(lng, lat, parcelWhere);
         if (statewideAttrs) {
@@ -1743,12 +1839,20 @@ export async function executeLandAnalysis(
   const countyGisScRecord = selectedState === 'SC'
     ? officialRecordFromCountyGis(countyName, info)
     : null;
-  const remoteOfficialScRecord = selectedState === 'SC' && !countyGisScRecord
+  // Structured treasurer and WTHGIS adapters can enrich a county GIS response
+  // with current tax and assessment facts. When GIS already supplied an owner,
+  // skip only the expensive browser fallback, not those structured adapters.
+  const remoteOfficialScRecord = selectedState === 'SC'
     ? await fetchOfficialScParcel(
         countyName,
         addressString,
         String(info.parno || ''),
         { lat, lng },
+        fetch,
+        {
+          candidateOwner: String(info.ownname || ''),
+          skipBrowser: !!countyGisScRecord?.ownerName,
+        },
       )
     : null;
   const officialScRecord = mergeOfficialScParcelRecords(remoteOfficialScRecord, countyGisScRecord);
@@ -1797,13 +1901,14 @@ export async function executeLandAnalysis(
       recordsource: 'county-assessor',
     };
   } else if (selectedState === 'SC' && info.recordsource === 'scdot') {
-    // The statewide layer is useful for candidate geometry, but it is not fresh
-    // enough to assert ownership or tax facts without county confirmation.
-    info = {
-      ...info,
-      ownname: 'N/A', ownname2: '', mailadd: undefined, mcity: undefined, mstate: undefined, mzip: undefined,
-      parval: undefined, landval: undefined, reviseyear: undefined,
-    };
+    // No county source could confirm this parcel, so the statewide SCDOT
+    // snapshot is the best real published record available. Keep its owner /
+    // mailing / value data rather than blanking the report — the earlier
+    // "wrong owner" bug was the snapshot OVERWRITING fresher county data, which
+    // is fixed. The remaining risk is only snapshot lag, so the UI labels these
+    // fields as the statewide record (ownerRecordType 'statewide') and links to
+    // the county's own viewer for confirmation.
+    parcelConflicts.push('Owner and value fields come from the statewide SCDOT parcel snapshot; the county assessor portal could not be queried automatically. Verify against the official county record before relying on them.');
   }
 
   // Extract WGS84 rings from geojson structure to draw the polygon boundary on Google Maps
@@ -1840,7 +1945,9 @@ export async function executeLandAnalysis(
     }
   }
 
-  const parcelId = info.parno || "N/A";
+  // Some counties store the parcel id as a number (e.g. Horry's PIN double) —
+  // coerce to string so downstream .split()/.replace() calls can't crash.
+  const parcelId = String(info.parno ?? '').trim() || "N/A";
 
   // Kick off the USGS 3DEP topography sampling NOW — it's independent of the
   // zoning/comps lookups below, so running it in parallel shaves several
@@ -1958,15 +2065,16 @@ export async function executeLandAnalysis(
 
   // Format mailing address
   let mailingAddress: string | undefined;
+  const trimmed = (v: unknown) => String(v ?? '').trim(); // county fields can be fixed-width padded
   if (info.officialmailingaddress) {
-    mailingAddress = toTitleCase(info.officialmailingaddress);
+    mailingAddress = toTitleCase(trimmed(info.officialmailingaddress));
   } else if (info.mailadd) {
     mailingAddress = '';
-    mailingAddress += toTitleCase(info.mailadd);
-    if (info.mcity) mailingAddress += `, ${toTitleCase(info.mcity)}`;
-    if (info.mstate) mailingAddress += `, ${info.mstate}`;
-    if (info.mzip) {
-      mailingAddress += ` ${info.mzip}`;
+    mailingAddress += toTitleCase(trimmed(info.mailadd));
+    if (trimmed(info.mcity)) mailingAddress += `, ${toTitleCase(trimmed(info.mcity))}`;
+    if (trimmed(info.mstate)) mailingAddress += `, ${trimmed(info.mstate)}`;
+    if (trimmed(info.mzip)) {
+      mailingAddress += ` ${trimmed(info.mzip)}`;
     }
   }
 
@@ -2039,7 +2147,7 @@ export async function executeLandAnalysis(
     : selectedState === 'SC' ? undefined : assessedPropertyValue;
   const typeOfTransaction = selectedState === 'SC' ? undefined : "Resale";
   const ownerRecordType: SiteFeasibilityData['ownerRecordType'] = ownerName
-    ? (officialScRecord?.ownerRecordType || (info.recordsource === 'county-gis' ? 'gis' : 'unavailable'))
+    ? (officialScRecord?.ownerRecordType || (info.recordsource === 'county-gis' ? 'gis' : info.recordsource === 'scdot' ? 'statewide' : 'unavailable'))
     : 'unavailable';
 
   // Detailed Property Registry data container
@@ -2070,8 +2178,11 @@ export async function executeLandAnalysis(
     typeOfTransaction,
     building: info.building,
     parcelVerificationStatus: officialScRecord?.status,
-    parcelSourceName: officialScRecord?.sourceName || (info.recordsource === 'county-gis' ? 'County GIS' : undefined),
-    parcelSourceUrl: officialScRecord?.sourceUrl,
+    parcelSourceName: officialScRecord?.sourceName
+      || (info.recordsource === 'county-gis' ? 'County GIS'
+        : info.recordsource === 'scdot' ? 'SCDOT statewide parcel snapshot — verify with county' : undefined),
+    parcelSourceUrl: officialScRecord?.sourceUrl
+      || (selectedState === 'SC' ? scCountySource(countyName)?.portalUrl : undefined),
     parcelSourceAsOf: officialScRecord?.asOf,
     ownerRecordType,
     geometryStatus,

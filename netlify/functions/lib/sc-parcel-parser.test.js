@@ -3,7 +3,8 @@ import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 
 import { normalizeParcelId, parseQpublicParcelText, unionReportUrl } from './sc-parcel-parser.js';
-import { parseUnionTreasurerDetail } from './sc-union-treasurer.js';
+import { parseUnionTreasurerDetail, queryQpayTreasurer } from './sc-union-treasurer.js';
+import { parseWthgisParcelDetail, queryWthgisParcel } from './sc-wthgis.js';
 
 const UNION_REPORT = `
 Parcel Number
@@ -85,11 +86,157 @@ test('Union treasurer detail resolves current owner, parcel, assessment, and tax
   assert.equal(result.acres, undefined);
 });
 
+test('qPay rejects a newer address result for the wrong parcel', async () => {
+  let call = 0;
+  const fetcher = async () => {
+    call += 1;
+    if (call === 1) {
+      return new Response('<input type="hidden" name="__VIEWSTATE" value="one">', {
+        headers: { 'set-cookie': 'ASP.NET_SessionId=test; path=/' },
+      });
+    }
+    if (call === 2) return new Response('<input type="hidden" name="__VIEWSTATE" value="two">');
+    if (call === 3) {
+      return new Response(`<table>
+        <tr><td>RealEstate</td><td>2025</td><td><a href="TaxesDetailsType4.aspx?id=wrong">View</a></td></tr>
+        <tr><td>RealEstate</td><td>2024</td><td><a href="TaxesDetailsType4.aspx?id=right">View</a></td></tr>
+      </table>`);
+    }
+    const parcel = call === 4 ? '999-99-99-999' : '049-00-00-112 000';
+    const owner = call === 4 ? 'Wrong Owner' : 'PARKER REGINA G';
+    return new Response(`<body>
+      Name: ${owner} Address: PO BOX 1 UNION SC 29379 Tax Year: 2025 Map Number: ${parcel} Acres: 0
+      District/Levy: 19 / Property Address 116 WRIGHT SIMS ROAD Taxes County Tax:
+      Total Appraisal: $110,860 Total Assessed: $4,430 Total Taxes: $675.29 Buildings: 1
+    </body>`);
+  };
+
+  const result = await queryQpayTreasurer(
+    'https://uniontreasurer.qpaybill.com/Taxes/TaxesDefaultType4.aspx',
+    '116 Wright Sims Road, Union, SC 29379',
+    'Union',
+    '049-00-00-112',
+    fetcher,
+  );
+
+  assert.equal(result.ownerName, 'PARKER REGINA G');
+  assert.equal(result.parcelId, '049-00-00-112 000');
+  assert.equal(result.mailingAddress, 'PO BOX 1 UNION SC 29379');
+  assert.equal(call, 5);
+});
+
+test('qPay retries a common street-suffix abbreviation', async () => {
+  const searchBodies = [];
+  const fetcher = async (url, init = {}) => {
+    if (String(url).includes('TaxesDetailsType4.aspx')) {
+      return new Response(`<body>
+        Name: DEESE FRANKLIN DARNELL Address: PO BOX 626<br>MARSHVILLE NC 28103 Tax Year: 2025
+        Map Number: 086-00-00-020 Acres: 42.7 District/Levy: 287 /
+        Property Address 2229 SHAMROCK RD Taxes County Tax: Total Appraisal: $5,400
+        Total Assessed: $220 Total Taxes: $66.13 Buildings: 0
+      </body>`);
+    }
+    if (!init.method) {
+      return new Response('<input type="hidden" name="__VIEWSTATE" value="one">', {
+        headers: { 'set-cookie': 'ASP.NET_SessionId=test; path=/' },
+      });
+    }
+    const body = String(init.body || '');
+    if (body.includes('ddlCriteriaList') && !body.includes('txtCriteriaBox')) {
+      return new Response('<input type="hidden" name="__VIEWSTATE" value="two">');
+    }
+    if (body.includes('txtCriteriaBox')) {
+      searchBodies.push(body);
+      if (body.includes('Shamrock+Road')) return new Response('<table></table>');
+      return new Response('<table><tr><td>RealEstate</td><td>2025</td><td>086-00-00-020</td><td><a href="TaxesDetailsType4.aspx?id=right">View</a></td></tr></table>');
+    }
+    return new Response('<table></table>');
+  };
+
+  const result = await queryQpayTreasurer(
+    'https://kershawcounty.qpaybill.com/Taxes/TaxesDefaultType4.aspx',
+    '2229 Shamrock Road, Kershaw, SC',
+    'Kershaw',
+    '086-00-00-020',
+    fetcher,
+  );
+
+  assert.equal(result.ownerName, 'DEESE FRANKLIN DARNELL');
+  assert.equal(result.mailingAddress, 'PO BOX 626 MARSHVILLE NC 28103');
+  assert.equal(searchBodies.length, 2);
+  assert.match(searchBodies[1], /Shamrock%2BRD|Shamrock\+RD/);
+});
+
+test('WTHGIS detail resolves official owner, land, values, and building data', () => {
+  const xml = `<overlay><info><![CDATA[
+    <table>
+      <tr><th>Map Number</th><td>086 000 000 085</td></tr>
+      <tr><th>Owner Name</th><td>Deese Joe Franklin</td></tr>
+      <tr><th>Mailing Address1</th><td>5804 Highway 265</td></tr>
+      <tr><th>Mailing City</th><td>Ruby</td></tr>
+      <tr><th>Mailing State</th><td>SC</td></tr>
+      <tr><th>Mailing ZipCode</th><td>29741</td></tr>
+      <tr><th>Legal Description</th><td>Lot 5 2.68 Ac</td></tr>
+      <tr><th>District</th><td>09</td></tr>
+      <tr><th>MarketValueBuildings</th><td>1.00</td></tr>
+      <tr><th>MarketValueBuildingsValue</th><td>72000.00</td></tr>
+      <tr><th>MarketValueLandValue</th><td>25000.00</td></tr>
+      <tr><th>MarketValueTotalAssessed</th><td>3880.00</td></tr>
+      <tr><th>MarketValueTotalValue</th><td>97000.00</td></tr>
+      <tr><th>TaxValueTotalValue</th><td>97000.00</td></tr>
+    </table>
+  ]]></info></overlay>`;
+  const result = parseWthgisParcelDetail(xml, 'https://chesterfieldsc.wthgis.com/detail', 'Chesterfield');
+  assert.equal(result.status, 'verified');
+  assert.equal(result.ownerName, 'Deese Joe Franklin');
+  assert.equal(result.parcelId, '086 000 000 085');
+  assert.equal(result.mailingAddress, '5804 Highway 265, Ruby, SC 29741');
+  assert.equal(result.acres, 2.68);
+  assert.equal(result.taxCodeArea, '09');
+  assert.equal(result.landValue, 25000);
+  assert.equal(result.improvementValue, 72000);
+  assert.equal(result.marketValue, 97000);
+  assert.equal(result.totalAssessedValue, 3880);
+  assert.equal(result.building.buildingCount, 1);
+});
+
+test('WTHGIS resolves an exact address without relying on a candidate owner', async () => {
+  const calls = [];
+  const fetcher = async (url) => {
+    calls.push(String(url));
+    if (calls.length === 1) {
+      return new Response("addMenuItem('x','x',\"fetchOverlay('tgis/custom.aspx?DSID=6796&RequestType=CustomSearchForm&FormType=BasicParcels')\")");
+    }
+    return new Response(`<overlay><info><![CDATA[
+      <table>
+        <tr><th>Map Number</th><td>086 000 000 085</td></tr>
+        <tr><th>Owner Name</th><td>Deese Joe Franklin</td></tr>
+        <tr><th>Legal Description</th><td>Lot 5 2.68 Ac</td></tr>
+        <tr><th>MarketValueTotalValue</th><td>97000.00</td></tr>
+      </table>
+    ]]></info></overlay>`);
+  };
+
+  const result = await queryWthgisParcel({
+    portalUrl: 'https://chesterfieldsc.wthgis.com/',
+    address: '5804 Highway 265, Ruby, SC 29741',
+    parcelId: '086-000-000-085',
+    county: 'Chesterfield',
+    fetcher,
+  });
+
+  assert.equal(result.ownerName, 'Deese Joe Franklin');
+  assert.equal(result.parcelId, '086 000 000 085');
+  assert.equal(calls.length, 2);
+  assert.match(calls[1], /tgis\/search\.aspx\?S=5804\+Highway\+265&M=99&redir=1$/);
+});
+
 test('SC manifest contains every county and normal searches do not invoke Enformion property matching', async () => {
   const manifest = await readFile(new URL('../../../src/data/scCountySources.ts', import.meta.url), 'utf8');
   const counties = [...manifest.matchAll(/\{ county: '([^']+)'/g)].map((match) => match[1]);
   assert.equal(counties.length, 46);
   assert.equal(new Set(counties).size, 46);
+  assert.ok((manifest.match(/treasurerUrl:/g) || []).length >= 18);
 
   const component = await readFile(new URL('../../../src/components/FeasibilitySearch.tsx', import.meta.url), 'utf8');
   const start = component.indexOf('const generateCostEstimates');
