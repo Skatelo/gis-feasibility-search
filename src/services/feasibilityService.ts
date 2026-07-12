@@ -1,5 +1,5 @@
 import type { SiteFeasibilityData, SlopeProfile, CompProperty, FloodZoneInfo, WetlandsInfo, ConstructionCostEstimate, CostLineItem, MaterialTakeoff, MaterialTakeoffItem, LandClearingEstimate, TreeRemovalLine, ClearingMethod, UtilitiesEstimate, UtilityLine, PermitFeeLine } from '../types/feasibility';
-import { getZoningServices, normalizeCountyKey } from '../data/ncZoning';
+import { fetchCountyZoningCode, getZoningServices, normalizeCountyKey } from '../data/ncZoning';
 import { getSupabase, isSupabaseConfigured } from './supabaseClient';
 import { fetchOfficialScParcel, mergeOfficialScParcelRecords, officialRecordFromCountyGis, scOwnerNamesMatch, shouldHideStatewideGeometry } from './scParcelVerification';
 import { scCountySource } from '../data/scCountySources';
@@ -2021,6 +2021,9 @@ export async function executeLandAnalysis(
   let zoningJurisdiction: string | undefined;
   let zoningStandardsStatus: SiteFeasibilityData['zoningStandardsStatus'] = 'unavailable';
   let zoningStandardsSourceUrl: string | undefined;
+  let zoningSetbacksStatus: SiteFeasibilityData['zoningSetbacksStatus'] = 'unavailable';
+  let zoningSetbackNotes: string[] | undefined;
+  let zoningRestrictions: string[] | undefined;
   let zoningMinimumLotAreaSqft: number | undefined;
   let zoningMaxLotCoveragePct: number | undefined;
   let zoningPermittedUses: string[] | undefined;
@@ -2281,6 +2284,9 @@ export async function executeLandAnalysis(
     zoningJurisdiction,
     zoningStandardsStatus,
     zoningStandardsSourceUrl,
+    zoningSetbacksStatus,
+    zoningSetbackNotes,
+    zoningRestrictions,
     zoningMinimumLotAreaSqft,
     zoningMaxLotCoveragePct,
     zoningPermittedUses,
@@ -2307,31 +2313,44 @@ export async function executeLandAnalysis(
     return sp;
   });
 
-  // STAGE 3 - zoning. Perplexity discovers parcel/listing sources, Crawlee
-  // extracts difficult pages, and DeepSeek performs up to four completion rounds.
+  // STAGE 3 - zoning. Official ArcGIS resolves first; Gemini 3.5 Flash uses
+  // Google Search plus optional Perplexity/Crawlee evidence for gaps and rules.
   const parcelZoning = String(info.zoning || '').trim();
   {
-    onStageChange?.("Resolving zoning (DeepSeek + expanded source search)...");
-    // Existing parcel data can guide the queries, but only a fresh DeepSeek
-    // result backed by parcel-specific evidence may populate the section.
+    onStageChange?.("Resolving zoning (official GIS + Gemini 3.5 Flash)...");
     const zoningHint = parcelZoning && parcelZoning.toUpperCase() !== 'N/A' && info.recordsource === 'county-gis'
       ? parcelZoning
       : null;
-    const deepSeekZoning = await fetchZoningViaWebSearch(
+    const zoningHintSourceUrl = zoningHint
+      ? (officialScRecord?.sourceUrl || getZoningServices(countyName)[0]?.url || (selectedState === 'SC' ? scCountySource(countyName)?.portalUrl : undefined))
+      : undefined;
+    const geminiZoning = await fetchZoningViaWebSearch(
       info.siteadd || addressString,
       countyName,
       lat,
       lng,
       zoningHint,
       parcelId,
+      zoningHintSourceUrl,
     ).catch(() => null);
     const applyResearchStandards = (research: ZoningResult) => {
       researchedZoningStandards = research.standards;
       zoningJurisdiction = research.jurisdiction;
       zoningStandardsSourceUrl = research.standards?.sourceUrl;
+      zoningSetbackNotes = research.standards?.setbackNotes;
+      zoningRestrictions = research.standards?.restrictions;
       zoningMinimumLotAreaSqft = research.standards?.minimumLotAreaSqft;
       zoningMaxLotCoveragePct = research.standards?.maxLotCoveragePct;
       zoningPermittedUses = research.standards?.permittedUses;
+      const setbackValues = [
+        research.standards?.setbacks?.frontFt,
+        research.standards?.setbacks?.rearFt,
+        research.standards?.setbacks?.sideFt,
+      ];
+      const verifiedSetbacks = setbackValues.filter((value) => Number.isFinite(Number(value))).length;
+      zoningSetbacksStatus = verifiedSetbacks === setbackValues.length
+        ? 'official'
+        : verifiedSetbacks > 0 ? 'mixed' : 'estimated';
       const values = [
         research.standards?.maxHeightFt,
         research.standards?.floorAreaRatio,
@@ -2344,28 +2363,33 @@ export async function executeLandAnalysis(
       zoningStandardsStatus = verifiedCount === values.length ? 'official' : verifiedCount > 0 ? 'mixed' : 'estimated';
     };
 
-    if (deepSeekZoning) {
-      zoningCode = deepSeekZoning.code;
-      const evidenceLabel = deepSeekZoning.evidenceTier === 'official'
+    if (geminiZoning) {
+      zoningCode = geminiZoning.code;
+      const evidenceLabel = geminiZoning.matchMethod === 'parcel-gis'
+        ? 'official GIS point result'
+        : geminiZoning.evidenceTier === 'official'
         ? 'official parcel source'
-        : deepSeekZoning.evidenceTier === 'corroborated'
+        : geminiZoning.evidenceTier === 'corroborated'
           ? 'matching exact-address property listings'
           : 'exact-address property listing';
-      zoningDescription = `${deepSeekZoning.description} (${evidenceLabel}, researched by DeepSeek)`;
-      zoningSource = 'web';
-      zoningSourceUrl = deepSeekZoning.sourceUrl;
-      zoningSources = deepSeekZoning.sources;
-      zoningVerificationStatus = deepSeekZoning.evidenceTier === 'official'
-        ? 'official-research'
-        : deepSeekZoning.evidenceTier === 'corroborated'
+      zoningDescription = `${geminiZoning.description} (${evidenceLabel}; standards researched by Gemini 3.5 Flash)`;
+      zoningSource = geminiZoning.matchMethod === 'parcel-gis' ? 'county-gis' : 'web';
+      zoningSourceUrl = geminiZoning.sourceUrl;
+      zoningSources = geminiZoning.sources;
+      zoningVerificationStatus = geminiZoning.matchMethod === 'parcel-gis'
+        ? 'official-gis'
+        : geminiZoning.evidenceTier === 'official'
+          ? 'official-research'
+          : geminiZoning.evidenceTier === 'corroborated'
           ? 'corroborated-research'
           : 'listing-research';
-      applyResearchStandards(deepSeekZoning);
+      applyResearchStandards(geminiZoning);
     } else {
-      zoningCode = "N/A";
-      zoningDescription = 'DeepSeek completed four expanded source-search rounds but no source explicitly published a zoning code for this exact address or parcel.';
+      zoningCode = "NOT PUBLISHED";
+      zoningDescription = 'Official GIS and Gemini 3.5 Flash did not find a source that publishes a district for this exact parcel. No zoning code was inferred.';
       zoningVerificationStatus = 'unavailable';
       zoningStandardsStatus = 'unavailable';
+      zoningSetbacksStatus = 'unavailable';
     }
   }
 
@@ -2380,6 +2404,9 @@ export async function executeLandAnalysis(
     zoningJurisdiction,
     zoningStandardsStatus,
     zoningStandardsSourceUrl,
+    zoningSetbacksStatus,
+    zoningSetbackNotes,
+    zoningRestrictions,
     zoningMinimumLotAreaSqft,
     zoningMaxLotCoveragePct,
     zoningPermittedUses,
@@ -2390,7 +2417,18 @@ export async function executeLandAnalysis(
   // Pass the full input address (it has the city/ZIP) so the comp search targets
   // the right area — the parcel's situs field is often street-only.
   const compLocationAddress = `${addressString}${info.scity && !addressString.toLowerCase().includes(String(info.scity).toLowerCase()) ? `, ${info.scity}` : ''}`;
-  const compRun = await fetchGoogleDistanceMatrixComps(lat, lng, parcelId, zoningCode, zoningDescription, compLocationAddress, countyName, onStageChange, compRadiusMiles);
+  const compRun = await fetchGoogleDistanceMatrixComps(
+    lat,
+    lng,
+    parcelId,
+    zoningCode,
+    zoningDescription,
+    compLocationAddress,
+    countyName,
+    onStageChange,
+    compRadiusMiles,
+    zoningVerificationStatus !== 'unavailable',
+  );
   onPartial?.({ comps: compRun.comps, compRunSummary: compRun.summary });
 
   const slopeProfile = await slopeEmitted;
@@ -2410,6 +2448,9 @@ export async function executeLandAnalysis(
     zoningJurisdiction,
     zoningStandardsStatus,
     zoningStandardsSourceUrl,
+    zoningSetbacksStatus,
+    zoningSetbackNotes,
+    zoningRestrictions,
     zoningMinimumLotAreaSqft,
     zoningMaxLotCoveragePct,
     zoningPermittedUses,
@@ -4127,7 +4168,7 @@ async function geocodeAddress(address: string, apiKey: string): Promise<{ lat: n
   return null;
 }
 
-/** DeepSeek zoning research accepts official parcel evidence first, then exact-
+/** Gemini zoning research accepts official parcel evidence first, then exact-
  * address listing records as explicitly labeled lower-tier evidence. */
 type ZoningMatchMethod =
   | 'parcel-gis'
@@ -4140,6 +4181,8 @@ type ZoningResearchStandards = Partial<ZoningStandards> & {
   minimumLotAreaSqft?: number;
   maxLotCoveragePct?: number;
   permittedUses?: string[];
+  setbackNotes?: string[];
+  restrictions?: string[];
   sourceUrl: string;
 };
 type ZoningResult = {
@@ -4153,7 +4196,8 @@ type ZoningResult = {
   standards?: ZoningResearchStandards;
 };
 
-const ZONING_SYSTEM = "You are a persistent zoning research analyst. Use only the supplied Perplexity+Crawlee evidence. Prefer official parcel GIS/address/report evidence. If official assignment evidence is unavailable, an exact-address Zillow, Realtor, or Redfin record may be reported, and two independent matching listing providers may be corroborated. Never describe listing evidence as official. An ordinance alone cannot assign a parcel. Dimensional standards require an adopted ordinance URL. Return only the requested JSON and never fabricate.";
+const GEMINI_ZONING_MODEL = 'gemini-3.5-flash';
+const ZONING_SYSTEM = "You are a persistent zoning research analyst. Use Google Search plus any supplied Perplexity and Crawlee evidence. Prefer official parcel GIS, official address results, and official parcel reports. If official assignment evidence is unavailable, an exact-address Zillow, Realtor, or Redfin record may be reported, and two independent matching listing providers may be corroborated. Never describe listing evidence as official. An ordinance alone cannot assign a parcel. Setbacks, dimensional standards, and restrictions require an adopted ordinance or official zoning-code URL. Return only the requested JSON and never fabricate.";
 
 function cleanEvidenceUrl(value: unknown): string | null {
   if (typeof value !== 'string' || !/^https?:\/\//i.test(value.trim())) return null;
@@ -4177,6 +4221,7 @@ function isOfficialZoningUrl(value: string, countyName = ''): boolean {
       || /\.(gov|us)$/.test(host)
       || host === 'arcgis.com' || host.endsWith('.arcgis.com')
       || host.endsWith('.municode.com') || host.endsWith('.amlegal.com') || host.endsWith('.ecode360.com')
+      || host === 'qpublic.net' || host.endsWith('.qpublic.net')
       || host.endsWith('.schneidercorp.com') || host.endsWith('.wthgis.com')
       || /(^|\.)(cityof|townof|countyof)/.test(host)
       || (!!countyToken && countyToken.length >= 4 && compactHost.includes(countyToken));
@@ -4224,9 +4269,20 @@ function listingEvidenceUrlDiscovered(value: string, evidenceUrls: string[]): bo
 }
 
 function boundedNumber(value: unknown, min: number, max: number, allowZero = false): number | undefined {
+  if (value == null || (typeof value === 'string' && !value.trim())) return undefined;
   const n = Number(value);
   if (!Number.isFinite(n) || n < min || n > max || (!allowZero && n === 0)) return undefined;
   return Math.round(n * 100) / 100;
+}
+
+function boundedStringList(value: unknown, maxItems = 10, maxLength = 260): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const items = value
+    .map((item) => String(item ?? '').replace(/\s+/g, ' ').trim())
+    .filter(Boolean)
+    .map((item) => item.slice(0, maxLength));
+  const unique = [...new Set(items)].slice(0, maxItems);
+  return unique.length ? unique : undefined;
 }
 
 /** Parse a parcel-specific zoning response and reject unsupported district codes
@@ -4283,9 +4339,9 @@ function parseZoningResult(text: string, evidenceUrls: string[] = [], countyName
     const standardsObj = obj?.standards && typeof obj.standards === 'object' ? obj.standards : {};
     let standards: ZoningResearchStandards | undefined;
     if (ordinanceSource && evidenceUrlAllowed(ordinanceSource, evidenceUrls, countyName)) {
-      const permittedUses = Array.isArray(obj?.permittedUses)
-        ? obj.permittedUses.map((v: unknown) => String(v).trim()).filter(Boolean).slice(0, 8)
-        : undefined;
+      const permittedUses = boundedStringList(obj?.permittedUses ?? standardsObj?.permittedUses, 10, 180);
+      const setbackNotes = boundedStringList(standardsObj?.setbackNotes ?? obj?.setbackNotes, 8, 260);
+      const restrictions = boundedStringList(standardsObj?.restrictions ?? obj?.restrictions, 12, 300);
       standards = {
         lotType: typeof standardsObj.lotType === 'string' ? standardsObj.lotType.slice(0, 80) : undefined,
         maxHeightFt: boundedNumber(standardsObj.maxHeightFt, 1, 1000),
@@ -4298,6 +4354,8 @@ function parseZoningResult(text: string, evidenceUrls: string[] = [], countyName
         minimumLotAreaSqft: boundedNumber(standardsObj.minimumLotAreaSqft, 1, 100000000),
         maxLotCoveragePct: boundedNumber(standardsObj.maxLotCoveragePct, 0.01, 100),
         permittedUses,
+        setbackNotes,
+        restrictions,
         sourceUrl: ordinanceSource,
       };
     }
@@ -4319,30 +4377,86 @@ type ZoningExpertDraft = {
   raw: string;
 };
 
-async function zoningExpertViaDeepSeek(
+function geminiResponseText(data: any): string {
+  return (data?.candidates?.[0]?.content?.parts || [])
+    .map((part: any) => typeof part?.text === 'string' ? part.text : '')
+    .filter(Boolean)
+    .join('\n')
+    .trim();
+}
+
+function urlsInText(value: string): string[] {
+  const matches = value.match(/https?:\/\/[^\s"'<>\\\])}]+/gi) || [];
+  return [...new Set(matches.map((url) => url.replace(/[.,;:]+$/, '')).map(cleanEvidenceUrl).filter((url): url is string => !!url))];
+}
+
+function geminiGroundingUrls(data: any): string[] {
+  const candidate = data?.candidates?.[0];
+  const chunks = candidate?.groundingMetadata?.groundingChunks
+    || candidate?.grounding_metadata?.grounding_chunks
+    || [];
+  const urls = Array.isArray(chunks)
+    ? chunks.map((chunk: any) => cleanEvidenceUrl(chunk?.web?.uri || chunk?.web?.url || chunk?.uri))
+    : [];
+  return [...new Set(urls.filter((url): url is string => !!url))];
+}
+
+function geminiRetryDelayMs(response: Response, attempt: number): number {
+  const retryAfter = Number(response.headers.get('retry-after'));
+  if (Number.isFinite(retryAfter) && retryAfter > 0) return Math.min(8000, retryAfter * 1000);
+  return Math.min(8000, 1500 * (2 ** attempt));
+}
+
+async function zoningExpertViaGemini(
   promptText: string,
   evidenceBlock: string,
   evidenceUrls: string[],
-  deepSeekKey: string,
+  geminiKey: string,
   countyName: string,
 ): Promise<ZoningExpertDraft | null> {
   try {
     const body = JSON.stringify({
-      model: 'deepseek-v4-pro',
-      messages: [
-        { role: 'system', content: ZONING_SYSTEM },
-        { role: 'user', content: promptText + evidenceBlock },
-      ],
-      stream: false,
-      thinking: { type: 'disabled' },
-      temperature: 0.1,
-      max_tokens: 2800,
+      contents: [{ role: 'user', parts: [{ text: promptText + evidenceBlock }] }],
+      systemInstruction: { parts: [{ text: ZONING_SYSTEM }] },
+      tools: [{ google_search: {} }],
+      generationConfig: { maxOutputTokens: 5000 },
     });
-    const message = await postDeepSeekOnce(body, deepSeekKey);
-    const raw = typeof message?.content === 'string' ? message.content : '';
-    return raw ? { raw, result: parseZoningResult(raw, evidenceUrls, countyName) } : null;
+
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const response = await queueGemini(() => fetchWithTimeout(
+        `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_ZONING_MODEL}:generateContent?key=${geminiKey}`,
+        120000,
+        {
+          method: 'POST',
+          cache: 'no-store',
+          headers: { 'Content-Type': 'application/json' },
+          body,
+        },
+      ), 'high', 'primary');
+
+      if (response.ok) {
+        const data = await response.json();
+        const raw = geminiResponseText(data);
+        if (!raw) return null;
+        const grounded = geminiGroundingUrls(data);
+        // Canonical URLs emitted in a grounded response are retained alongside
+        // Gemini's redirect citations so official/listing hosts can be checked.
+        const discoveredUrls = [...new Set([
+          ...evidenceUrls,
+          ...grounded,
+          ...(grounded.length ? urlsInText(raw) : []),
+        ])];
+        return { raw, result: parseZoningResult(raw, discoveredUrls, countyName) };
+      }
+
+      const retryable = response.status === 429 || response.status >= 500;
+      console.warn(`Gemini zoning request returned HTTP ${response.status}${retryable ? '; retrying with backoff' : ''}.`);
+      if (!retryable || attempt === 2) return null;
+      await new Promise((resolve) => setTimeout(resolve, geminiRetryDelayMs(response, attempt)));
+    }
+    return null;
   } catch (error) {
-    console.warn('DeepSeek zoning expert failed:', error);
+    console.warn('Gemini 3.5 Flash zoning expert failed:', error);
     return null;
   }
 }
@@ -4391,7 +4505,7 @@ function zoningQueriesForRound(input: {
     ],
     [
       `${county} official GIS identify zoning "${input.address}"${candidate}`,
-      `${county} zoning ordinance district${candidate} setbacks minimum lot`,
+      `${county} zoning ordinance district${candidate} setbacks minimum lot permitted uses restrictions`,
       `${county} municipal zoning map "${input.address}"`,
       parcel ? `${county} zoning map parcel "${parcel}"` : `${county} zoning map parcel search`,
       `site:arcgis.com ${county} zoning`,
@@ -4413,9 +4527,9 @@ function zoningQueriesForRound(input: {
   return [...new Set(rounds[Math.min(input.round, rounds.length - 1)].filter((query) => query.trim()))];
 }
 
-/** DeepSeek-only zoning resolver. Perplexity and Crawlee expand the source set
- * over multiple rounds; official evidence wins, while exact-address listing
- * evidence remains visibly lower confidence. */
+/** Gemini 3.5 Flash zoning resolver. A fresh official ArcGIS point result is
+ * retained as the authoritative fallback; Gemini uses Google Search plus
+ * optional Perplexity/Crawlee evidence to read the adopted standards. */
 export async function fetchZoningViaWebSearch(
   address: string,
   countyName?: string,
@@ -4423,13 +4537,36 @@ export async function fetchZoningViaWebSearch(
   lng?: number,
   gisHint?: string | null,
   parcelId?: string,
+  gisHintSourceUrl?: string,
 ): Promise<ZoningResult | null> {
-  const perplexityKey = getPerplexityKey();
-  const deepSeekKey = getDeepSeekKey();
-  if (!perplexityKey || !deepSeekKey) {
-    console.warn("Zoning requires both the Perplexity Search key and DeepSeek API key.");
-    return null;
+  const geminiKey = (getUserKeys().gemini || '').trim();
+  const directGis = countyName && Number.isFinite(lat) && Number.isFinite(lng)
+    ? await fetchCountyZoningCode(countyName, Number(lng), Number(lat)).catch((error) => {
+        console.warn('Official zoning GIS point lookup failed:', error);
+        return null;
+      })
+    : null;
+  const registeredGisUrl = directGis?.sourceUrl || (countyName ? getZoningServices(countyName)[0]?.url : undefined);
+  const fallbackCode = directGis?.code || (gisHint && !/^(n\/?a|unknown|null)$/i.test(gisHint.trim()) ? gisHint.trim() : '');
+  const fallbackSource = directGis?.sourceUrl || gisHintSourceUrl || registeredGisUrl;
+  const officialGisFallback: ZoningResult | null = fallbackCode && fallbackSource
+    ? {
+        code: fallbackCode,
+        description: directGis?.description || 'Official GIS zoning district',
+        sourceUrl: fallbackSource,
+        sources: [fallbackSource],
+        jurisdiction: countyName ? `${countyBaseName(countyName)} County` : undefined,
+        matchMethod: 'parcel-gis',
+        evidenceTier: 'official',
+      }
+    : null;
+
+  if (!geminiKey) {
+    console.warn('Gemini API key is not configured; returning the official GIS zoning result when available.');
+    return officialGisFallback;
   }
+
+  const perplexityKey = getPerplexityKey();
 
   const state = countyName ? countyState(countyName) : 'NC';
   const stateFull = state === 'SC' ? 'South Carolina' : 'North Carolina';
@@ -4437,8 +4574,9 @@ export async function fetchZoningViaWebSearch(
   const countyLine = countyName ? ` It is in ${countyBaseName(countyName)} County, ${stateFull}.` : '';
   const coordLine = (lat != null && lng != null) ? ` The parcel is at coordinates ${lat.toFixed(6)}, ${lng.toFixed(6)}.` : '';
   const parcelLine = parcelId && parcelId.toUpperCase() !== 'N/A' ? ` The parcel ID is "${parcelId}".` : '';
-  const hintLine = gisHint
-    ? `\nThe county GIS zoning layer returns "${gisHint}" at this parcel point — this is usually authoritative. CONFIRM it against the official zoning map, and only return a different code if you find clear official evidence the parcel's actual zoning is different (e.g. it sits inside a municipality with its own zoning).`
+  const authoritativeHint = directGis?.code || gisHint;
+  const hintLine = authoritativeHint
+    ? `\nA fresh official GIS or parcel source returns "${authoritativeHint}" at this parcel. Treat that as authoritative unless a more specific official municipal parcel result proves a different governing district.`
     : '';
   const lookupPrompt = `Find the ZONING DISTRICT for this exact property: "${address}".${countyLine}${coordLine}${hintLine}
 Search in this order: (1) county/municipal GIS or parcel report, (2) assessor/planning address result, (3) Zillow, Realtor, and Redfin exact-address property records. Check whether city or county zoning has jurisdiction. Listing records are candidates, not official records.
@@ -4466,21 +4604,38 @@ Also verify the CURRENT dimensional standards and return this expanded JSON shap
     "frontSetbackFt": 30,
     "rearSetbackFt": 25,
     "sideSetbackFt": 10,
+    "setbackNotes": ["Corner lots have a second street-yard setback"],
     "minimumLotAreaSqft": 20000,
-    "maxLotCoveragePct": 40
+    "maxLotCoveragePct": 40,
+    "restrictions": ["Accessory structures must remain behind the principal building line"]
   },
   "permittedUses": ["Single-family detached dwelling"],
   "sources": ["https://..."]
 }
 
-The ordinance alone does not prove the parcel's district. For official methods, parcelSource must be an official parcel-specific result. Use corroborated-listings only when at least two independent Zillow/Realtor/Redfin exact-address pages show the same code. Use listing-address-result only as a final fallback when one exact-address listing explicitly publishes the code and no official result was found after every research round. Every allowance must be supported by an official ordinanceSource; use null for missing values. Use only URLs present in the supplied live evidence.${parcelLine}`;
+The ordinance alone does not prove the parcel's district. For official methods, parcelSource must be an official parcel-specific result. Use corroborated-listings only when at least two independent Zillow/Realtor/Redfin exact-address pages show the same code. Use listing-address-result only as a final fallback when one exact-address listing explicitly publishes the code and no official result was found after every research round. If the official authority explicitly states that the parcel is not zoned, return zoningCode "UNZONED" with that official parcel or jurisdiction source. Every setback, allowance, setback note, permitted use, and restriction must be supported by an adopted ordinanceSource; use null or [] for missing values. Restrictions should summarize parcel-relevant limits such as conditional uses, accessory structures, buffers, parking, signs, overlays, and special street or corner-lot rules. Return canonical source URLs, not Google redirect URLs.${parcelLine}`;
 
-  const evidenceBlocks: string[] = [];
-  const evidenceUrls: string[] = [];
-  let candidateCode = gisHint || null;
+  const evidenceBlocks: string[] = officialGisFallback
+    ? [`\n\n=== FRESH OFFICIAL GIS EVIDENCE ===\nDistrict: ${officialGisFallback.code}\nURL: ${officialGisFallback.sourceUrl}`]
+    : [];
+  const evidenceUrls: string[] = officialGisFallback ? [officialGisFallback.sourceUrl] : [];
+  let candidateCode = officialGisFallback?.code || authoritativeHint || null;
+  let bestOfficialResult: ZoningResult | null = null;
   let bestListingResult: ZoningResult | null = null;
+  const standardsScore = (result: ZoningResult | null) => {
+    const standards = result?.standards;
+    if (!standards) return 0;
+    const setbacks = [standards.setbacks?.frontFt, standards.setbacks?.rearFt, standards.setbacks?.sideFt]
+      .filter((value) => Number.isFinite(Number(value))).length;
+    return setbacks * 3
+      + (standards.restrictions?.length || 0)
+      + (standards.setbackNotes?.length || 0)
+      + (standards.permittedUses?.length || 0)
+      + (Number.isFinite(Number(standards.maxHeightFt)) ? 1 : 0)
+      + (Number.isFinite(Number(standards.minimumLotAreaSqft)) ? 1 : 0);
+  };
 
-  for (let round = 0; round < 4; round++) {
+  for (let round = 0; round < 3; round++) {
     const queries = zoningQueriesForRound({
       round,
       address,
@@ -4489,39 +4644,50 @@ The ordinance alone does not prove the parcel's district. For official methods, 
       state,
       candidateCode,
     });
-    const research = await perplexityResearchBlock(
-      queries,
-      { maxResultsPerQuery: 8, maxSources: 24, maxScrapeTargets: 12, mode: 'hard' },
-    ).catch(() => ({ block: '', urls: [] as string[] }));
-    if (!research.block || research.urls.length === 0) continue;
-
-    evidenceBlocks.push(`\n\n=== ZONING RESEARCH ROUND ${round + 1} ===${research.block.slice(0, 18000)}`);
-    for (const url of research.urls) if (!evidenceUrls.includes(url)) evidenceUrls.push(url);
+    const research = perplexityKey
+      ? await perplexityResearchBlock(
+          queries,
+          { maxResultsPerQuery: 8, maxSources: 24, maxScrapeTargets: 12, mode: 'hard' },
+        ).catch(() => ({ block: '', urls: [] as string[] }))
+      : { block: '', urls: [] as string[] };
+    if (research.block && research.urls.length > 0) {
+      evidenceBlocks.push(`\n\n=== ZONING RESEARCH ROUND ${round + 1} ===${research.block.slice(0, 18000)}`);
+      for (const url of research.urls) if (!evidenceUrls.includes(url)) evidenceUrls.push(url);
+    }
     const evidenceBlock = evidenceBlocks.join('').slice(-56000);
     const roundPrompt = `${researchPrompt}
 
-This is research round ${round + 1} of 4. ${candidateCode ? `Earlier evidence suggested "${candidateCode}"; verify it rather than assuming it.` : ''}
-${round < 3
+This is research round ${round + 1} of 3. ${candidateCode ? `Earlier evidence suggested "${candidateCode}"; verify it rather than assuming it.` : ''}
+${round < 2
   ? 'Prefer an official parcel assignment. If only listing evidence exists, return it with the correct listing matchMethod so the next round can seek official confirmation.'
   : 'This is the final pass. Return the strongest exact-address result: official first, two-provider listing corroboration second, or one clearly labeled exact-address listing report last.'}`;
-    const draft = await zoningExpertViaDeepSeek(
+    const draft = await zoningExpertViaGemini(
       roundPrompt,
       evidenceBlock,
       evidenceUrls,
-      deepSeekKey,
+      geminiKey,
       countyName || '',
     );
     if (!draft) continue;
     candidateCode = draft.result?.code || extractZoningCandidateCode(draft.raw) || candidateCode;
     if (!draft.result) continue;
-    if (draft.result.evidenceTier === 'official') return draft.result;
+    if (draft.result.evidenceTier === 'official') {
+      if (standardsScore(draft.result) > standardsScore(bestOfficialResult)) bestOfficialResult = draft.result;
+      const completeSetbacks = [
+        draft.result.standards?.setbacks?.frontFt,
+        draft.result.standards?.setbacks?.rearFt,
+        draft.result.standards?.setbacks?.sideFt,
+      ].every((value) => Number.isFinite(Number(value)));
+      if (completeSetbacks && (draft.result.standards?.restrictions?.length || 0) > 0) return draft.result;
+      continue;
+    }
 
     const rank = (result: ZoningResult | null) =>
       result?.evidenceTier === 'corroborated' ? 2 : result?.evidenceTier === 'reported' ? 1 : 0;
     if (rank(draft.result) > rank(bestListingResult)) bestListingResult = draft.result;
   }
 
-  return bestListingResult;
+  return bestOfficialResult || officialGisFallback || bestListingResult;
 }
 
 /**
@@ -4712,167 +4878,8 @@ function updateZipHealth(zip: string, productive: boolean): void {
   writeZipHealth(h);
 }
 
-// ---------------------------------------------------------------------------
-// SOLE comp source: Google Search (Gemini grounding) over PUBLIC MLS sources —
-// public MLS portals (Realtor.com, Zillow, Redfin, Homes.com, Trulia, Movoto),
-// county register-of-deeds / tax records, and builder closing records. To
-// MAXIMIZE coverage, several differently-angled searches run in PARALLEL and
-// the unique results are merged.
-// ---------------------------------------------------------------------------
-
-/** One grounded Google search for sold new-construction comps. */
-async function runGeminiCompQuery(
-  geminiApiKey: string,
-  subjectAddress: string,
-  areaLine: string,
-  sourceAngle: string,
-  category: 'residential' | 'commercial' | 'multifamily',
-  oneYearAgoIso: string,
-): Promise<any[]> {
-  const propertyTypePrompt = category === 'residential'
-    ? 'single-family residential (SFR)'
-    : category === 'commercial'
-      ? 'commercial or retail'
-      : 'multifamily townhome, condo, or apartment';
-
-  const queryPrompt = `The SUBJECT PROPERTY is: ${subjectAddress}.
-Use Google Search to find recently SOLD ${propertyTypePrompt} properties within 5 DRIVING MILES of that exact subject property — searching ${areaLine}.
-${sourceAngle}
-
-Criteria for each comp (ALL must hold):
-- SOLD/CLOSED within the last 12 months (sale date on or after ${oneYearAgoIso}).
-- NEW CONSTRUCTION: year built 2025 or 2026 ONLY.
-- Within 5 driving miles of the subject property. THE CLOSER THE BETTER — sales on the subject's own street, in its own subdivision, and in its immediate neighborhood are the MOST valuable comps; never skip them for being too close. Cover the FULL radius: the subject's neighborhood, its ZIP, AND every adjacent town/ZIP that falls inside 5 miles (identify those adjacent areas yourself and search them too).
-- Completed ${propertyTypePrompt} properties only — the type must match. NEVER vacant land, raw lots, or unbuilt pads.
-
-BE THOROUGH — LAZINESS IS A FAILURE:
-- Run AT LEAST 8 DISTINCT search queries across the sources above before answering, with different phrasings (street/subdivision names near the subject, "new construction sold 2025", "new construction sold 2026", builder community names, adjacent town names).
-- Specifically hunt for NEW-CONSTRUCTION SUBDIVISIONS and builder communities near the subject (search "<area> new construction community" first, then find each community's closed sales).
-- Do NOT stop at the first page of results or after finding a few comps. Keep searching until additional queries stop surfacing NEW qualifying sales.
-- Return EVERY qualifying sold property you find — skipping a sale that meets the criteria is an error. NO maximum count.
-- Include the living-area square footage when the source shows it. Never fabricate addresses, prices, sale dates, or year built — only real, verifiable closed sales.
-
-Output ONLY a JSON array inside a markdown code block:
-\`\`\`json
-[
-  { "address": "123 Example St, City, NC 28120", "price": 399900, "saleDate": "2026-01-20", "yearBuilt": 2025, "sqft": 1400, "propertyType": "Single-Family Residential (SFR)", "sourceName": "Realtor.com" }
-]
-\`\`\``;
-
-  const res = await queueGemini(() => fetchWithTimeout(
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=${geminiApiKey}`,
-    120000,
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contents: [{ role: 'user', parts: [{ text: queryPrompt }] }],
-        systemInstruction: {
-          parts: [{ text: "You are an exhaustive real estate comps research agent specializing in PUBLIC MLS data. Use Google Search across public MLS portals and public records to find CLOSED/SOLD listings, returning them as structured JSON. Pull EVERY real, verifiable sold property meeting the criteria — there is no maximum; stopping at a handful is a failure. Never include vacant land, active/pending listings, list prices, or estimates — closed sold prices only. Never fabricate." }]
-        },
-        tools: [{ google_search: {} }],
-        generationConfig: { temperature: 0 }
-      }),
-    },
-  ), 'idle', 'background');
-  if (!res.ok) return [];
-  const text = (await res.json()).candidates?.[0]?.content?.parts?.[0]?.text || '';
-  const parsed = parseCompsFromJsonText(text);
-  if (!parsed) return [];
-  return parsed
-    .filter((c: any) => c && typeof c.address === 'string' && c.address.trim())
-    .map((c: any) => ({
-      address: String(c.address).trim(),
-      price: Number(c.price) || 0,
-      saleDate: String(c.saleDate || ''),
-      yearBuilt: c.yearBuilt != null ? Number(c.yearBuilt) : undefined,
-      sqft: Number(c.sqft) > 0 ? Number(c.sqft) : undefined,
-      propertyType: typeof c.propertyType === 'string' ? c.propertyType : undefined,
-      sourceName: typeof c.sourceName === 'string' ? c.sourceName : 'Public MLS (Google Search)',
-      status: 'sold',
-    }));
-}
-
-/**
- * Exhaustive comp discovery in TWO passes:
- *   Pass 1 — several PARALLEL grounded searches anchored to the subject
- *   address, each angled at a different slice of the public MLS ecosystem
- *   (portals by ZIP, public records by ZIP, portals city-wide, and a
- *   new-construction subdivision hunt covering adjacent towns).
- *   Pass 2 — a GAP-FILL search that is shown everything already found and
- *   ordered to dig for qualifying sales NOT yet on the list.
- * All results merged and de-duplicated by address.
- */
-async function fetchGoogleMlsComps(
-  subjectAddress: string,
-  city: string,
-  stateCode: string,
-  zip: string,
-  category: 'residential' | 'commercial' | 'multifamily',
-  oneYearAgoIso: string,
-  onStageChange?: (stage: string) => void,
-): Promise<any[]> {
-  const geminiApiKey = getUserKeys().gemini || "";
-  if (!geminiApiKey) {
-    console.warn("Gemini API key is not configured — cannot run the public-MLS comp search.");
-    return [];
-  }
-
-  onStageChange?.("Searching public MLS sources for sold comps (Google)...");
-
-  const portalAngle = "Search the PUBLIC MLS portals: Realtor.com sold listings, Zillow 'Sold' pages, Redfin 'Recently Sold', Homes.com, Trulia, and Movoto. Run separate site-scoped searches (site:realtor.com, site:zillow.com, site:redfin.com, site:homes.com, site:trulia.com, site:movoto.com) plus general queries like \"new construction sold 2025\" and \"new construction sold 2026\" with the area name.";
-  const recordsAngle = "Search PUBLIC RECORDS: the county register of deeds, county tax assessor sales records, property transfer records, and local MLS public search portals. Also check national builders' communities in the area (D.R. Horton, Lennar, LGI, Meritage, True Homes, Smith Douglas, etc.) combined with 'sold' or 'closed' queries — new-construction closings often appear in public records before portals.";
-  const subdivisionAngle = "Hunt NEW-CONSTRUCTION SUBDIVISIONS: first search for new-construction communities and builder developments near the subject (\"new construction community\", \"new homes\", builder names + the area), including in ADJACENT towns and ZIP codes within 5 miles. Then, for EACH community found, search for its recently CLOSED/SOLD homes across the portals and public records.";
-
-  const merge = (byKey: Map<string, any>, rows: any[]) => {
-    for (const c of rows) {
-      const key = normalizeStreetKey(c.address);
-      if (!key) continue;
-      const existing = byKey.get(key);
-      // Keep the record with the most complete data (price+sqft) on duplicates.
-      if (!existing || (!existing.sqft && c.sqft) || (!existing.price && c.price)) {
-        byKey.set(key, { ...existing, ...c });
-      }
-    }
-  };
-
-  // --- Pass 1: parallel angled searches ---
-  const areaZip = zip ? `ZIP code ${zip} (${city}, ${stateCode}) and every adjacent ZIP within 5 miles` : `in and around ${city}, ${stateCode}`;
-  const areaCity = `in and around ${city}, ${stateCode}, including neighboring towns within 5 miles`;
-  const queries: Promise<any[]>[] = [
-    runGeminiCompQuery(geminiApiKey, subjectAddress, areaZip, portalAngle, category, oneYearAgoIso),
-    runGeminiCompQuery(geminiApiKey, subjectAddress, areaZip, recordsAngle, category, oneYearAgoIso),
-    runGeminiCompQuery(geminiApiKey, subjectAddress, areaCity, portalAngle, category, oneYearAgoIso),
-    runGeminiCompQuery(geminiApiKey, subjectAddress, areaCity, subdivisionAngle, category, oneYearAgoIso),
-  ];
-  const settled = await Promise.allSettled(queries);
-  const byKey = new Map<string, any>();
-  let total = 0;
-  for (const s of settled) {
-    if (s.status !== 'fulfilled') { console.warn('A comp search query failed:', s.reason); continue; }
-    total += s.value.length;
-    merge(byKey, s.value);
-  }
-  console.log(`Public-MLS pass 1: ${settled.length} parallel queries → ${total} rows → ${byKey.size} unique candidates.`);
-
-  // --- Pass 2: gap-fill — show what was found, demand what was missed ---
-  onStageChange?.("Gap-fill search — hunting comps the first pass missed...");
-  try {
-    const foundList = Array.from(byKey.values()).map((c) => c.address).slice(0, 80);
-    const gapAngle = `The following qualifying sales were ALREADY FOUND:\n${foundList.length ? foundList.map((a) => `- ${a}`).join('\n') : '- (none found yet — search everything)'}\n\nYour job is to find qualifying sold properties NOT on that list. Use DIFFERENT search queries than the obvious ones: other portals (Movoto, Homes.com, local brokerage sites), county deed/transfer records, subdivision and street names near the subject, adjacent towns inside the 5-mile radius, and "sold" filters on builder community pages. Finding zero additional sales is only acceptable after genuinely exhausting these.`;
-    const gapRows = await runGeminiCompQuery(geminiApiKey, subjectAddress, areaCity, gapAngle, category, oneYearAgoIso);
-    const before = byKey.size;
-    merge(byKey, gapRows);
-    console.log(`Public-MLS pass 2 (gap-fill): ${gapRows.length} rows → ${byKey.size - before} NEW unique candidates.`);
-  } catch (e) {
-    console.warn('Gap-fill comp search failed (continuing with pass-1 results):', e);
-  }
-
-  const comps = Array.from(byKey.values());
-  console.log(`Public-MLS Google search total: ${comps.length} unique candidates.`);
-  return comps;
-}
-
+// Comp records intentionally come only from RealtyAPI. Gemini remains in the
+// pipeline solely for selecting an exterior image from RealtyAPI photo sets.
 // ---------------------------------------------------------------------------
 // RealtyAPI sold records (realtyapi.io) — unified access to Realtor, Redfin,
 // and Zillow CLOSED sales. Each platform is queried with a coordinate-radius
@@ -5397,26 +5404,6 @@ async function fetchRealtyApiSoldComps(
   return merged;
 }
 
-function parseCompsFromJsonText(text: string): any[] | null {
-  try {
-    const match = text.match(/```json\s*([\s\S]*?)\s*```/);
-    let jsonString = '';
-    if (match) {
-      jsonString = match[1];
-    } else {
-      const startIdx = text.indexOf('[');
-      const endIdx = text.lastIndexOf(']');
-      if (startIdx !== -1 && endIdx !== -1) jsonString = text.substring(startIdx, endIdx + 1);
-    }
-    if (!jsonString) return null;
-    const parsed = JSON.parse(jsonString);
-    return Array.isArray(parsed) ? parsed : null;
-  } catch (e) {
-    console.error("Failed to parse comps JSON from LLM response:", e);
-    return null;
-  }
-}
-
 /** Google Distance Matrix via REST (driving, imperial), chunked at 25 destinations. */
 async function fetchDrivingDistancesViaREST(
   lat: number,
@@ -5786,8 +5773,16 @@ export async function fetchGoogleDistanceMatrixComps(
   _countyName: string,
   onStageChange?: (stage: string) => void,
   maxRadiusMiles = 5,
+  zoningVerified = true,
 ): Promise<CompRunResult> {
   onStageChange?.("Searching sold listings...");
+
+  if (!zoningVerified || !zoningCode || /^(n\/?a|not published|unknown)$/i.test(zoningCode.trim())) {
+    return {
+      comps: [],
+      summary: 'RealtyAPI comp search was not run because the parcel does not yet have a source-backed zoning classification. This prevents residential, commercial, or multifamily records from being mixed under an assumed use category.',
+    };
+  }
 
   // NEW CONSTRUCTION (built 2025–2026) matching the subject's ZONING use category,
   // SOLD within the last 12 months, within the requested DRIVING-mile radius.
@@ -5844,41 +5839,24 @@ export async function fetchGoogleDistanceMatrixComps(
   if (city) locations.push(`${city}, ${stateCode}`);
   if (locations.length === 0) locations.push(`${city}, ${stateCode}`);
 
-  // STEP 4 — BOTH engines run in PARALLEL and merge to catch every comp:
-  // (a) RealtyAPI sold records (Realtor + Redfin + Zillow) — one coordinate
-  //     radius search per platform, server-filtered to Sold + new construction
-  //     (year built >= 2025) within the 12-month window; and
-  // (b) [disabled] the former Gemini/Google public-MLS search.
-  //
-  // RealtyAPI (Realtor + Redfin + Zillow) is now the SOLE comp source — it returns
-  // authoritative CLOSED-sale records with reliable price, status, and property
-  // type. The Gemini/Google search was LLM-extracted and could surface
-  // under-contract listings or inaccurate prices, so it is disabled to keep every
-  // comp a verified closed sale. Flip ENABLE_GOOGLE_MLS_COMPS to bring it back.
-  const ENABLE_GOOGLE_MLS_COMPS = false;
+  // STEP 4 — RealtyAPI is the sole comp-record source. Realtor, Redfin, and
+  // Zillow sold records are filtered by the resolved zoning use category before
+  // date, construction-year, and driving-distance checks. Gemini is not used to
+  // discover, price, or validate a comp; it is used later only to select the
+  // exterior image from a RealtyAPI listing's photo set.
   const realtyComps = await fetchRealtyApiSoldComps(lat, lng, category, oneYearAgo, onStageChange, EXPANDED_RADIUS_MILES).catch((e) => {
     console.warn("RealtyAPI sold comp search failed:", e);
     return [] as any[];
   });
-  const googleComps: any[] = ENABLE_GOOGLE_MLS_COMPS
-    ? await fetchGoogleMlsComps(addressString, city, stateCode, zip, category, oneYearAgo.toISOString().split('T')[0], onStageChange).catch((e) => {
-        console.warn("Public-MLS Google comp search failed:", e);
-        return [] as any[];
-      })
-    : [];
 
-  // Merge — Realtor records win duplicates (coordinates + confirmed data).
+  // De-duplicate RealtyAPI platform results by normalized street address.
   const mergedByKey = new Map<string, any>();
-  for (const g of googleComps) {
-    const k = normalizeStreetKey(g.address);
-    if (k) mergedByKey.set(k, g);
-  }
   for (const r of realtyComps) {
     const k = normalizeStreetKey(r.address);
     if (k) mergedByKey.set(k, { ...mergedByKey.get(k), ...r });
   }
   const compAddresses = Array.from(mergedByKey.values());
-  console.log(`Sources merged: ${realtyComps.length} RealtyAPI records + ${googleComps.length} Google → ${compAddresses.length} unique candidates.`);
+  console.log(`RealtyAPI: ${realtyComps.length} records → ${compAddresses.length} unique zoning-matched candidates.`);
 
   // STEP 5 — filter to spec (no distance yet): sold, built 2025/26 (zoning
   // use-category already applied per source), sold ≤12 months, price > 0.
@@ -7800,14 +7778,17 @@ After the report, answer follow-up questions conversationally from the stored co
 ${redfinTable || `- ${marketStatsLine}`}
 
 ### 3. Zoning & Estimated Density Allowances
-- Zoning Classification (DeepSeek over Perplexity+Crawlee sources): ${reportData.zoningCode} (${reportData.zoningDescription})
+- Zoning Classification (Gemini 3.5 Flash with official GIS and grounded sources): ${reportData.zoningCode} (${reportData.zoningDescription})
 - Development Capacity: ${reportData.zoningVerificationStatus !== 'unavailable' ? `Max Building Footprint: ${reportData.gridics?.maxBuildingFootprintSqft?.toLocaleString() || 'N/A'} SF, Max Height: ${reportData.gridics?.maxHeightFt || 'N/A'} ft, Floor Area Ratio (FAR): ${reportData.gridics?.floorAreaRatio || 'N/A'}` : 'Unavailable because no exact-parcel zoning source was found.'}
 - Dimensional Setbacks: ${reportData.zoningVerificationStatus !== 'unavailable' ? `Front: ${reportData.gridics?.setbacks.frontFt || 'N/A'} ft | Rear: ${reportData.gridics?.setbacks.rearFt || 'N/A'} ft | Side: ${reportData.gridics?.setbacks.sideFt || 'N/A'} ft` : 'Unavailable'}
+- Setback Rules/Exceptions: ${reportData.zoningSetbackNotes?.length ? reportData.zoningSetbackNotes.join(' | ') : 'No additional source-backed setback notes published.'}
+- Published Restrictions: ${reportData.zoningRestrictions?.length ? reportData.zoningRestrictions.join(' | ') : 'No additional source-backed restrictions extracted.'}
+- Adopted Standards Source: ${reportData.zoningStandardsSourceUrl || 'Not published'}
 - Net buildable envelope: ${reportData.zoningVerificationStatus !== 'unavailable' ? `${reportData.gridics?.netBuildableAreaSqft?.toLocaleString() || 'N/A'} SF` : 'Unavailable'}
 
 ### 4. SOLD New-Construction Comps (built 2025–2026, zoning-use-matched, CLOSED sales only, no sqft limits, sold ≤12 months, within 5 driving miles, RealtyAPI: Realtor + Redfin + Zillow). Each comp lists its property type.
 ${reportData.comps && reportData.comps.length > 0
-  ? reportData.comps.map((comp, idx) => `- Comp ${idx + 1}: ${comp.address} | ${comp.propertyType || 'Home'} | Built ${comp.yearBuilt ?? 'N/A'} | ${comp.sqft ? `${comp.sqft.toLocaleString()} sqft | ` : ''}Sold ${comp.saleDate || 'N/A'} for $${comp.price.toLocaleString()}${comp.pricePerSqft ? ` ($${comp.pricePerSqft}/sqft)` : ''} | ${comp.distanceMiles.toFixed(2)} mi driving${comp.straightLineMiles != null ? ` (${comp.straightLineMiles.toFixed(2)} mi straight-line)` : ''}${comp.drivingFallback ? ' [straight-line fallback]' : ''} | ${comp.verifiedNote || 'Public MLS (Google Search)'}${comp.priceDiscrepancy ? ` | discrepancy: ${comp.priceDiscrepancy}` : ''}`).join('\n')
+  ? reportData.comps.map((comp, idx) => `- Comp ${idx + 1}: ${comp.address} | ${comp.propertyType || 'Home'} | Built ${comp.yearBuilt ?? 'N/A'} | ${comp.sqft ? `${comp.sqft.toLocaleString()} sqft | ` : ''}Sold ${comp.saleDate || 'N/A'} for $${comp.price.toLocaleString()}${comp.pricePerSqft ? ` ($${comp.pricePerSqft}/sqft)` : ''} | ${comp.distanceMiles.toFixed(2)} mi driving${comp.straightLineMiles != null ? ` (${comp.straightLineMiles.toFixed(2)} mi straight-line)` : ''}${comp.drivingFallback ? ' [straight-line fallback]' : ''} | ${comp.verifiedNote || 'RealtyAPI sold record'}${comp.priceDiscrepancy ? ` | discrepancy: ${comp.priceDiscrepancy}` : ''}`).join('\n')
   : "NONE FOUND: no new-construction (built 2025–2026) HOME sales matching the subject's zoning use closed within the last 12 months inside the 5-mile driving radius (RealtyAPI: Realtor, Redfin, Zillow). Do NOT substitute older homes, vacant-land, raw-lot, or unbuilt-pad sales. State plainly that no qualifying comps were available and note the county tax-assessor values as the only valuation reference."}
 
 ### 5. Ownership, Tax & Assessment Data (for report content — never output this as a JSON/asset payload)

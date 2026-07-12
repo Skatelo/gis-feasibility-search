@@ -1091,6 +1091,7 @@ export const FeasibilitySearch: FC = () => {
         d.countyName || '',
         undefined,
         newRadius,
+        d.zoningVerificationStatus !== 'unavailable',
       );
       if (seq !== searchSeqRef.current) return; // a new search superseded this
       setData((prev) => (prev ? { ...prev, comps: run.comps, compRunSummary: run.summary } : prev));
@@ -4190,7 +4191,13 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                         <strong style={{ fontSize: '12px', color: 'var(--text-primary)' }}>{data.gridics.floorAreaRatio}</strong>
                       </div>
                       <div>
-                        <span className="coord-label" style={{ display: 'block', fontSize: '10px', color: 'var(--text-muted)', marginBottom: '2px' }}>{data.zoningStandardsStatus === 'official' ? 'SETBACKS:' : 'TYPICAL SETBACKS (EST.):'}</span>
+                        <span className="coord-label" style={{ display: 'block', fontSize: '10px', color: 'var(--text-muted)', marginBottom: '2px' }}>
+                          {data.zoningSetbacksStatus === 'official'
+                            ? 'SETBACKS (ORDINANCE):'
+                            : data.zoningSetbacksStatus === 'mixed'
+                              ? 'SETBACKS (PARTIAL + EST.):'
+                              : 'TYPICAL SETBACKS (EST.):'}
+                        </span>
                         <strong style={{ fontSize: '11px', color: 'var(--text-primary)' }}>
                           F: {data.gridics.setbacks.frontFt} ft | R: {data.gridics.setbacks.rearFt} ft | S: {data.gridics.setbacks.sideFt} ft
                         </strong>
@@ -4216,6 +4223,24 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                       </div>
                     )}
 
+                    {data.zoningSetbackNotes && data.zoningSetbackNotes.length > 0 && (
+                      <div style={{ marginTop: '12px', fontSize: '0.76rem', color: 'var(--text-secondary)' }}>
+                        <strong style={{ display: 'block', color: 'var(--text-primary)', marginBottom: '4px' }}>Setback rules and exceptions</strong>
+                        {data.zoningSetbackNotes.map((note) => <div key={note}>• {note}</div>)}
+                      </div>
+                    )}
+
+                    {data.zoningRestrictions && data.zoningRestrictions.length > 0 && (
+                      <div style={{ marginTop: '12px', fontSize: '0.76rem', color: 'var(--text-secondary)' }}>
+                        <strong style={{ display: 'block', color: 'var(--text-primary)', marginBottom: '4px' }}>Published zoning restrictions</strong>
+                        {data.zoningRestrictions.map((restriction) => <div key={restriction}>• {restriction}</div>)}
+                      </div>
+                    )}
+
+                    {data.zoningStandardsSourceUrl && (
+                      <SourceLinks label="Setbacks and restrictions source" sources={[data.zoningStandardsSourceUrl]} />
+                    )}
+
                     <hr style={{ border: '0', borderTop: '1px solid var(--bg-card-border)', margin: '15px 0' }} />
 
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '10px' }}>
@@ -4231,7 +4256,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                     </div>
                   </>
                 ) : (
-                  <div className="cost-disclaimer">Development allowances are unavailable because DeepSeek did not find a source that explicitly assigns a zoning code to this exact parcel.</div>
+                  <div className="cost-disclaimer">Development allowances are hidden because official GIS and Gemini 3.5 Flash did not find a source that explicitly assigns a zoning district to this exact parcel.</div>
                 )}
               </div>
 
@@ -4313,28 +4338,32 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                   <h3 className="registry-card-header">Verified Market Comps (SOLD ONLY)</h3>
                   <div style={{ display: 'flex', alignItems: 'flex-start', gap: '10px', padding: '10px 0', color: 'var(--text-secondary)', fontSize: '0.82rem', lineHeight: 1.45 }}>
                     <AlertCircle size={16} style={{ flexShrink: 0, marginTop: '2px', color: 'var(--warning, #d97706)' }} />
-                    <span>No qualifying comps found: no new-construction sales (built 2025–2026) matching this parcel's zoning use closed within the last 12 months inside the {compRadius} driving-mile radius (RealtyAPI: Realtor, Redfin, Zillow). The chat bubble has the run breakdown. Try a wider radius:</span>
+                    <span>
+                      {data.zoningVerificationStatus === 'unavailable'
+                        ? (data.compRunSummary || 'RealtyAPI comps are waiting for a source-backed zoning classification so property-use categories are not mixed.')
+                        : `No qualifying comps found: no new-construction sales (built 2025–2026) matching this parcel's zoning use closed within the last 12 months inside the ${compRadius} driving-mile radius (RealtyAPI: Realtor, Redfin, Zillow). The chat bubble has the run breakdown. Try a wider radius:`}
+                    </span>
                   </div>
-                  {/* Radius pills: EVERY click runs a FRESH comps search at that
-                      max driving-mile radius — the way to widen an empty run. */}
-                  <div className="comp-filter-bar">
-                    <div className="comp-filter-group">
-                      <span className="comp-filter-label">Radius</span>
-                      {[3, 5, 10].map((r) => (
-                        <button
-                          key={r}
-                          type="button"
-                          className={`comp-filter-pill${compRadius === r ? ' active' : ''}`}
-                          disabled={compsRefetching}
-                          title={`Run a fresh comps search within ${r} driving miles`}
-                          onClick={() => changeCompRadius(r)}
-                        >
-                          {r} mi
-                        </button>
-                      ))}
-                      {compsRefetching && <Loader2 size={13} className="spinner" style={{ color: 'var(--text-muted)' }} />}
+                  {data.zoningVerificationStatus !== 'unavailable' && (
+                    <div className="comp-filter-bar">
+                      <div className="comp-filter-group">
+                        <span className="comp-filter-label">Radius</span>
+                        {[3, 5, 10].map((r) => (
+                          <button
+                            key={r}
+                            type="button"
+                            className={`comp-filter-pill${compRadius === r ? ' active' : ''}`}
+                            disabled={compsRefetching}
+                            title={`Run a fresh comps search within ${r} driving miles`}
+                            onClick={() => changeCompRadius(r)}
+                          >
+                            {r} mi
+                          </button>
+                        ))}
+                        {compsRefetching && <Loader2 size={13} className="spinner" style={{ color: 'var(--text-muted)' }} />}
+                      </div>
                     </div>
-                  </div>
+                  )}
                   {compsError && (
                     <div className="enf-err" style={{ marginTop: '8px' }}><AlertCircle size={12} /> {compsError}</div>
                   )}

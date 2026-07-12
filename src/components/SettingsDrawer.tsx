@@ -85,7 +85,7 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
       return;
     }
     if (!geminiKey.trim()) {
-      setValidationError("Gemini API Key is required for the chatbot, zoning analysis, and sold comps filters.");
+      setValidationError("Gemini API Key is required for zoning research, comp exterior-photo selection, and the chatbot.");
       return;
     }
 
@@ -235,7 +235,7 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
                   {showGeminiKey ? <EyeOff size={16} /> : <Eye size={16} />}
                 </button>
               </div>
-              <p className="field-help">Powers comps evaluation, cost analysis, and the Advanced chatbot.</p>
+              <p className="field-help">Powers Gemini 3.5 Flash zoning research, comp exterior-photo Vision, cost analysis, and the Advanced chatbot. Comp records themselves come only from RealtyAPI.</p>
             </div>
 
             {/* Gemini Key #2 — optional second quota lane for background lookups */}
@@ -386,10 +386,10 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
               <p className="field-help">Scans Realtor, Redfin, and Zillow closed-sale records by coordinate radius (realtyapi.io) for new-construction sold comps — merged with the Google comp search.</p>
             </div>
 
-            {/* DeepSeek API Key (zoning research + optional report fusion) */}
+            {/* DeepSeek API Key (optional report fusion) */}
             <div className="settings-field-group">
               <div className="field-label-row">
-                <label htmlFor="deepSeekKey">DeepSeek API Key (zoning + report)</label>
+                <label htmlFor="deepSeekKey">DeepSeek API Key (optional report)</label>
                 <span className="badge optional">Required for zoning</span>
               </div>
               <div className="field-input-container">
@@ -409,7 +409,7 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
                   {showDeepSeekKey ? <EyeOff size={16} /> : <Eye size={16} />}
                 </button>
               </div>
-              <p className="field-help">Required for the multi-pass zoning lookup. It also enables the optional Gemini + DeepSeek fusion report. Get a key at platform.deepseek.com.</p>
+              <p className="field-help">Optional. Enables the Gemini + DeepSeek fusion report; zoning now uses Gemini 3.5 Flash. Get a key at platform.deepseek.com.</p>
             </div>
 
             {/* RentCast API Key (enriches buyer/deal sale prices) */}

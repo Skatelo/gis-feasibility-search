@@ -61,7 +61,7 @@ test('listing zoning evidence distinguishes one-provider reports from corroborat
   assert.equal(evidence.listingZoningEvidenceTier(['https://example.com/a']), null);
 });
 
-test('zoning output uses iterative DeepSeek research without the fusion models', () => {
+test('zoning uses official GIS first and grounded Gemini 3.5 Flash for research', () => {
   const stage = serviceSource.slice(
     serviceSource.indexOf('// STAGE 3 - zoning.'),
     serviceSource.indexOf('// STAGE 4'),
@@ -71,17 +71,37 @@ test('zoning output uses iterative DeepSeek research without the fusion models',
     serviceSource.indexOf('async function fetchDrivingDistancesViaSDK'),
   );
 
-  assert.doesNotMatch(stage, /fetchCountyZoningCode|gisZoning|pointZoning/);
-  assert.match(stage, /if \(deepSeekZoning\)/);
-  assert.match(resolver, /if \(!perplexityKey \|\| !deepSeekKey\)/);
+  assert.match(stage, /if \(geminiZoning\)/);
+  assert.match(stage, /zoningSetbackNotes/);
+  assert.match(stage, /zoningRestrictions/);
+  assert.match(resolver, /fetchCountyZoningCode/);
+  assert.match(serviceSource, /const GEMINI_ZONING_MODEL = 'gemini-3\.5-flash'/);
+  assert.match(serviceSource, /tools: \[\{ google_search: \{\} \}\]/);
+  assert.match(resolver, /return bestOfficialResult \|\| officialGisFallback \|\| bestListingResult/);
+  assert.match(resolver, /completeSetbacks[\s\S]*standards\?\.restrictions/);
   assert.match(resolver, /mode: 'hard'/);
-  assert.match(resolver, /for \(let round = 0; round < 4; round\+\+\)/);
+  assert.match(resolver, /for \(let round = 0; round < 3; round\+\+\)/);
   assert.match(resolver, /zoningQueriesForRound/);
   assert.match(resolver, /bestListingResult/);
   assert.match(serviceSource, /site:zillow\.com[\s\S]*site:realtor\.com[\s\S]*site:redfin\.com/);
-  assert.doesNotMatch(resolver, /zoningExpertViaGemini|Promise\.all|MODEL EXPERT DRAFTS|model: 'sonar'|google_search/);
+  assert.doesNotMatch(resolver, /zoningExpertViaDeepSeek|deepSeekKey|model: 'sonar'/);
   assert.match(serviceSource, /method: 'POST',\s+cache: 'no-store',/);
   assert.match(componentSource, /CORROBORATED: PROPERTY LISTINGS/);
   assert.match(componentSource, /REPORTED: PROPERTY LISTING/);
+  assert.match(componentSource, /Setback rules and exceptions/);
+  assert.match(componentSource, /Published zoning restrictions/);
   assert.match(componentSource, /data\.gridics && data\.zoningVerificationStatus !== 'unavailable'/);
+});
+
+test('comps use RealtyAPI records filtered by zoning while retaining Gemini Vision photos', () => {
+  const pipeline = serviceSource.slice(
+    serviceSource.indexOf('export async function fetchGoogleDistanceMatrixComps'),
+    serviceSource.indexOf('/** A grounded (Google-Search) Gemini text call'),
+  );
+
+  assert.match(pipeline, /fetchRealtyApiSoldComps/);
+  assert.match(pipeline, /getPermittedCategory\(zoningCode, zoningDesc\)/);
+  assert.match(pipeline, /selectExteriorComps\(result, getBackgroundGeminiKey\(\)\)/);
+  assert.doesNotMatch(pipeline, /fetchGoogleMlsComps|runGeminiCompQuery|google_search|ENABLE_GOOGLE_MLS_COMPS/);
+  assert.match(serviceSource, /matchesZoningUse\(c\.propertyType, category\)/);
 });

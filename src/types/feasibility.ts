@@ -276,6 +276,9 @@ export interface SiteFeasibilityData {
   zoningJurisdiction?: string;
   zoningStandardsStatus?: 'official' | 'mixed' | 'estimated' | 'unavailable';
   zoningStandardsSourceUrl?: string;
+  zoningSetbacksStatus?: 'official' | 'mixed' | 'estimated' | 'unavailable';
+  zoningSetbackNotes?: string[];
+  zoningRestrictions?: string[];
   zoningMinimumLotAreaSqft?: number;
   zoningMaxLotCoveragePct?: number;
   zoningPermittedUses?: string[];
