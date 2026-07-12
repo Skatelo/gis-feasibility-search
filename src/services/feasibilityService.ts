@@ -1,5 +1,6 @@
 import type { SiteFeasibilityData, SlopeProfile, CompProperty, FloodZoneInfo, WetlandsInfo, ConstructionCostEstimate, CostLineItem, MaterialTakeoff, MaterialTakeoffItem, LandClearingEstimate, TreeRemovalLine, ClearingMethod, UtilitiesEstimate, UtilityLine, PermitFeeLine } from '../types/feasibility';
 import { fetchCountyZoningCode, getZoningServices, normalizeCountyKey } from '../data/ncZoning';
+import type { ResolvedZoning } from '../data/ncZoning';
 import { getSupabase, isSupabaseConfigured } from './supabaseClient';
 import { fetchOfficialScParcel, mergeOfficialScParcelRecords, officialRecordFromCountyGis, scOwnerNamesMatch, shouldHideStatewideGeometry } from './scParcelVerification';
 import { scCountySource } from '../data/scCountySources';
@@ -4527,6 +4528,11 @@ function zoningQueriesForRound(input: {
   return [...new Set(rounds[Math.min(input.round, rounds.length - 1)].filter((query) => query.trim()))];
 }
 
+/** Per-round Perplexity + Crawlee budget for zoning research. Ranked results
+ * front-load the useful sources, so a leaner crawl keeps the same official
+ * hit rate while cutting the dominant per-round wait (the page crawl). */
+const ZONING_RESEARCH_BUDGET = { maxResultsPerQuery: 6, maxSources: 16, maxScrapeTargets: 8, mode: 'hard' } as const;
+
 /** Gemini 3.5 Flash zoning resolver. A fresh official ArcGIS point result is
  * retained as the authoritative fallback; Gemini uses Google Search plus
  * optional Perplexity/Crawlee evidence to read the adopted standards. */
@@ -4540,12 +4546,24 @@ export async function fetchZoningViaWebSearch(
   gisHintSourceUrl?: string,
 ): Promise<ZoningResult | null> {
   const geminiKey = (getUserKeys().gemini || '').trim();
-  const directGis = countyName && Number.isFinite(lat) && Number.isFinite(lng)
-    ? await fetchCountyZoningCode(countyName, Number(lng), Number(lat)).catch((error) => {
+  const perplexityKey = getPerplexityKey();
+  const state = countyName ? countyState(countyName) : 'NC';
+  // The official GIS point lookup and the first research round run CONCURRENTLY:
+  // round-0 queries don't depend on the GIS result, so a slow county server
+  // no longer stalls the whole stage serially before research even starts.
+  const directGisPromise: Promise<ResolvedZoning | null> = countyName && Number.isFinite(lat) && Number.isFinite(lng)
+    ? fetchCountyZoningCode(countyName, Number(lng), Number(lat)).catch((error) => {
         console.warn('Official zoning GIS point lookup failed:', error);
         return null;
       })
-    : null;
+    : Promise.resolve(null);
+  const round0ResearchPromise = geminiKey && perplexityKey
+    ? perplexityResearchBlock(
+        zoningQueriesForRound({ round: 0, address, parcelId, countyName, state, candidateCode: null }),
+        ZONING_RESEARCH_BUDGET,
+      ).catch(() => ({ block: '', urls: [] as string[] }))
+    : Promise.resolve({ block: '', urls: [] as string[] });
+  const directGis = await directGisPromise;
   const registeredGisUrl = directGis?.sourceUrl || (countyName ? getZoningServices(countyName)[0]?.url : undefined);
   const fallbackCode = directGis?.code || (gisHint && !/^(n\/?a|unknown|null)$/i.test(gisHint.trim()) ? gisHint.trim() : '');
   const fallbackSource = directGis?.sourceUrl || gisHintSourceUrl || registeredGisUrl;
@@ -4566,9 +4584,6 @@ export async function fetchZoningViaWebSearch(
     return officialGisFallback;
   }
 
-  const perplexityKey = getPerplexityKey();
-
-  const state = countyName ? countyState(countyName) : 'NC';
   const stateFull = state === 'SC' ? 'South Carolina' : 'North Carolina';
 
   const countyLine = countyName ? ` It is in ${countyBaseName(countyName)} County, ${stateFull}.` : '';
@@ -4635,7 +4650,11 @@ The ordinance alone does not prove the parcel's district. For official methods, 
       + (Number.isFinite(Number(standards.minimumLotAreaSqft)) ? 1 : 0);
   };
 
-  for (let round = 0; round < 3; round++) {
+  // When the official GIS already settled WHICH district governs, the research
+  // rounds only need the adopted standards — two passes suffice; the third
+  // round's re-identification queries would be wasted time.
+  const maxRounds = officialGisFallback ? 2 : 3;
+  for (let round = 0; round < maxRounds; round++) {
     const queries = zoningQueriesForRound({
       round,
       address,
@@ -4644,12 +4663,11 @@ The ordinance alone does not prove the parcel's district. For official methods, 
       state,
       candidateCode,
     });
-    const research = perplexityKey
-      ? await perplexityResearchBlock(
-          queries,
-          { maxResultsPerQuery: 8, maxSources: 24, maxScrapeTargets: 12, mode: 'hard' },
-        ).catch(() => ({ block: '', urls: [] as string[] }))
-      : { block: '', urls: [] as string[] };
+    const research = round === 0
+      ? await round0ResearchPromise
+      : perplexityKey
+        ? await perplexityResearchBlock(queries, ZONING_RESEARCH_BUDGET).catch(() => ({ block: '', urls: [] as string[] }))
+        : { block: '', urls: [] as string[] };
     if (research.block && research.urls.length > 0) {
       evidenceBlocks.push(`\n\n=== ZONING RESEARCH ROUND ${round + 1} ===${research.block.slice(0, 18000)}`);
       for (const url of research.urls) if (!evidenceUrls.includes(url)) evidenceUrls.push(url);
@@ -4668,23 +4686,35 @@ ${round < 2
       geminiKey,
       countyName || '',
     );
-    if (!draft) continue;
-    candidateCode = draft.result?.code || extractZoningCandidateCode(draft.raw) || candidateCode;
-    if (!draft.result) continue;
-    if (draft.result.evidenceTier === 'official') {
-      if (standardsScore(draft.result) > standardsScore(bestOfficialResult)) bestOfficialResult = draft.result;
-      const completeSetbacks = [
-        draft.result.standards?.setbacks?.frontFt,
-        draft.result.standards?.setbacks?.rearFt,
-        draft.result.standards?.setbacks?.sideFt,
-      ].every((value) => Number.isFinite(Number(value)));
-      if (completeSetbacks && (draft.result.standards?.restrictions?.length || 0) > 0) return draft.result;
-      continue;
+    if (draft) {
+      candidateCode = draft.result?.code || extractZoningCandidateCode(draft.raw) || candidateCode;
+      if (draft.result?.evidenceTier === 'official') {
+        if (standardsScore(draft.result) > standardsScore(bestOfficialResult)) bestOfficialResult = draft.result;
+        const standards = bestOfficialResult?.standards;
+        const completeSetbacks = [
+          standards?.setbacks?.frontFt,
+          standards?.setbacks?.rearFt,
+          standards?.setbacks?.sideFt,
+        ].every((value) => Number.isFinite(Number(value)));
+        const hasQualitative = (standards?.restrictions?.length || 0)
+          + (standards?.setbackNotes?.length || 0)
+          + (standards?.permittedUses?.length || 0) > 0;
+        // An official district with fully verified setbacks is a finished
+        // answer — another round would only hunt for extra prose. Accept it
+        // immediately once any qualitative context exists, or unconditionally
+        // after the second pass.
+        if (completeSetbacks && (hasQualitative || round >= 1)) return bestOfficialResult;
+      } else if (draft.result) {
+        const rank = (result: ZoningResult | null) =>
+          result?.evidenceTier === 'corroborated' ? 2 : result?.evidenceTier === 'reported' ? 1 : 0;
+        if (rank(draft.result) > rank(bestListingResult)) bestListingResult = draft.result;
+      }
     }
 
-    const rank = (result: ZoningResult | null) =>
-      result?.evidenceTier === 'corroborated' ? 2 : result?.evidenceTier === 'reported' ? 1 : 0;
-    if (rank(draft.result) > rank(bestListingResult)) bestListingResult = draft.result;
+    // Two full passes with zero evidence — no candidate code, no official or
+    // listing hit — means the parcel's district simply isn't published online;
+    // a third pass of near-identical queries won't conjure a source.
+    if (round === 1 && !candidateCode && !bestOfficialResult && !bestListingResult) break;
   }
 
   return bestOfficialResult || officialGisFallback || bestListingResult;
