@@ -18,6 +18,13 @@ export interface ZoningService {
   url: string;
   /** Optional ArcGIS export `layers` clause, e.g. "show:0" for mixed report maps. */
   layers?: string | null;
+  /**
+   * When set, the point lookup uses the layer `query` op with this outField
+   * instead of `identify`. Needed for services whose identify response hides
+   * the zoning field (e.g. Georgetown's Zone, Anderson's ZONE1) — query returns
+   * every field regardless of the map service's identify field visibility.
+   */
+  query_field?: string | null;
 }
 
 export interface CountyZoningConfig {
@@ -30,6 +37,8 @@ export interface CountyZoningConfig {
   description_field: string | null;
   /** Optional ArcGIS export `layers` clause, e.g. "show:0" for mixed report maps. */
   zoning_layers?: string | null;
+  /** See ZoningService.query_field — forces the query-op lookup path. */
+  zoning_query_field?: string | null;
   /**
    * Additional zoning MapServers to stack on the map and fall through when
    * looking up the code — used by multi-jurisdiction counties whose city,
@@ -204,6 +213,34 @@ const SC_ZONING_OVERRIDES: Record<string, CountyZoningConfig> = {
     zoning_field_mapping: "ZONING", description_field: null, zoning_layers: "show:41",
     use_state_fallback: F,
   },
+  "charleston,_sc": {
+    county_id: "019", name: "Charleston, SC", lat: 32.7765, lng: -79.9311,
+    // County viewer layer 44 "Zoning Districts" — ZONE2 carries the district
+    // ("AGR" on rural Wadmalaw, "MUNI" placeholder inside municipalities, where
+    // the placeholder filter defers to web research). Verified live 2026-07.
+    zoning_mapserver_url: "https://gisccapps.charlestoncounty.org/arcgis/rest/services/GIS_VIEWER/New_Public_Search/MapServer",
+    zoning_field_mapping: "ZONE2", description_field: null, zoning_layers: "show:44",
+    use_state_fallback: F,
+  },
+  "georgetown,_sc": {
+    county_id: "043", name: "Georgetown, SC", lat: 33.3682, lng: -79.2848,
+    // GCGIS_Planning layer 2 "Zoning" — identify hides the Zone field, so the
+    // lookup must use the query op (Zone: "FA", "VR-10"; "CITY OF GEORGETOWN" /
+    // "SPLIT" placeholders filtered). Verified live 2026-07.
+    zoning_mapserver_url: "https://gis1.georgetowncountysc.org/portal/rest/services/GCGIS_Planning/MapServer",
+    zoning_field_mapping: "Zone", description_field: null, zoning_layers: "show:2",
+    zoning_query_field: "Zone",
+    use_state_fallback: F,
+  },
+  "anderson,_sc": {
+    county_id: "007", name: "Anderson, SC", lat: 34.5034, lng: -82.6501,
+    // QueryMap layer 9 "Parcel Zoning" — per-parcel ZONE1 ("C-2", "R-20", …).
+    // Queried (not identified) so field visibility can't hide it. Verified live 2026-07.
+    zoning_mapserver_url: "https://propertyviewer.andersoncountysc.org/arcgis/rest/services/QueryMap/MapServer",
+    zoning_field_mapping: "ZONE1", description_field: null, zoning_layers: "show:9",
+    zoning_query_field: "ZONE1",
+    use_state_fallback: F,
+  },
 };
 Object.assign(ncZoningRegistry.counties, SC_ZONING_OVERRIDES);
 
@@ -235,7 +272,7 @@ export function getZoningServices(name: string): ZoningService[] {
   const c = getZoningConfig(name);
   if (!c || c.use_state_fallback || !c.zoning_mapserver_url) return [];
   return [
-    { url: c.zoning_mapserver_url, layers: c.zoning_layers ?? null },
+    { url: c.zoning_mapserver_url, layers: c.zoning_layers ?? null, query_field: c.zoning_query_field ?? null },
     ...(c.extra_zoning ?? []).filter((s) => !!s.url),
   ];
 }
@@ -281,7 +318,7 @@ const byLengthAsc = (a: string, b: string) => a.length - b.length;
 // County-wide layers stamp these placeholders where a municipality does its own
 // zoning; the real code lives in that town's separate sublayer, so we ignore them.
 const isPlaceholderCode = (code: string, desc: string | null) =>
-  /^(city|county|etj|unzoned|none|n\/a|mun\.?|municipal|municipality)$/i.test(code) ||
+  /^(city|county|etj|unzoned|none|n\/a|mun\.?|muni|municipal|municipality|split)$/i.test(code) ||
   /\b(city|town|county|limits|municipal)\b/i.test(code) ||
   (!!desc && /\b(town|city)\s+limits\b/i.test(desc));
 
@@ -369,6 +406,47 @@ async function identifyZoning(service: ZoningService, lng: number, lat: number):
 }
 
 /**
+ * Point lookup via the layer `query` op for services whose identify response
+ * hides the zoning field (field visibility). Queries the first sublayer from
+ * the `layers` clause with the configured outField; a tiny envelope retry
+ * recovers geocodes that landed just off the polygon.
+ */
+async function queryZoningAtPoint(service: ZoningService, lng: number, lat: number): Promise<ResolvedZoning | null> {
+  const layerId = String(service.layers || '').replace(/^show:/, '').split(',')[0].trim();
+  const field = service.query_field;
+  if (!layerId || !field) return null;
+  const d = 0.00012;
+  const geometries = [
+    { geometry: `${lng},${lat}`, type: 'esriGeometryPoint' },
+    { geometry: `${lng - d},${lat - d},${lng + d},${lat + d}`, type: 'esriGeometryEnvelope' },
+  ];
+  for (const g of geometries) {
+    try {
+      const params = new URLSearchParams({
+        geometry: g.geometry,
+        geometryType: g.type,
+        inSR: '4326',
+        spatialRel: 'esriSpatialRelIntersects',
+        where: '1=1',
+        outFields: field,
+        returnGeometry: 'false',
+        f: 'json',
+      });
+      const res = await fetch(`${service.url}/${layerId}/query?${params.toString()}`, { cache: 'no-store' });
+      if (!res.ok) continue;
+      const data = await res.json();
+      const values: string[] = (Array.isArray(data?.features) ? data.features : [])
+        .map((f: { attributes?: Record<string, unknown> }) => cleanZoningValue(f?.attributes?.[field]))
+        .filter((v: string | null): v is string => !!v && !isPlaceholderCode(v, null));
+      if (values.length) return { code: values[0], description: null, sourceUrl: service.url };
+    } catch (e) {
+      console.warn(`Zoning query failed for ${service.url}:`, e);
+    }
+  }
+  return null;
+}
+
+/**
  * Resolves the real zoning code/description at a WGS84 point for a county by
  * trying each of its zoning services (primary + extras) in order, returning the
  * first real hit. Returns null when the county publishes no zoning service or
@@ -380,7 +458,9 @@ export async function fetchCountyZoningCode(
   lat: number,
 ): Promise<ResolvedZoning | null> {
   for (const service of getZoningServices(countyName)) {
-    const hit = await identifyZoning(service, lng, lat);
+    const hit = service.query_field
+      ? await queryZoningAtPoint(service, lng, lat)
+      : await identifyZoning(service, lng, lat);
     if (hit) return hit;
   }
   return null;
