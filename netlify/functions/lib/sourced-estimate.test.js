@@ -42,5 +42,11 @@ test('estimate policy requires sources and excludes alternative utility scenario
   assert.match(serviceSource, /estimated: true, sourceUrl: sourceUrls\[0\], sourceUrls/);
   assert.match(serviceSource, /filter\(\(line\) => !line\.scenario\)/);
   assert.match(serviceSource, /pricingStatus: rates \? 'estimated' : 'unavailable'/);
+  assert.match(serviceSource, /for \(let round = 0; round < 3; round\+\+\)/);
+  assert.match(serviceSource, /expandedUtilityQueries/);
+  assert.match(serviceSource, /utilityResearchMissing/);
+  assert.match(serviceSource, /coverageStatus: missing\.length === 0 \? 'complete' : 'partial'/);
+  assert.match(serviceSource, /const responseGroups = responses\.map\(flattenPplxResults\)/);
+  assert.match(serviceSource, /maxScrapeTargets: Math\.min\(12, Math\.max\(8, searchQueries\.length\)\)/);
   assert.doesNotMatch(serviceSource, /UTIL_ESTIMATE|TREE_RATE_FALLBACK|CLEARING_FALLBACK/);
 });

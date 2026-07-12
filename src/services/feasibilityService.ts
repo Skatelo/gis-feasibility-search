@@ -4,13 +4,14 @@ import { getSupabase, isSupabaseConfigured } from './supabaseClient';
 import { fetchOfficialScParcel, mergeOfficialScParcelRecords, officialRecordFromCountyGis, scOwnerNamesMatch, shouldHideStatewideGeometry } from './scParcelVerification';
 import { scCountySource } from '../data/scCountySources';
 import { normalizeSourcedRange } from '../data/sourcedEstimate';
+import { listingZoningEvidenceTier, zoningListingProvider } from '../data/zoningEvidence';
 
 export interface UserKeys {
   googleMaps?: string;
   gemini?: string;
   /** OPTIONAL second Gemini key. When set, background lookups (cost estimate,
    *  takeoff, tree count/rates, utilities, comp photos) run on THIS key in
-   *  their own parallel lane while the report/chat/zoning stay on the primary
+   *  their own parallel lane while the report/chat stay on the primary
    *  key — doubling the per-minute quota so sections finish faster. */
   gemini2?: string;
   /** Perplexity API key — when set, EVERY live web lookup (utilities, tree
@@ -293,6 +294,7 @@ type WebResearchMode = 'auto' | 'easy' | 'hard' | 'perplexity' | 'crawlee';
 interface WebResearchOptions {
   maxResultsPerQuery?: number;
   maxSources?: number;
+  maxScrapeTargets?: number;
   mode?: WebResearchMode;
 }
 
@@ -304,8 +306,9 @@ function wantsCrawleeResearch(queries: string[], opts?: WebResearchOptions): boo
   return queries.some((q) => SCRAPE_HEAVY_QUERY_RE.test(q));
 }
 
-async function crawleeScrapeBatch(urls: string[], queries: string[]): Promise<CrawleeResult[]> {
-  const targets = [...new Set(urls.map((url) => url.trim()).filter(Boolean))].slice(0, 8);
+async function crawleeScrapeBatch(urls: string[], queries: string[], maxTargets = 8): Promise<CrawleeResult[]> {
+  const targetLimit = Math.min(12, Math.max(4, maxTargets));
+  const targets = [...new Set(urls.map((url) => url.trim()).filter(Boolean))].slice(0, targetLimit);
   if (!targets.length) return [];
   try {
     const response = await fetchWithTimeout('/.netlify/functions/crawlee', 30000, {
@@ -314,7 +317,7 @@ async function crawleeScrapeBatch(urls: string[], queries: string[]): Promise<Cr
       body: JSON.stringify({
         urls: targets,
         queries,
-        maxPages: Math.min(12, Math.max(6, targets.length + 4)),
+        maxPages: Math.min(18, Math.max(8, targets.length + 4)),
         maxDepth: 1,
         maxCharsPerPage: 14000,
       }),
@@ -339,7 +342,7 @@ function formatCrawleeSources(results: CrawleeResult[], maxSources = 24, maxSnip
 }
 
 async function crawleeResearchBlock(searchResults: PplxResult[], queries: string[], opts?: WebResearchOptions): Promise<{ block: string; urls: string[] }> {
-  const results = await crawleeScrapeBatch(searchResults.map((result) => result.url), queries);
+  const results = await crawleeScrapeBatch(searchResults.map((result) => result.url), queries, opts?.maxScrapeTargets);
   if (!results.length) return { block: '', urls: [] };
   return {
     block: `\n\nLIVE WEB RESEARCH (Perplexity discovery + Crawlee page/document extraction). Base every figure on THESE extracted sources and cite their URLs in "sources"; do not invent anything beyond them:\n\n${formatCrawleeSources(results, opts?.maxSources ?? 24)}`,
@@ -386,19 +389,30 @@ async function perplexitySearchRequest(body: Record<string, unknown>, key: strin
 /** Flatten the Search API response (single-query = flat list; multi-query =
  *  grouped per query) into one PplxResult list. */
 function flattenPplxResults(data: any): PplxResult[] {
-  const out: PplxResult[] = [];
-  const push = (r: any) => {
-    if (r && typeof r.url === 'string' && r.url) {
-      out.push({ title: String(r.title || r.url), url: r.url, snippet: String(r.snippet || ''), date: r.date ? String(r.date) : undefined });
-    }
+  const parse = (result: any): PplxResult | null => {
+    if (!result || typeof result.url !== 'string' || !result.url) return null;
+    return {
+      title: String(result.title || result.url),
+      url: result.url,
+      snippet: String(result.snippet || ''),
+      date: result.date ? String(result.date) : undefined,
+    };
   };
+  const groups: PplxResult[][] = [];
   const results = data?.results;
   if (Array.isArray(results)) {
     for (const item of results) {
-      if (Array.isArray(item)) item.forEach(push);        // grouped per query
-      else if (Array.isArray(item?.results)) item.results.forEach(push);
-      else push(item);                                     // flat list
+      const rawGroup = Array.isArray(item) ? item : Array.isArray(item?.results) ? item.results : [item];
+      const group = (rawGroup as any[])
+        .map((entry: any) => parse(entry))
+        .filter((result: PplxResult | null): result is PplxResult => !!result);
+      if (group.length) groups.push(group);
     }
+  }
+  const out: PplxResult[] = [];
+  const maxDepth = Math.max(0, ...groups.map((group) => group.length));
+  for (let depth = 0; depth < maxDepth; depth++) {
+    for (const group of groups) if (group[depth]) out.push(group[depth]);
   }
   return out;
 }
@@ -424,11 +438,17 @@ export async function perplexitySearchBatch(
     country: opts?.country ?? 'US',
   }));
   const responses = await Promise.all(bodies.map((b) => perplexitySearchRequest(b, key)));
+  const responseGroups = responses.map(flattenPplxResults);
+  const maxDepth = Math.max(0, ...responseGroups.map((group) => group.length));
   const seen = new Set<string>();
   const merged: PplxResult[] = [];
-  for (const resp of responses) {
-    for (const r of flattenPplxResults(resp)) {
-      if (!seen.has(r.url)) { seen.add(r.url); merged.push(r); }
+  for (let depth = 0; depth < maxDepth; depth++) {
+    for (const group of responseGroups) {
+      const r = group[depth];
+      if (r && !seen.has(r.url)) {
+        seen.add(r.url);
+        merged.push(r);
+      }
     }
   }
   return merged;
@@ -2287,18 +2307,17 @@ export async function executeLandAnalysis(
     return sp;
   });
 
-  // STAGE 3 - zoning. Perplexity discovers official parcel sources, Crawlee
-  // extracts difficult pages, and the model experts reconcile the evidence.
-  // This fusion result is the only value allowed to populate the zoning section.
+  // STAGE 3 - zoning. Perplexity discovers parcel/listing sources, Crawlee
+  // extracts difficult pages, and DeepSeek performs up to four completion rounds.
   const parcelZoning = String(info.zoning || '').trim();
   {
-    onStageChange?.("Resolving zoning (Fusion + Perplexity + Crawlee)...");
-    // Existing parcel data can guide the search, but only a fresh model-fusion
-    // result backed by official evidence may populate the zoning section.
+    onStageChange?.("Resolving zoning (DeepSeek + expanded source search)...");
+    // Existing parcel data can guide the queries, but only a fresh DeepSeek
+    // result backed by parcel-specific evidence may populate the section.
     const zoningHint = parcelZoning && parcelZoning.toUpperCase() !== 'N/A' && info.recordsource === 'county-gis'
       ? parcelZoning
       : null;
-    const aiZoning = await fetchZoningViaWebSearch(
+    const deepSeekZoning = await fetchZoningViaWebSearch(
       info.siteadd || addressString,
       countyName,
       lat,
@@ -2325,17 +2344,26 @@ export async function executeLandAnalysis(
       zoningStandardsStatus = verifiedCount === values.length ? 'official' : verifiedCount > 0 ? 'mixed' : 'estimated';
     };
 
-    if (aiZoning) {
-      zoningCode = aiZoning.code;
-      zoningDescription = `${aiZoning.description} (official parcel source resolved by model fusion)`;
+    if (deepSeekZoning) {
+      zoningCode = deepSeekZoning.code;
+      const evidenceLabel = deepSeekZoning.evidenceTier === 'official'
+        ? 'official parcel source'
+        : deepSeekZoning.evidenceTier === 'corroborated'
+          ? 'matching exact-address property listings'
+          : 'exact-address property listing';
+      zoningDescription = `${deepSeekZoning.description} (${evidenceLabel}, researched by DeepSeek)`;
       zoningSource = 'web';
-      zoningSourceUrl = aiZoning.sourceUrl;
-      zoningSources = aiZoning.sources;
-      zoningVerificationStatus = 'official-research';
-      applyResearchStandards(aiZoning);
+      zoningSourceUrl = deepSeekZoning.sourceUrl;
+      zoningSources = deepSeekZoning.sources;
+      zoningVerificationStatus = deepSeekZoning.evidenceTier === 'official'
+        ? 'official-research'
+        : deepSeekZoning.evidenceTier === 'corroborated'
+          ? 'corroborated-research'
+          : 'listing-research';
+      applyResearchStandards(deepSeekZoning);
     } else {
       zoningCode = "N/A";
-      zoningDescription = 'Fusion research could not verify a parcel-specific zoning district from the official sources it found.';
+      zoningDescription = 'DeepSeek completed four expanded source-search rounds but no source explicitly published a zoning code for this exact address or parcel.';
       zoningVerificationStatus = 'unavailable';
       zoningStandardsStatus = 'unavailable';
     }
@@ -4099,14 +4127,15 @@ async function geocodeAddress(address: string, apiKey: string): Promise<{ lat: n
   return null;
 }
 
-/**
- * Fallback zoning lookup for counties without a published zoning GIS: asks Gemini
- * (with Google Search grounding) for the official zoning district of a specific
- * address from government/official sources, returning a code + description +
- * source URL. Returns null if nothing credible is found. The result is clearly
- * labeled as a web lookup ("verify") in the UI — it is not authoritative.
- */
-type ZoningMatchMethod = 'parcel-gis' | 'official-address-result' | 'official-parcel-report';
+/** DeepSeek zoning research accepts official parcel evidence first, then exact-
+ * address listing records as explicitly labeled lower-tier evidence. */
+type ZoningMatchMethod =
+  | 'parcel-gis'
+  | 'official-address-result'
+  | 'official-parcel-report'
+  | 'corroborated-listings'
+  | 'listing-address-result';
+type ZoningEvidenceTier = 'official' | 'corroborated' | 'reported';
 type ZoningResearchStandards = Partial<ZoningStandards> & {
   minimumLotAreaSqft?: number;
   maxLotCoveragePct?: number;
@@ -4120,10 +4149,11 @@ type ZoningResult = {
   sources: string[];
   jurisdiction?: string;
   matchMethod: ZoningMatchMethod;
+  evidenceTier: ZoningEvidenceTier;
   standards?: ZoningResearchStandards;
 };
 
-const ZONING_SYSTEM = "You are a zoning research assistant. Use only supplied official evidence. A district code requires an official parcel-specific GIS/address/report URL and a matchMethod; an ordinance alone cannot assign a parcel. Dimensional standards require an adopted ordinance URL. Return the requested JSON, use null for unsupported fields, and never fabricate.";
+const ZONING_SYSTEM = "You are a persistent zoning research analyst. Use only the supplied Perplexity+Crawlee evidence. Prefer official parcel GIS/address/report evidence. If official assignment evidence is unavailable, an exact-address Zillow, Realtor, or Redfin record may be reported, and two independent matching listing providers may be corroborated. Never describe listing evidence as official. An ordinance alone cannot assign a parcel. Dimensional standards require an adopted ordinance URL. Return only the requested JSON and never fabricate.";
 
 function cleanEvidenceUrl(value: unknown): string | null {
   if (typeof value !== 'string' || !/^https?:\/\//i.test(value.trim())) return null;
@@ -4167,6 +4197,32 @@ function evidenceUrlAllowed(value: string, evidenceUrls: string[], countyName: s
   } catch { return false; }
 }
 
+function evidenceUrlDiscovered(value: string, evidenceUrls: string[]): boolean {
+  if (!evidenceUrls.length) return true;
+  try {
+    const candidate = new URL(value);
+    return evidenceUrls.some((raw) => {
+      try { return new URL(raw).hostname.toLowerCase() === candidate.hostname.toLowerCase(); }
+      catch { return false; }
+    });
+  } catch { return false; }
+}
+
+function listingEvidenceUrlDiscovered(value: string, evidenceUrls: string[]): boolean {
+  if (!evidenceUrls.length) return false;
+  try {
+    const candidate = new URL(value);
+    const candidatePath = candidate.pathname.toLowerCase().replace(/\/+$/, '');
+    return evidenceUrls.some((raw) => {
+      try {
+        const evidence = new URL(raw);
+        return evidence.hostname.toLowerCase().replace(/^www\./, '') === candidate.hostname.toLowerCase().replace(/^www\./, '')
+          && evidence.pathname.toLowerCase().replace(/\/+$/, '') === candidatePath;
+      } catch { return false; }
+    });
+  } catch { return false; }
+}
+
 function boundedNumber(value: unknown, min: number, max: number, allowZero = false): number | undefined {
   const n = Number(value);
   if (!Number.isFinite(n) || n < min || n > max || (!allowZero && n === 0)) return undefined;
@@ -4187,16 +4243,42 @@ function parseZoningResult(text: string, evidenceUrls: string[] = [], countyName
     const c = code.trim();
     if (!c || /^(null|n\/?a|unknown|see\s*map|varies|tbd)$/i.test(c)) return null;
     const method = String(obj?.matchMethod || '').trim().toLowerCase() as ZoningMatchMethod;
-    if (!['parcel-gis', 'official-address-result', 'official-parcel-report'].includes(method)) return null;
-    const parcelSource = cleanEvidenceUrl(obj?.parcelSource || obj?.source);
-    if (!parcelSource || !evidenceUrlAllowed(parcelSource, evidenceUrls, countyName)) return null;
+    const officialMethods: ZoningMatchMethod[] = ['parcel-gis', 'official-address-result', 'official-parcel-report'];
+    const listingMethods: ZoningMatchMethod[] = ['corroborated-listings', 'listing-address-result'];
+    if (![...officialMethods, ...listingMethods].includes(method)) return null;
 
-    const rawSources = [
-      parcelSource,
+    const requestedParcelSource = cleanEvidenceUrl(obj?.parcelSource || obj?.source);
+    const providedSources = [
+      requestedParcelSource,
+      ...(Array.isArray(obj?.listingSources) ? obj.listingSources.map(cleanEvidenceUrl) : []),
+      ...(Array.isArray(obj?.sources) ? obj.sources.map(cleanEvidenceUrl) : []),
+    ].filter((url): url is string => !!url && (
+      zoningListingProvider(url)
+        ? listingEvidenceUrlDiscovered(url, evidenceUrls)
+        : evidenceUrlDiscovered(url, evidenceUrls)
+    ));
+    const listingSources = [...new Set(providedSources.filter((url) => !!zoningListingProvider(url)))];
+    let parcelSource: string;
+    let evidenceTier: ZoningEvidenceTier;
+
+    if (officialMethods.includes(method)) {
+      if (!requestedParcelSource || !evidenceUrlAllowed(requestedParcelSource, evidenceUrls, countyName)) return null;
+      parcelSource = requestedParcelSource;
+      evidenceTier = 'official';
+    } else {
+      const listingTier = listingZoningEvidenceTier(listingSources);
+      if (!listingTier) return null;
+      if (method === 'corroborated-listings' && listingTier !== 'corroborated') return null;
+      parcelSource = listingSources[0];
+      evidenceTier = listingTier;
+    }
+
+    const officialSources = [
+      requestedParcelSource,
       cleanEvidenceUrl(obj?.ordinanceSource),
       ...(Array.isArray(obj?.sources) ? obj.sources.map(cleanEvidenceUrl) : []),
     ].filter((url): url is string => !!url && evidenceUrlAllowed(url, evidenceUrls, countyName));
-    const sources = [...new Set(rawSources)];
+    const sources = [...new Set([parcelSource, ...officialSources, ...listingSources])];
     const ordinanceSource = cleanEvidenceUrl(obj?.ordinanceSource);
     const standardsObj = obj?.standards && typeof obj.standards === 'object' ? obj.standards : {};
     let standards: ZoningResearchStandards | undefined;
@@ -4226,6 +4308,7 @@ function parseZoningResult(text: string, evidenceUrls: string[] = [], countyName
       sources,
       jurisdiction: typeof obj.jurisdiction === 'string' && obj.jurisdiction.trim() ? obj.jurisdiction.trim().slice(0, 160) : undefined,
       matchMethod: method,
+      evidenceTier,
       standards,
     };
   } catch { return null; }
@@ -4235,36 +4318,6 @@ type ZoningExpertDraft = {
   result: ZoningResult | null;
   raw: string;
 };
-
-/** Run a zoning expert against the already-crawled evidence pack. No model in
- * this path can launch its own search or replace the Perplexity+Crawlee record. */
-async function zoningExpertViaGemini(
-  promptText: string,
-  evidenceBlock: string,
-  evidenceUrls: string[],
-  geminiKey: string,
-  countyName: string,
-): Promise<ZoningExpertDraft | null> {
-  try {
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=${geminiKey}`;
-    const res = await queueGemini(() => fetch(url, {
-      method: 'POST',
-      cache: 'no-store',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contents: [{ role: 'user', parts: [{ text: promptText + evidenceBlock }] }],
-        systemInstruction: { parts: [{ text: ZONING_SYSTEM }] },
-      }),
-    }), 'high');
-    if (!res.ok) return null;
-    const data = await res.json();
-    const raw = data.candidates?.[0]?.content?.parts?.map((part: any) => part.text).filter(Boolean).join('') || '';
-    return raw ? { raw, result: parseZoningResult(raw, evidenceUrls, countyName) } : null;
-  } catch (error) {
-    console.warn('Gemini zoning expert failed:', error);
-    return null;
-  }
-}
 
 async function zoningExpertViaDeepSeek(
   promptText: string,
@@ -4283,7 +4336,7 @@ async function zoningExpertViaDeepSeek(
       stream: false,
       thinking: { type: 'disabled' },
       temperature: 0.1,
-      max_tokens: 2400,
+      max_tokens: 2800,
     });
     const message = await postDeepSeekOnce(body, deepSeekKey);
     const raw = typeof message?.content === 'string' ? message.content : '';
@@ -4294,41 +4347,75 @@ async function zoningExpertViaDeepSeek(
   }
 }
 
-function normalizedZoningCode(value: string): string {
-  return value.toUpperCase().replace(/[^A-Z0-9]/g, '');
+function extractZoningCandidateCode(raw: string): string | null {
+  const match = raw.match(/```json\s*([\s\S]*?)\s*```/) || raw.match(/\{[\s\S]*\}/);
+  if (!match) return null;
+  try {
+    const parsed = JSON.parse((match[1] || match[0]).replace(/,\s*([}\]])/g, '$1'));
+    const code = typeof parsed?.zoningCode === 'string' ? parsed.zoningCode.trim() : '';
+    return code && !/^(null|n\/?a|unknown|tbd)$/i.test(code) ? code.slice(0, 32) : null;
+  } catch { return null; }
 }
 
-function zoningStandardsScore(value?: ZoningResearchStandards): number {
-  if (!value) return 0;
-  return [
-    value.minimumLotAreaSqft,
-    value.maxLotCoveragePct,
-    value.maxHeightFt,
-    value.floorAreaRatio,
-    value.setbacks?.frontFt,
-    value.setbacks?.rearFt,
-    value.setbacks?.sideFt,
-  ].filter((item) => Number.isFinite(Number(item))).length;
+function zoningQueriesForRound(input: {
+  round: number;
+  address: string;
+  parcelId?: string;
+  countyName?: string;
+  state: string;
+  candidateCode?: string | null;
+}): string[] {
+  const county = input.countyName ? `${countyBaseName(input.countyName)} County ${input.state}` : input.state;
+  const parcel = input.parcelId && input.parcelId.toUpperCase() !== 'N/A' ? input.parcelId : '';
+  const candidate = input.candidateCode ? ` "${input.candidateCode}"` : '';
+  const rounds = [
+    [
+      `zoning district "${input.address}"${parcel ? ` parcel "${parcel}"` : ''}`,
+      `"${input.address}" zoning GIS parcel viewer`,
+      `${county} official zoning map address search`,
+      `${county} ArcGIS zoning MapServer FeatureServer`,
+      `site:zillow.com "${input.address}" zoning`,
+      `site:realtor.com "${input.address}" zoning`,
+      `site:redfin.com "${input.address}" zoning`,
+      `"${input.address}" "zoning" property`,
+    ],
+    [
+      `site:zillow.com "${input.address}" "zoning code"`,
+      `site:realtor.com "${input.address}" "zoning"`,
+      `site:redfin.com "${input.address}" "zoning"`,
+      `"${input.address}" parcel zoning${candidate}`,
+      parcel ? `"${parcel}" zoning ${county}` : `${county} parcel ID zoning search`,
+      `${county} assessor property record zoning`,
+      `${county} qPublic Beacon WTHGIS zoning`,
+      `${county} planning department zoning verification`,
+    ],
+    [
+      `${county} official GIS identify zoning "${input.address}"${candidate}`,
+      `${county} zoning ordinance district${candidate} setbacks minimum lot`,
+      `${county} municipal zoning map "${input.address}"`,
+      parcel ? `${county} zoning map parcel "${parcel}"` : `${county} zoning map parcel search`,
+      `site:arcgis.com ${county} zoning`,
+      `"${input.address}" zoning official government GIS`,
+      `site:municode.com ${county} zoning${candidate}`,
+      `site:ecode360.com ${county} zoning${candidate}`,
+    ],
+    [
+      `"${input.address}" zoning district land use`,
+      `"${input.address}" property appraiser zoning`,
+      parcel ? `"${parcel}" "${county}" zoning district` : `"${input.address}" "${county}" zoning district`,
+      `${county} tax parcel report zoning field`,
+      `${county} open data zoning polygons`,
+      `site:zillow.com OR site:realtor.com OR site:redfin.com "${input.address}"`,
+      `${county} zoning administrator address lookup`,
+      `${county} adopted zoning map${candidate}`,
+    ],
+  ];
+  return [...new Set(rounds[Math.min(input.round, rounds.length - 1)].filter((query) => query.trim()))];
 }
 
-function mergeAgreedZoningResults(results: ZoningResult[]): ZoningResult {
-  const primary = [...results].sort((a, b) => {
-    const standardsDelta = zoningStandardsScore(b.standards) - zoningStandardsScore(a.standards);
-    return standardsDelta || b.sources.length - a.sources.length;
-  })[0];
-  return {
-    ...primary,
-    description: [...results].sort((a, b) => b.description.length - a.description.length)[0].description,
-    sources: [...new Set(results.flatMap((result) => result.sources))],
-  };
-}
-
-/**
- * Parcel zoning resolver. Perplexity Search discovers the current official pages,
- * Crawlee extracts them, and Gemini/DeepSeek independently analyze the same
- * evidence pack. Agreement is merged; disagreement receives a separate fusion
- * pass. No direct GIS or model-owned search can bypass this result.
- */
+/** DeepSeek-only zoning resolver. Perplexity and Crawlee expand the source set
+ * over multiple rounds; official evidence wins, while exact-address listing
+ * evidence remains visibly lower confidence. */
 export async function fetchZoningViaWebSearch(
   address: string,
   countyName?: string,
@@ -4339,9 +4426,8 @@ export async function fetchZoningViaWebSearch(
 ): Promise<ZoningResult | null> {
   const perplexityKey = getPerplexityKey();
   const deepSeekKey = getDeepSeekKey();
-  const geminiApiKey = getUserKeys().gemini || "";
-  if (!perplexityKey || (!deepSeekKey && !geminiApiKey)) {
-    console.warn("Zoning requires a Perplexity Search key plus a Gemini or DeepSeek model key.");
+  if (!perplexityKey || !deepSeekKey) {
+    console.warn("Zoning requires both the Perplexity Search key and DeepSeek API key.");
     return null;
   }
 
@@ -4354,13 +4440,13 @@ export async function fetchZoningViaWebSearch(
   const hintLine = gisHint
     ? `\nThe county GIS zoning layer returns "${gisHint}" at this parcel point — this is usually authoritative. CONFIRM it against the official zoning map, and only return a different code if you find clear official evidence the parcel's actual zoning is different (e.g. it sits inside a municipality with its own zoning).`
     : '';
-  const lookupPrompt = `Find the official ZONING DISTRICT for this exact property: "${address}".${countyLine}${coordLine}${hintLine}
-Search official sources: the county/municipal zoning map or ordinance, the local GIS/parcel viewer (look up the parcel and read its zoning attribute), or the planning department. Check whether the parcel is inside a municipality (its city zoning applies) or in the county's jurisdiction (county zoning applies).
+  const lookupPrompt = `Find the ZONING DISTRICT for this exact property: "${address}".${countyLine}${coordLine}${hintLine}
+Search in this order: (1) county/municipal GIS or parcel report, (2) assessor/planning address result, (3) Zillow, Realtor, and Redfin exact-address property records. Check whether city or county zoning has jurisdiction. Listing records are candidates, not official records.
 Return ONLY a JSON object inside a markdown code block:
 \`\`\`json
 { "zoningCode": "R-1", "zoningDescription": "Single-Family Residential", "source": "https://..." }
 \`\`\`
-Rules: "zoningCode" must be the actual district code that jurisdiction uses for THIS parcel (e.g. R-1, RA, C-2, PUD, MX, RR). Determine the specific code — do NOT answer "see the map" or "varies". If after a genuine search you truly cannot confirm it from a credible official/government source, return {"zoningCode": null}. Never guess or fabricate a code.`;
+Rules: "zoningCode" must be a district code explicitly shown for THIS exact address or parcel. Never infer a district from nearby properties, land use, or the ordinance alone. Never guess or fabricate a code.`;
 
   const researchPrompt = `${lookupPrompt}
 
@@ -4369,8 +4455,9 @@ Also verify the CURRENT dimensional standards and return this expanded JSON shap
   "zoningCode": "R-1",
   "zoningDescription": "Single-Family Residential",
   "jurisdiction": "Official zoning authority",
-  "matchMethod": "parcel-gis|official-address-result|official-parcel-report",
-  "parcelSource": "https://official parcel-specific source...",
+  "matchMethod": "parcel-gis|official-address-result|official-parcel-report|corroborated-listings|listing-address-result",
+  "parcelSource": "https://parcel-specific source...",
+  "listingSources": ["https://zillow...", "https://realtor...", "https://redfin..."],
   "ordinanceSource": "https://official adopted ordinance...",
   "standards": {
     "lotType": "interior",
@@ -4386,55 +4473,55 @@ Also verify the CURRENT dimensional standards and return this expanded JSON shap
   "sources": ["https://..."]
 }
 
-The ordinance alone does not prove the parcel's district. parcelSource must be an official parcel-specific result, and matchMethod must explain the match. Every allowance must be supported by ordinanceSource; use null for missing values. Use only URLs present in the supplied live evidence.${parcelLine}`;
+The ordinance alone does not prove the parcel's district. For official methods, parcelSource must be an official parcel-specific result. Use corroborated-listings only when at least two independent Zillow/Realtor/Redfin exact-address pages show the same code. Use listing-address-result only as a final fallback when one exact-address listing explicitly publishes the code and no official result was found after every research round. Every allowance must be supported by an official ordinanceSource; use null for missing values. Use only URLs present in the supplied live evidence.${parcelLine}`;
 
-  // Parallel batched Perplexity searches over the official zoning sources.
-  const cityPart = (address.split(',')[1] || '').trim();
-  const queries = [
-    `zoning district "${address}"${parcelId ? ` parcel ${parcelId}` : ''}`,
-    `${countyName ? `${countyBaseName(countyName)} County ${state}` : cityPart ? `${cityPart} ${state}` : stateFull} zoning map GIS parcel viewer`,
-    `${countyName ? `${countyBaseName(countyName)} County` : cityPart} ${state} zoning ordinance ${gisHint || ''} setbacks height minimum lot permitted uses`,
-    `${cityPart || countyBaseName(countyName || '') || ''} ${state} planning department zoning lookup`.trim(),
-  ];
+  const evidenceBlocks: string[] = [];
+  const evidenceUrls: string[] = [];
+  let candidateCode = gisHint || null;
+  let bestListingResult: ZoningResult | null = null;
 
-  // Build one fresh source packet. mode:hard forces the Crawlee extraction path
-  // after Perplexity discovery; the fallback packet still contains the Search API
-  // snippets if an official site refuses automated page access.
-  const { block: evidenceBlock, urls: evidenceUrls } = await perplexityResearchBlock(
-    queries,
-    { maxResultsPerQuery: 8, maxSources: 28, mode: 'hard' },
-  );
-  if (!evidenceBlock || evidenceUrls.length === 0) return null;
+  for (let round = 0; round < 4; round++) {
+    const queries = zoningQueriesForRound({
+      round,
+      address,
+      parcelId,
+      countyName,
+      state,
+      candidateCode,
+    });
+    const research = await perplexityResearchBlock(
+      queries,
+      { maxResultsPerQuery: 8, maxSources: 24, maxScrapeTargets: 12, mode: 'hard' },
+    ).catch(() => ({ block: '', urls: [] as string[] }));
+    if (!research.block || research.urls.length === 0) continue;
 
-  const expertDrafts = (await Promise.all([
-    geminiApiKey
-      ? zoningExpertViaGemini(researchPrompt, evidenceBlock, evidenceUrls, geminiApiKey, countyName || '')
-      : Promise.resolve(null),
-    deepSeekKey
-      ? zoningExpertViaDeepSeek(researchPrompt, evidenceBlock, evidenceUrls, deepSeekKey, countyName || '')
-      : Promise.resolve(null),
-  ])).filter((draft): draft is ZoningExpertDraft => !!draft);
-  const valid = expertDrafts.filter((draft): draft is ZoningExpertDraft & { result: ZoningResult } => !!draft.result);
-  if (valid.length === 0) return null;
-  if (valid.length === 1) return valid[0].result;
+    evidenceBlocks.push(`\n\n=== ZONING RESEARCH ROUND ${round + 1} ===${research.block.slice(0, 18000)}`);
+    for (const url of research.urls) if (!evidenceUrls.includes(url)) evidenceUrls.push(url);
+    const evidenceBlock = evidenceBlocks.join('').slice(-56000);
+    const roundPrompt = `${researchPrompt}
 
-  const codes = new Set(valid.map((draft) => normalizedZoningCode(draft.result.code)));
-  if (codes.size === 1) return mergeAgreedZoningResults(valid.map((draft) => draft.result));
+This is research round ${round + 1} of 4. ${candidateCode ? `Earlier evidence suggested "${candidateCode}"; verify it rather than assuming it.` : ''}
+${round < 3
+  ? 'Prefer an official parcel assignment. If only listing evidence exists, return it with the correct listing matchMethod so the next round can seek official confirmation.'
+  : 'This is the final pass. Return the strongest exact-address result: official first, two-provider listing corroboration second, or one clearly labeled exact-address listing report last.'}`;
+    const draft = await zoningExpertViaDeepSeek(
+      roundPrompt,
+      evidenceBlock,
+      evidenceUrls,
+      deepSeekKey,
+      countyName || '',
+    );
+    if (!draft) continue;
+    candidateCode = draft.result?.code || extractZoningCandidateCode(draft.raw) || candidateCode;
+    if (!draft.result) continue;
+    if (draft.result.evidenceTier === 'official') return draft.result;
 
-  // Conflicting district assignments are never settled by whichever model
-  // returned first. A lead model receives both drafts and the same source packet.
-  const conflictPrompt = `${researchPrompt}
+    const rank = (result: ZoningResult | null) =>
+      result?.evidenceTier === 'corroborated' ? 2 : result?.evidenceTier === 'reported' ? 1 : 0;
+    if (rank(draft.result) > rank(bestListingResult)) bestListingResult = draft.result;
+  }
 
-MODEL EXPERT DRAFTS:
-${valid.map((draft, index) => `Expert ${index + 1}:\n${draft.raw.slice(0, 5000)}`).join('\n\n')}
-
-The experts disagree. Reconcile them against the supplied evidence. Return a
-district only when an official parcel-specific source resolves the conflict;
-otherwise return {"zoningCode": null}.`;
-  const judge = geminiApiKey
-    ? await zoningExpertViaGemini(conflictPrompt, evidenceBlock, evidenceUrls, geminiApiKey, countyName || '')
-    : await zoningExpertViaDeepSeek(conflictPrompt, evidenceBlock, evidenceUrls, deepSeekKey, countyName || '');
-  return judge?.result || null;
+  return bestListingResult;
 }
 
 /**
@@ -6772,6 +6859,132 @@ function filterLocalSources(urls: string[], tokens: string[]): string[] {
   return primary.slice(0, 12);
 }
 
+const UTILITY_COST_SPECS = [
+  { id: 'water tap fee', prefix: 'waterTap', exact: 'waterTap' },
+  { id: 'sewer tap fee', prefix: 'sewerTap', exact: 'sewerTap' },
+  { id: 'private well cost', prefix: 'well', exact: 'well' },
+  { id: 'septic system cost', prefix: 'septic', exact: 'septic' },
+  { id: 'zoning permit fee', prefix: 'zoningPermit', exact: 'zoningPermitFee' },
+  { id: 'driveway permit fee', prefix: 'drivewayPermit', exact: 'drivewayPermitFee' },
+  { id: 'building and trade permit cost', prefix: 'buildingPermit', exact: 'buildingPermitFee' },
+] as const;
+
+function parseResearchJson(text: string | null): Record<string, any> {
+  if (!text) return {};
+  const match = text.match(/```json\s*([\s\S]*?)\s*```/) || text.match(/\{[\s\S]*\}/);
+  if (!match) return {};
+  try { return JSON.parse((match[1] || match[0]).replace(/,\s*([}\]])/g, '$1')); }
+  catch { return {}; }
+}
+
+function mergeResearchJson(base: Record<string, any>, incoming: Record<string, any>): Record<string, any> {
+  const merged = { ...base };
+  for (const [key, value] of Object.entries(incoming)) {
+    if (Array.isArray(value)) {
+      const current = Array.isArray(merged[key]) ? merged[key] : [];
+      merged[key] = [...new Set([...current, ...value].map((item) => String(item)).filter(Boolean))];
+      continue;
+    }
+    if (typeof value === 'number') {
+      if (!(Number(merged[key]) > 0) && Number.isFinite(value) && value > 0) merged[key] = value;
+      continue;
+    }
+    const current = String(merged[key] ?? '').trim();
+    const candidate = String(value ?? '').trim();
+    const currentUnknown = !current || /^(unknown|null|n\/?a)$/i.test(current);
+    if (candidate && currentUnknown) merged[key] = value;
+  }
+  return merged;
+}
+
+function groundedUtilitySource(value: unknown, evidenceUrls: string[]): boolean {
+  const values = Array.isArray(value) ? value : [value];
+  return values.some((item) => {
+    const candidate = String(item || '').trim();
+    if (!/^https?:\/\//i.test(candidate)) return false;
+    try {
+      const host = new URL(candidate).hostname.toLowerCase();
+      if (NATIONAL_AGGREGATORS.some((blocked) => host.includes(blocked))) return false;
+      return evidenceUrls.length === 0 || evidenceUrls.some((raw) => {
+        try { return new URL(raw).hostname.toLowerCase() === host; } catch { return false; }
+      });
+    } catch { return false; }
+  });
+}
+
+function utilityResearchMissing(record: Record<string, any>, evidenceUrls: string[]): string[] {
+  const missing: string[] = [];
+  const statusKnown = (value: unknown) => /^(available|not-available)$/i.test(String(value || '').trim());
+  if (!statusKnown(record.publicWater) || !groundedUtilitySource(record.publicWaterSource, evidenceUrls)) missing.push('public water availability');
+  if (!statusKnown(record.publicSewer) || !groundedUtilitySource(record.publicSewerSource, evidenceUrls)) missing.push('public sewer availability');
+  for (const spec of UTILITY_COST_SPECS) {
+    const range = normalizeSourcedRange(record[spec.exact], record[`${spec.prefix}Low`], record[`${spec.prefix}High`]);
+    const sources = record[`${spec.prefix}Sources`] || record[`${spec.prefix}Source`];
+    if (!range || !groundedUtilitySource(sources, evidenceUrls)) missing.push(spec.id);
+  }
+  return missing;
+}
+
+function expandedUtilityQueries(input: {
+  missing: string[];
+  address: string;
+  jurisdiction: string;
+  county: string;
+  state: string;
+  stateFull: string;
+  zip: string;
+  provider?: string;
+  round: number;
+}): string[] {
+  const provider = input.provider ? ` "${input.provider}"` : '';
+  const queries: string[] = [];
+  for (const field of input.missing) {
+    if (field === 'public water availability') {
+      queries.push(
+        `"${input.address}" public water provider service area map`,
+        `${input.jurisdiction} water distribution GIS address lookup${provider}`,
+      );
+    } else if (field === 'public sewer availability') {
+      queries.push(
+        `"${input.address}" public sewer provider service area map`,
+        `${input.jurisdiction} sewer collection GIS address lookup${provider}`,
+      );
+    } else if (field === 'water tap fee') {
+      queries.push(`${input.jurisdiction}${provider} residential water tap connection system development fee filetype:pdf`);
+    } else if (field === 'sewer tap fee') {
+      queries.push(`${input.jurisdiction}${provider} residential sewer tap capacity impact fee schedule filetype:pdf`);
+    } else if (field === 'private well cost') {
+      queries.push(
+        `well drilling installed price ${input.county} County ${input.state} ${input.zip}`,
+        `private well cost ${input.stateFull} current contractor pricing`,
+      );
+    } else if (field === 'septic system cost') {
+      queries.push(
+        `septic installation perc test price ${input.county} County ${input.state}`,
+        `conventional septic system cost ${input.stateFull} current contractor pricing`,
+      );
+    } else if (field === 'zoning permit fee') {
+      queries.push(`${input.jurisdiction} zoning permit fee schedule residential filetype:pdf`);
+    } else if (field === 'driveway permit fee') {
+      queries.push(
+        `${input.jurisdiction} residential driveway permit fee`,
+        `${input.state === 'SC' ? 'SCDOT' : 'NCDOT'} driveway encroachment permit fee residential`,
+      );
+    } else if (field === 'building and trade permit cost') {
+      queries.push(
+        `${input.jurisdiction} building inspections fee schedule new single family filetype:pdf`,
+        `${input.county} County ${input.state} electrical plumbing mechanical permit fee schedule`,
+      );
+    }
+  }
+  queries.push(
+    `${input.jurisdiction} utility rate ordinance fee schedule filetype:pdf`,
+    `${input.county} County ${input.state} development fees permits utilities`,
+    `${input.stateFull} regional well septic permit cost ranges current`,
+  );
+  return [...new Set(queries)].slice(0, input.round >= 2 ? 20 : 16);
+}
+
 export async function fetchUtilitiesEstimate(reportData: SiteFeasibilityData): Promise<UtilitiesEstimate | null> {
   const deepSeekKey = getDeepSeekKey();
   const geminiKey = getBackgroundGeminiKey();
@@ -6824,33 +7037,57 @@ PRICING EVIDENCE RULES:
   // other section lookups. The card's automatic retry covers a transient miss.
   const jur = place ? `${place} ${state}` : `${baseCounty} County ${state}`;
   const yr = new Date().getFullYear();
-  const diag: { perplexityAttempted: boolean; perplexitySources: number; perplexityUrls?: string[] } = { perplexityAttempted: false, perplexitySources: 0 };
-
-  const queries = [
+  const baseQueries = [
     `"${reportData.inputAddress}" utilities public water sewer septic well`,
     `${reportData.inputAddress} water sewer well septic utilities`,
     `water sewer mains near ${reportData.inputAddress}`,
     `${jur} water sewer tap connection impact fee schedule ${yr}`,
     `${jur} water sewer authority residential connection fees`,
-    `${jur} residential building permit fee schedule ${yr}`,
+    `${jur} residential building permit fee schedule ${yr} filetype:pdf`,
     `${jur} zoning permit driveway permit fee`,
     `well drilling cost ${baseCounty} County ${state} ${yr}`,
     `septic system installation cost perc test ${baseCounty} County ${state}`,
+    `${baseCounty} County ${state} utility service area GIS`,
+    `${stateFull} current well septic installed cost ranges`,
+    `${state === 'SC' ? 'SCDOT' : 'NCDOT'} residential driveway encroachment permit fee`,
   ];
 
-  let text: string | null = null;
-  if (deepSeekKey) {
-    text = await groundedDeepSeekText(prompt, utilitiesSystem, queries, diag);
-  } else {
-    text = await groundedGeminiText(geminiKey, prompt, utilitiesSystem, 90000, queries, diag);
-  }
+  let o: Record<string, any> = {};
+  const evidencePool: string[] = [];
+  let missing = utilityResearchMissing(o, evidencePool);
+  let researchRounds = 0;
+  for (let round = 0; round < 3; round++) {
+    const queries = round === 0
+      ? baseQueries
+      : expandedUtilityQueries({
+          missing,
+          address: reportData.inputAddress,
+          jurisdiction: jur,
+          county: baseCounty,
+          state,
+          stateFull,
+          zip,
+          provider: typeof o.provider === 'string' ? o.provider : undefined,
+          round,
+        });
+    const diag: { perplexityAttempted: boolean; perplexitySources: number; perplexityUrls?: string[] } = { perplexityAttempted: false, perplexitySources: 0 };
+    const roundPrompt = round === 0
+      ? prompt
+      : `${prompt}
 
-  // Keep the section visible if research fails, but do not manufacture
-  // availability or prices; unsupported fields remain unavailable.
-  let o: any = {};
-  if (text) {
-    const m = text.match(/```json\s*([\s\S]*?)\s*```/) || text.match(/\{[\s\S]*\}/);
-    if (m) { try { o = JSON.parse((m[1] || m[0]).replace(/,\s*([}\]])/g, '$1')); } catch { o = {}; } }
+COMPLETION PASS ${round + 1} OF 3
+Current source-backed partial result:
+${JSON.stringify(o).slice(0, 12000)}
+Still missing: ${missing.join(', ')}.
+Preserve supported values and fill the missing fields from this pass's new sources. Return one complete replacement JSON object.`;
+    const text = deepSeekKey
+      ? await groundedDeepSeekText(roundPrompt, utilitiesSystem, queries, diag)
+      : await groundedGeminiText(geminiKey, roundPrompt, utilitiesSystem, 90000, queries, diag);
+    researchRounds++;
+    for (const url of diag.perplexityUrls || []) if (!evidencePool.includes(url)) evidencePool.push(url);
+    o = mergeResearchJson(o, parseResearchJson(text));
+    missing = utilityResearchMissing(o, evidencePool);
+    if (missing.length === 0) break;
   }
   const norm = (v: any): 'available' | 'not-available' | 'unknown' => {
     const s = String(v || '').toLowerCase();
@@ -6861,7 +7098,6 @@ PRICING EVIDENCE RULES:
   // City limits do not prove that water or sewer mains reach this parcel.
   // Address-level availability needs its own supporting source.
   const modelSources = Array.isArray(o.sources) ? o.sources.map((s: any) => String(s)) : [];
-  const evidencePool = (diag.perplexityUrls || []).filter((url) => /^https?:\/\//i.test(url));
   const lineSources = (...values: any[]): string[] => {
     const candidates = values.flatMap((value) => Array.isArray(value) ? value : [value]);
     const supported: string[] = [];
@@ -7047,7 +7283,7 @@ PRICING EVIDENCE RULES:
   if (o.sewerTapDetail) addExtraTokens(o.sewerTapDetail);
 
   const localSources = filterLocalSources(
-    [...modelSources, ...(diag.perplexityUrls || [])],
+    [...modelSources, ...evidencePool],
     [
       place || '',
       county,
@@ -7070,7 +7306,11 @@ PRICING EVIDENCE RULES:
     jurisdiction, incorporated,
     publicWater, publicSewer, lines, totalLow, totalHigh, permits, tapNote, summary,
     provider: o.provider ? String(o.provider).slice(0, 120) : undefined,
-    sources, realTime: real, generatedAt: Date.now(),
+    sources,
+    realTime: real,
+    researchRounds,
+    coverageStatus: missing.length === 0 ? 'complete' : 'partial',
+    generatedAt: Date.now(),
   };
 }
 
@@ -7210,6 +7450,7 @@ async function postDeepSeekOnce(body: string, key: string): Promise<any | null> 
     try {
       const res = await fetchWithTimeout('https://api.deepseek.com/chat/completions', 90000, {
         method: 'POST',
+        cache: 'no-store',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${key}` },
         body,
       });
@@ -7247,7 +7488,12 @@ async function groundedDeepSeekText(prompt: string, systemText: string, searchQu
     // Pull a WIDE set of sources for the utilities lookup — more results per
     // query and a higher source cap so DeepSeek synthesizes from many fee
     // schedules / contractor pages, not one or two.
-    const { block, urls } = await perplexityResearchBlock(searchQueries, { maxResultsPerQuery: 10, maxSources: 40, mode: 'hard' });
+    const { block, urls } = await perplexityResearchBlock(searchQueries, {
+      maxResultsPerQuery: 10,
+      maxSources: 40,
+      maxScrapeTargets: Math.min(12, Math.max(8, searchQueries.length)),
+      mode: 'hard',
+    });
     if (diag) { diag.perplexitySources = urls.length; diag.perplexityUrls = urls; }
     if (block) effectivePrompt = prompt + block;
   }
@@ -7554,10 +7800,10 @@ After the report, answer follow-up questions conversationally from the stored co
 ${redfinTable || `- ${marketStatsLine}`}
 
 ### 3. Zoning & Estimated Density Allowances
-- Zoning Classification (Perplexity+Crawlee model fusion): ${reportData.zoningCode} (${reportData.zoningDescription})
-- Development Capacity: ${reportData.zoningVerificationStatus === 'official-research' ? `Max Building Footprint: ${reportData.gridics?.maxBuildingFootprintSqft?.toLocaleString() || 'N/A'} SF, Max Height: ${reportData.gridics?.maxHeightFt || 'N/A'} ft, Floor Area Ratio (FAR): ${reportData.gridics?.floorAreaRatio || 'N/A'}` : 'Unavailable because the fusion lookup did not verify a parcel-specific official zoning assignment.'}
-- Dimensional Setbacks: ${reportData.zoningVerificationStatus === 'official-research' ? `Front: ${reportData.gridics?.setbacks.frontFt || 'N/A'} ft | Rear: ${reportData.gridics?.setbacks.rearFt || 'N/A'} ft | Side: ${reportData.gridics?.setbacks.sideFt || 'N/A'} ft` : 'Unavailable'}
-- Net buildable envelope: ${reportData.zoningVerificationStatus === 'official-research' ? `${reportData.gridics?.netBuildableAreaSqft?.toLocaleString() || 'N/A'} SF` : 'Unavailable'}
+- Zoning Classification (DeepSeek over Perplexity+Crawlee sources): ${reportData.zoningCode} (${reportData.zoningDescription})
+- Development Capacity: ${reportData.zoningVerificationStatus !== 'unavailable' ? `Max Building Footprint: ${reportData.gridics?.maxBuildingFootprintSqft?.toLocaleString() || 'N/A'} SF, Max Height: ${reportData.gridics?.maxHeightFt || 'N/A'} ft, Floor Area Ratio (FAR): ${reportData.gridics?.floorAreaRatio || 'N/A'}` : 'Unavailable because no exact-parcel zoning source was found.'}
+- Dimensional Setbacks: ${reportData.zoningVerificationStatus !== 'unavailable' ? `Front: ${reportData.gridics?.setbacks.frontFt || 'N/A'} ft | Rear: ${reportData.gridics?.setbacks.rearFt || 'N/A'} ft | Side: ${reportData.gridics?.setbacks.sideFt || 'N/A'} ft` : 'Unavailable'}
+- Net buildable envelope: ${reportData.zoningVerificationStatus !== 'unavailable' ? `${reportData.gridics?.netBuildableAreaSqft?.toLocaleString() || 'N/A'} SF` : 'Unavailable'}
 
 ### 4. SOLD New-Construction Comps (built 2025–2026, zoning-use-matched, CLOSED sales only, no sqft limits, sold ≤12 months, within 5 driving miles, RealtyAPI: Realtor + Redfin + Zillow). Each comp lists its property type.
 ${reportData.comps && reportData.comps.length > 0

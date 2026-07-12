@@ -290,7 +290,7 @@ test('SC map, zoning, utilities, and clearing estimates require visible provenan
   assert.match(component, /Current tax-roll owner/);
   assert.match(component, /No current pricing source was verified; no dollar estimate is shown/);
   assert.match(component, /sourced estimate/);
-  assert.match(component, /Official zoning sources/);
+  assert.match(component, /Zoning evidence sources/);
   assert.match(proxy, /Cache-Control': 'no-store'/);
   assert.match(viteConfig, /perplexity-chat[\s\S]*chat\/completions/);
 });

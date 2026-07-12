@@ -235,7 +235,7 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
                   {showGeminiKey ? <EyeOff size={16} /> : <Eye size={16} />}
                 </button>
               </div>
-              <p className="field-help">Powering web-search zoning lookups, comps evaluation, and the Advanced chatbot.</p>
+              <p className="field-help">Powers comps evaluation, cost analysis, and the Advanced chatbot.</p>
             </div>
 
             {/* Gemini Key #2 — optional second quota lane for background lookups */}
@@ -386,11 +386,11 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
               <p className="field-help">Scans Realtor, Redfin, and Zillow closed-sale records by coordinate radius (realtyapi.io) for new-construction sold comps — merged with the Google comp search.</p>
             </div>
 
-            {/* DeepSeek API Key (powers the Gemini + DeepSeek fusion report) */}
+            {/* DeepSeek API Key (zoning research + optional report fusion) */}
             <div className="settings-field-group">
               <div className="field-label-row">
-                <label htmlFor="deepSeekKey">DeepSeek API Key (fusion report)</label>
-                <span className="badge optional">Optional</span>
+                <label htmlFor="deepSeekKey">DeepSeek API Key (zoning + report)</label>
+                <span className="badge optional">Required for zoning</span>
               </div>
               <div className="field-input-container">
                 <Key className="input-icon" size={16} />
@@ -409,7 +409,7 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
                   {showDeepSeekKey ? <EyeOff size={16} /> : <Eye size={16} />}
                 </button>
               </div>
-              <p className="field-help">When set, the AI report runs a fusion: Gemini 3.5 Flash and DeepSeek V4 Pro draft in parallel, then Gemini judges and streams the final report. Leave blank to use Gemini only. Get a key at platform.deepseek.com.</p>
+              <p className="field-help">Required for the multi-pass zoning lookup. It also enables the optional Gemini + DeepSeek fusion report. Get a key at platform.deepseek.com.</p>
             </div>
 
             {/* RentCast API Key (enriches buyer/deal sale prices) */}

@@ -1854,7 +1854,12 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
     });
     const hasRealZoning = !!data.zoningSource && data.zoningCode !== 'N/A';
     if (hasRealZoning) {
-      labelFeatures.push({ type: 'Feature', geometry: { type: 'Point', coordinates: [lng, lat] }, properties: { label: data.zoningSource === 'web' ? `Zoning: ${data.zoningCode} (verified)` : `Zoning: ${data.zoningCode}`, angle: 0, kind: 'zoning' } });
+      const confidence = data.zoningVerificationStatus === 'official-research'
+        ? 'verified'
+        : data.zoningVerificationStatus === 'corroborated-research'
+          ? 'corroborated'
+          : data.zoningVerificationStatus === 'listing-research' ? 'listing reported' : '';
+      labelFeatures.push({ type: 'Feature', geometry: { type: 'Point', coordinates: [lng, lat] }, properties: { label: `Zoning: ${data.zoningCode}${confidence ? ` (${confidence})` : ''}`, angle: 0, kind: 'zoning' } });
     }
     const currentOwnerLabel = ownerMapLabel(data);
     if (currentOwnerLabel) {
@@ -1862,7 +1867,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
     }
     const labelsFC = { type: 'FeatureCollection', features: labelFeatures };
 
-    const gr = data.zoningVerificationStatus === 'official-research' ? data.gridics : undefined;
+    const gr = data.zoningVerificationStatus !== 'unavailable' ? data.gridics : undefined;
     const escapeHtml = (v: any) => String(v ?? '').replace(/[&<>"']/g, (ch) => ({
       '&': '&amp;',
       '<': '&lt;',
@@ -2522,9 +2527,12 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
       // a code when none was resolved (N/A).
       const hasRealZoning = !!data.zoningSource && data.zoningCode !== 'N/A';
       if (hasRealZoning) {
-        const zoningLabelText = data.zoningSource === 'web'
-          ? `Zoning: ${data.zoningCode} (verified)`
-          : `Zoning: ${data.zoningCode}`;
+        const confidence = data.zoningVerificationStatus === 'official-research'
+          ? 'verified'
+          : data.zoningVerificationStatus === 'corroborated-research'
+            ? 'corroborated'
+            : data.zoningVerificationStatus === 'listing-research' ? 'listing reported' : '';
+        const zoningLabelText = `Zoning: ${data.zoningCode}${confidence ? ` (${confidence})` : ''}`;
         zoningLabelOverlayRef.current = new ZoningLabelOverlay(center, zoningLabelText);
         if (showZoning) {
           zoningLabelOverlayRef.current.setMap(googleMapInstanceRef.current);
@@ -4107,6 +4115,10 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                           ? 'VERIFIED: OFFICIAL GIS'
                           : data.zoningVerificationStatus === 'official-research'
                             ? 'VERIFIED: OFFICIAL PARCEL SOURCE'
+                            : data.zoningVerificationStatus === 'corroborated-research'
+                              ? 'CORROBORATED: PROPERTY LISTINGS'
+                              : data.zoningVerificationStatus === 'listing-research'
+                                ? 'REPORTED: PROPERTY LISTING'
                             : data.zoningVerificationStatus === 'conflict'
                               ? 'CONFLICT: GIS RETAINED'
                               : 'NOT VERIFIED'}
@@ -4143,12 +4155,12 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                   </div>
                 )}
                 <SourceLinks
-                  label="Official zoning sources"
+                  label="Zoning evidence sources"
                   sources={[...(data.zoningSources || []), ...(data.zoningSourceUrl ? [data.zoningSourceUrl] : [])]}
-                  emptyText="No parcel-specific official zoning source was verified."
+                  emptyText="No parcel-specific zoning evidence source was found."
                 />
 
-                {data.gridics && data.zoningVerificationStatus === 'official-research' ? (
+                {data.gridics && data.zoningVerificationStatus !== 'unavailable' ? (
                   <>
                     <div className="gridics-stats-grid" style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '15px', marginTop: '12px' }}>
                       <div>
@@ -4219,7 +4231,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                     </div>
                   </>
                 ) : (
-                  <div className="cost-disclaimer">Development allowances are unavailable until the fusion lookup verifies this parcel's district from an official parcel source.</div>
+                  <div className="cost-disclaimer">Development allowances are unavailable because DeepSeek did not find a source that explicitly assigns a zoning code to this exact parcel.</div>
                 )}
               </div>
 
@@ -4539,7 +4551,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                     </button>
                   </h3>
                   {utilitiesLoading && !utilities ? (
-                    <div className="cost-loading"><Loader2 size={15} className="spinner" /><span>Checking water/sewer availability, tap fees &amp; permit schedules…</span></div>
+                    <div className="cost-loading"><Loader2 size={15} className="spinner" /><span>Expanding utility, tap, permit, well &amp; septic sources…</span></div>
                   ) : utilitiesError && !utilities ? (
                     <div>
                       <div className="enf-err"><AlertCircle size={12} /> {utilitiesError}</div>
@@ -4553,6 +4565,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                         </span>
                         <span className="util-summary-text">{utilities.summary}</span>
                         {utilities.provider && <span className="util-provider">Authority: {utilities.provider}</span>}
+                        <span className="util-provider">{utilities.researchRounds || 1} source pass{utilities.researchRounds === 1 ? '' : 'es'} · {utilities.coverageStatus === 'complete' ? 'complete coverage' : 'provider confirmation needed'}</span>
                       </div>
                       <div className="util-rows">
                         {utilities.lines.map((ln, i) => (
@@ -4566,12 +4579,12 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                             {ln.detail && <div className="util-note util-detail">{ln.detail}</div>}
                             {ln.note && <div className="util-note">{ln.note}</div>}
                             <div className="util-cost">
-                              {ln.low > 0 ? (ln.low === ln.high ? `$${ln.low.toLocaleString()}` : `$${ln.low.toLocaleString()} - $${ln.high.toLocaleString()}`) : 'Unavailable'}{' '}
+                              {ln.low > 0 ? (ln.low === ln.high ? `$${ln.low.toLocaleString()}` : `$${ln.low.toLocaleString()} - $${ln.high.toLocaleString()}`) : 'Provider quote needed'}{' '}
                               {ln.verified
                                 ? <span className="util-verified-tag">{ln.isPublic ? 'exact published fee' : 'typical local cost'}</span>
                                 : ln.estimated
                                   ? <span className="util-verified-tag util-estimate-tag">sourced estimate</span>
-                                  : <span className="util-verified-tag util-estimate-tag">no sourced amount</span>}
+                                  : <span className="util-verified-tag util-estimate-tag">source search incomplete</span>}
                               {ln.sourceUrl && <a href={ln.sourceUrl} target="_blank" rel="noreferrer" style={{ marginLeft: '6px' }}>source</a>}
                             </div>
                           </div>
@@ -4605,8 +4618,8 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                               </div>
                               {p.note && <div className="util-note">{p.note}</div>}
                               <div className="util-cost">
-                                {p.low > 0 ? (p.low === p.high ? `$${p.low.toLocaleString()}` : `$${p.low.toLocaleString()} - $${p.high.toLocaleString()}`) : 'Unavailable'}{' '}
-                                <span className={`util-verified-tag ${p.verified ? '' : 'util-estimate-tag'}`}>{p.verified ? 'exact fee schedule' : p.estimated ? 'sourced estimate' : 'no sourced amount'}</span>
+                                {p.low > 0 ? (p.low === p.high ? `$${p.low.toLocaleString()}` : `$${p.low.toLocaleString()} - $${p.high.toLocaleString()}`) : 'Provider quote needed'}{' '}
+                                <span className={`util-verified-tag ${p.verified ? '' : 'util-estimate-tag'}`}>{p.verified ? 'exact fee schedule' : p.estimated ? 'sourced estimate' : 'source search incomplete'}</span>
                                 {p.sourceUrl && <a href={p.sourceUrl} target="_blank" rel="noreferrer" style={{ marginLeft: '6px' }}>source</a>}
                               </div>
                             </div>
@@ -4625,8 +4638,8 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                           })()}
                         </div>
                       )}
-                      <SourceLinks label="Sources" sources={utilities.sources} emptyText="No current local utility or fee source was verified." />
-                      <div className="cost-disclaimer">{utilities.realTime ? 'Dollar figures are either exact published fees or current source-backed local/regional budget ranges, labeled on each line.' : 'No current source-backed price was found, so no dollar amount is shown.'} Utility scenarios do not prove service at the parcel. Confirm availability, capacity, tap status, soil suitability, and final fees with the cited authority or contractor.</div>
+                      <SourceLinks label="Sources" sources={utilities.sources} emptyText="The expanded search did not return a usable local utility or fee source." />
+                      <div className="cost-disclaimer">{utilities.realTime ? 'Dollar figures are either exact published fees or current source-backed local/regional budget ranges, labeled on each line.' : 'Three targeted source passes completed without a supportable price.'} Utility scenarios do not prove service at the parcel. Confirm availability, capacity, tap status, soil suitability, and final fees with the cited authority or contractor.</div>
                     </>
                   ) : null}
                 </div>

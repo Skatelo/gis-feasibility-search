@@ -8,6 +8,11 @@ const compiled = ts.transpileModule(source, {
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 },
 }).outputText;
 const zoning = await import(`data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`);
+const evidenceSource = await readFile(new URL('../../../src/data/zoningEvidence.ts', import.meta.url), 'utf8');
+const evidenceCompiled = ts.transpileModule(evidenceSource, {
+  compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 },
+}).outputText;
+const evidence = await import(`data:text/javascript;base64,${Buffer.from(evidenceCompiled).toString('base64')}`);
 const serviceSource = await readFile(new URL('../../../src/services/feasibilityService.ts', import.meta.url), 'utf8');
 const componentSource = await readFile(new URL('../../../src/components/FeasibilitySearch.tsx', import.meta.url), 'utf8');
 
@@ -42,7 +47,21 @@ test('official NC and SC identify responses produce district codes', () => {
   assert.deepEqual(southCarolina, { code: 'MX-D', description: null });
 });
 
-test('zoning output is resolved only by the Perplexity+Crawlee fusion path', () => {
+test('listing zoning evidence distinguishes one-provider reports from corroboration', () => {
+  assert.equal(evidence.zoningListingProvider('https://www.zillow.com/homedetails/example'), 'zillow.com');
+  assert.equal(evidence.listingZoningEvidenceTier(['https://www.zillow.com/a']), 'reported');
+  assert.equal(evidence.listingZoningEvidenceTier([
+    'https://www.zillow.com/a',
+    'https://www.redfin.com/a',
+  ]), 'corroborated');
+  assert.equal(evidence.listingZoningEvidenceTier([
+    'https://www.zillow.com/a',
+    'https://photos.zillow.com/b',
+  ]), 'reported');
+  assert.equal(evidence.listingZoningEvidenceTier(['https://example.com/a']), null);
+});
+
+test('zoning output uses iterative DeepSeek research without the fusion models', () => {
   const stage = serviceSource.slice(
     serviceSource.indexOf('// STAGE 3 - zoning.'),
     serviceSource.indexOf('// STAGE 4'),
@@ -53,13 +72,16 @@ test('zoning output is resolved only by the Perplexity+Crawlee fusion path', () 
   );
 
   assert.doesNotMatch(stage, /fetchCountyZoningCode|gisZoning|pointZoning/);
-  assert.match(stage, /if \(aiZoning\)/);
-  assert.match(resolver, /if \(!perplexityKey \|\| \(!deepSeekKey && !geminiApiKey\)\)/);
+  assert.match(stage, /if \(deepSeekZoning\)/);
+  assert.match(resolver, /if \(!perplexityKey \|\| !deepSeekKey\)/);
   assert.match(resolver, /mode: 'hard'/);
-  assert.match(resolver, /Promise\.all/);
-  assert.match(resolver, /MODEL EXPERT DRAFTS/);
-  assert.doesNotMatch(resolver, /model: 'sonar'|google_search/);
+  assert.match(resolver, /for \(let round = 0; round < 4; round\+\+\)/);
+  assert.match(resolver, /zoningQueriesForRound/);
+  assert.match(resolver, /bestListingResult/);
+  assert.match(serviceSource, /site:zillow\.com[\s\S]*site:realtor\.com[\s\S]*site:redfin\.com/);
+  assert.doesNotMatch(resolver, /zoningExpertViaGemini|Promise\.all|MODEL EXPERT DRAFTS|model: 'sonar'|google_search/);
   assert.match(serviceSource, /method: 'POST',\s+cache: 'no-store',/);
-  assert.match(componentSource, /data\.gridics && data\.zoningVerificationStatus === 'official-research'/);
-  assert.match(componentSource, /Development allowances are unavailable until the fusion lookup verifies/);
+  assert.match(componentSource, /CORROBORATED: PROPERTY LISTINGS/);
+  assert.match(componentSource, /REPORTED: PROPERTY LISTING/);
+  assert.match(componentSource, /data\.gridics && data\.zoningVerificationStatus !== 'unavailable'/);
 });

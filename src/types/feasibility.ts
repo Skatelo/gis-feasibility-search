@@ -229,6 +229,8 @@ export interface UtilitiesEstimate {
   provider?: string;   // water/sewer authority when known
   sources: string[];
   realTime: boolean;   // grounded live pricing vs. fallback
+  researchRounds?: number;
+  coverageStatus?: 'complete' | 'partial';
   generatedAt: number;
 }
 
@@ -270,7 +272,7 @@ export interface SiteFeasibilityData {
   zoningSource?: 'county-gis' | 'web';
   zoningSourceUrl?: string;
   zoningSources?: string[];
-  zoningVerificationStatus?: 'official-gis' | 'official-research' | 'conflict' | 'unavailable';
+  zoningVerificationStatus?: 'official-gis' | 'official-research' | 'corroborated-research' | 'listing-research' | 'conflict' | 'unavailable';
   zoningJurisdiction?: string;
   zoningStandardsStatus?: 'official' | 'mixed' | 'estimated' | 'unavailable';
   zoningStandardsSourceUrl?: string;
