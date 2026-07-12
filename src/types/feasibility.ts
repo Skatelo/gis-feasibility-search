@@ -113,8 +113,12 @@ export interface MaterialTakeoff {
 export interface TreeRemovalLine {
   size: 'small' | 'medium' | 'large';
   count: number;       // trees of this size (AI-estimated from satellite)
-  unitCost: number;    // current LOCAL $/tree to remove
-  cost: number;        // count × unitCost
+  unitCost: number;    // midpoint kept for compatibility
+  unitCostLow: number;
+  unitCostHigh: number;
+  cost: number;        // midpoint kept for compatibility
+  costLow: number;
+  costHigh: number;
 }
 
 /** A bulk site-clearing method (e.g. forestry mulching vs. traditional excavator
@@ -137,9 +141,17 @@ export interface LandClearingEstimate {
   treeCount: number;               // total trees to remove
   trees: TreeRemovalLine[];        // by size
   treeRemovalCost: number;         // Σ trees[].cost
+  treeRemovalCostLow: number;
+  treeRemovalCostHigh: number;
   stumpGrindUnit: number;          // $/stump
+  stumpGrindUnitLow: number;
+  stumpGrindUnitHigh: number;
   stumpGrindCost: number;          // treeCount × stumpGrindUnit
+  stumpGrindCostLow: number;
+  stumpGrindCostHigh: number;
   total: number;                   // treeRemovalCost + stumpGrindCost
+  totalLow: number;
+  totalHigh: number;
   /** Bulk machine-clearing METHODS (forestry mulching vs. traditional) with
    *  real-time cost ranges for this parcel. */
   clearingMethods: ClearingMethod[];
@@ -149,8 +161,9 @@ export interface LandClearingEstimate {
   imagerySources: string[];        // public map/view links supporting the visual estimate
   locality: string;
   pricingSources: string[];        // real-time pricing sources
-  pricingStatus: 'verified' | 'unavailable';
-  realTimePricing: boolean;        // true = grounded local rates; false = no verified price
+  pricingStatus: 'verified' | 'estimated' | 'unavailable';
+  pricingScope?: 'local' | 'regional';
+  realTimePricing: boolean;        // true = current sources were retrieved live
   generatedAt: number;
 }
 
@@ -170,9 +183,12 @@ export interface UtilityLine {
   verified: boolean;
   /** Source supporting this line's availability and/or dollar amount. */
   sourceUrl?: string;
-  /** true when low/high is a typical NC estimate used because no verified local
-   *  figure was found (so a price always shows). */
+  /** All sources supporting a synthesized range. */
+  sourceUrls?: string[];
+  /** true when low/high is a source-backed budget range rather than an exact fee. */
   estimated?: boolean;
+  /** Scenario lines are alternatives when address-level service is still unknown. */
+  scenario?: boolean;
 }
 
 /** One residential permit fee from the jurisdiction's CURRENT fee schedule
@@ -186,7 +202,8 @@ export interface PermitFeeLine {
   verified: boolean;
   /** Adopted fee schedule supporting this exact figure. */
   sourceUrl?: string;
-  /** true when the figure is a typical NC estimate (no verified local schedule). */
+  sourceUrls?: string[];
+  /** true when the figure is a source-backed calculation or budget range. */
   estimated?: boolean;
 }
 

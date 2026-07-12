@@ -1,8 +1,9 @@
 import type { SiteFeasibilityData, SlopeProfile, CompProperty, FloodZoneInfo, WetlandsInfo, ConstructionCostEstimate, CostLineItem, MaterialTakeoff, MaterialTakeoffItem, LandClearingEstimate, TreeRemovalLine, ClearingMethod, UtilitiesEstimate, UtilityLine, PermitFeeLine } from '../types/feasibility';
-import { fetchCountyZoningCode, getZoningServices, hasCountyZoning, normalizeCountyKey } from '../data/ncZoning';
+import { getZoningServices, normalizeCountyKey } from '../data/ncZoning';
 import { getSupabase, isSupabaseConfigured } from './supabaseClient';
 import { fetchOfficialScParcel, mergeOfficialScParcelRecords, officialRecordFromCountyGis, scOwnerNamesMatch, shouldHideStatewideGeometry } from './scParcelVerification';
 import { scCountySource } from '../data/scCountySources';
+import { normalizeSourcedRange } from '../data/sourcedEstimate';
 
 export interface UserKeys {
   googleMaps?: string;
@@ -361,6 +362,7 @@ async function perplexitySearchRequest(body: Record<string, unknown>, key: strin
       try {
         const res = await fetchWithTimeout(route.url, route.timeout, {
           method: 'POST',
+          cache: 'no-store',
           headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
           body: payload,
         });
@@ -2285,27 +2287,17 @@ export async function executeLandAnalysis(
     return sp;
   });
 
-  // STAGE 3 — zoning. COMBINE the county's authoritative GIS zoning layer with a
-  // Gemini verification: the GIS code at the parcel point SEEDS the AI, which
-  // confirms it against the official zoning map (or fills it in for city parcels
-  // the county layer leaves blank). GIS stays authoritative — the AI confirms it,
-  // fills gaps, or flags a discrepancy to verify. Never fabricated.
-  // Always resolve the current district for each submitted search. Zoning and
-  // official source pages can change, so repeat searches must not reuse a prior run.
+  // STAGE 3 - zoning. Perplexity discovers official parcel sources, Crawlee
+  // extracts difficult pages, and the model experts reconcile the evidence.
+  // This fusion result is the only value allowed to populate the zoning section.
   const parcelZoning = String(info.zoning || '').trim();
   {
-    onStageChange?.("Resolving zoning (county GIS + AI)...");
-    const pointZoning = await fetchCountyZoningCode(countyName, lng, lat).catch(() => null);
-    const parcelGisZoning = parcelZoning && parcelZoning.toUpperCase() !== 'N/A' &&
-      (selectedState !== 'SC' || info.recordsource === 'county-gis')
-      ? {
-          code: parcelZoning,
-          description: `${countyName} parcel zoning district`,
-          sourceUrl: selectedState === 'SC' ? scCountySource(countyName)?.portalUrl : undefined,
-        }
+    onStageChange?.("Resolving zoning (Fusion + Perplexity + Crawlee)...");
+    // Existing parcel data can guide the search, but only a fresh model-fusion
+    // result backed by official evidence may populate the zoning section.
+    const zoningHint = parcelZoning && parcelZoning.toUpperCase() !== 'N/A' && info.recordsource === 'county-gis'
+      ? parcelZoning
       : null;
-    const gisZoning = pointZoning || parcelGisZoning;
-    const zoningHint = gisZoning?.code || (parcelZoning && parcelZoning.toUpperCase() !== 'N/A' ? parcelZoning : null);
     const aiZoning = await fetchZoningViaWebSearch(
       info.siteadd || addressString,
       countyName,
@@ -2314,8 +2306,6 @@ export async function executeLandAnalysis(
       zoningHint,
       parcelId,
     ).catch(() => null);
-    const normZ = (s: string) => (s || '').toUpperCase().replace(/\s+/g, '');
-    const sourceList = (...values: (string | undefined)[]) => [...new Set(values.filter((v): v is string => !!v))];
     const applyResearchStandards = (research: ZoningResult) => {
       researchedZoningStandards = research.standards;
       zoningJurisdiction = research.jurisdiction;
@@ -2335,40 +2325,17 @@ export async function executeLandAnalysis(
       zoningStandardsStatus = verifiedCount === values.length ? 'official' : verifiedCount > 0 ? 'mixed' : 'estimated';
     };
 
-    if (gisZoning && aiZoning && normZ(gisZoning.code) === normZ(aiZoning.code)) {
-      // Both agree → authoritative GIS code, AI-confirmed.
-      zoningCode = gisZoning.code;
-      zoningDescription = `${gisZoning.description || aiZoning.description || `${countyName} County GIS zoning district`} (county GIS — AI-confirmed)`;
-      zoningSource = 'county-gis';
-      zoningSourceUrl = gisZoning.sourceUrl || aiZoning.sourceUrl;
-      zoningSources = sourceList(gisZoning.sourceUrl, ...aiZoning.sources);
-      zoningVerificationStatus = 'official-gis';
-      applyResearchStandards(aiZoning);
-    } else if (gisZoning) {
-      // GIS has the authoritative code (AI couldn't confirm or differed → keep GIS, flag).
-      zoningCode = gisZoning.code;
-      zoningDescription = `${gisZoning.description || `${countyName} County GIS zoning district`}${aiZoning ? ` (county GIS; AI suggested ${aiZoning.code} — verify)` : ''}`;
-      zoningSource = 'county-gis';
-      zoningSourceUrl = gisZoning.sourceUrl;
-      zoningSources = sourceList(gisZoning.sourceUrl, ...(aiZoning?.sources || []));
-      zoningVerificationStatus = aiZoning ? 'conflict' : 'official-gis';
-      zoningStandardsStatus = 'estimated';
-    } else if (aiZoning) {
-      // City parcel / GIS gap → the AI lookup fills it in.
+    if (aiZoning) {
       zoningCode = aiZoning.code;
-      zoningDescription = `${aiZoning.description} (official parcel source verified by AI research)`;
+      zoningDescription = `${aiZoning.description} (official parcel source resolved by model fusion)`;
       zoningSource = 'web';
       zoningSourceUrl = aiZoning.sourceUrl;
       zoningSources = aiZoning.sources;
       zoningVerificationStatus = 'official-research';
       applyResearchStandards(aiZoning);
     } else {
-      // Never show "See map" — neither source resolved it; the report's grounded
-      // zoning section verifies it against the authoritative county GIS.
       zoningCode = "N/A";
-      zoningDescription = hasCountyZoning(countyName)
-        ? `Not auto-resolved at the parcel point — to be verified against ${countyName} County GIS`
-        : "No published county zoning GIS; web lookup found nothing";
+      zoningDescription = 'Fusion research could not verify a parcel-specific zoning district from the official sources it found.';
       zoningVerificationStatus = 'unavailable';
       zoningStandardsStatus = 'unavailable';
     }
@@ -4264,126 +4231,103 @@ function parseZoningResult(text: string, evidenceUrls: string[] = [], countyName
   } catch { return null; }
 }
 
-/** Zoning web lookup → parsed zoning result. PERPLEXITY MODE (key configured
- *  + queries): the searching runs on the Perplexity Search API (parallel
- *  batched queries over official zoning sources) and Gemini synthesizes from
- *  those results; fallback is Google-Search grounding. */
-async function zoningViaGemini(promptText: string, geminiKey: string, searchQueries?: string[], countyName = ''): Promise<ZoningResult | null> {
+type ZoningExpertDraft = {
+  result: ZoningResult | null;
+  raw: string;
+};
+
+/** Run a zoning expert against the already-crawled evidence pack. No model in
+ * this path can launch its own search or replace the Perplexity+Crawlee record. */
+async function zoningExpertViaGemini(
+  promptText: string,
+  evidenceBlock: string,
+  evidenceUrls: string[],
+  geminiKey: string,
+  countyName: string,
+): Promise<ZoningExpertDraft | null> {
   try {
-    let effectivePrompt = promptText;
-    let usePerplexity = false;
-    let evidenceUrls: string[] = [];
-    if (searchQueries && searchQueries.length && liveWebResearchConfigured()) {
-      const { block, urls } = await perplexityResearchBlock(searchQueries, { maxResultsPerQuery: 6, maxSources: 18, mode: 'hard' });
-      if (block) { effectivePrompt = promptText + block; evidenceUrls = urls; usePerplexity = true; }
-    }
     const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=${geminiKey}`;
     const res = await queueGemini(() => fetch(url, {
       method: 'POST',
+      cache: 'no-store',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        contents: [{ role: 'user', parts: [{ text: effectivePrompt }] }],
+        contents: [{ role: 'user', parts: [{ text: promptText + evidenceBlock }] }],
         systemInstruction: { parts: [{ text: ZONING_SYSTEM }] },
-        ...(usePerplexity ? {} : { tools: [{ google_search: {} }] }),
       }),
     }), 'high');
     if (!res.ok) return null;
     const data = await res.json();
-    const text = data.candidates?.[0]?.content?.parts?.map((p: any) => p.text).filter(Boolean).join('') || '';
-    return parseZoningResult(text, evidenceUrls, countyName);
-  } catch (e) {
-    console.warn('Zoning web lookup failed:', e);
+    const raw = data.candidates?.[0]?.content?.parts?.map((part: any) => part.text).filter(Boolean).join('') || '';
+    return raw ? { raw, result: parseZoningResult(raw, evidenceUrls, countyName) } : null;
+  } catch (error) {
+    console.warn('Gemini zoning expert failed:', error);
     return null;
   }
 }
 
-/** Zoning web lookup via DeepSeek V4 Pro using Perplexity Search API sources. */
-async function zoningViaDeepSeek(promptText: string, searchQueries?: string[], countyName = ''): Promise<ZoningResult | null> {
-  const key = getDeepSeekKey();
-  if (!key) return null;
+async function zoningExpertViaDeepSeek(
+  promptText: string,
+  evidenceBlock: string,
+  evidenceUrls: string[],
+  deepSeekKey: string,
+  countyName: string,
+): Promise<ZoningExpertDraft | null> {
   try {
-    let effectivePrompt = promptText;
-    let evidenceUrls: string[] = [];
-    if (searchQueries && searchQueries.length && liveWebResearchConfigured()) {
-      const { block, urls } = await perplexityResearchBlock(searchQueries, { maxResultsPerQuery: 6, maxSources: 18, mode: 'hard' });
-      if (block) { effectivePrompt = promptText + block; evidenceUrls = urls; }
-    }
     const body = JSON.stringify({
       model: 'deepseek-v4-pro',
       messages: [
         { role: 'system', content: ZONING_SYSTEM },
-        { role: 'user', content: effectivePrompt },
+        { role: 'user', content: promptText + evidenceBlock },
       ],
       stream: false,
       thinking: { type: 'disabled' },
-      temperature: 0.2,
-      max_tokens: 2000,
+      temperature: 0.1,
+      max_tokens: 2400,
     });
-    const msg = await postDeepSeekOnce(body, key);
-    const content = msg?.content;
-    if (content) return parseZoningResult(content, evidenceUrls, countyName);
-    return null;
-  } catch (e) {
-    console.warn('Zoning web lookup via DeepSeek failed:', e);
+    const message = await postDeepSeekOnce(body, deepSeekKey);
+    const raw = typeof message?.content === 'string' ? message.content : '';
+    return raw ? { raw, result: parseZoningResult(raw, evidenceUrls, countyName) } : null;
+  } catch (error) {
+    console.warn('DeepSeek zoning expert failed:', error);
     return null;
   }
 }
 
-/** Zoning web lookup via Perplexity's `sonar` online chat model. Unlike the
- *  DeepSeek/Gemini paths, `sonar` runs its OWN live web search over the prompt's
- *  official sources, so we POST the prompt straight to the chat completions
- *  endpoint and parse the zoning JSON from the reply. Returns null on missing
- *  key / no confident answer. */
-async function zoningViaPerplexity(promptText: string, searchQueries: string[], countyName = ''): Promise<ZoningResult | null> {
-  const key = getPerplexityKey();
-  if (!key) return null;
-  try {
-    const { block, urls: evidenceUrls } = await perplexityResearchBlock(searchQueries, { maxResultsPerQuery: 6, maxSources: 18, mode: 'hard' });
-    if (!block) return null;
-    const body = JSON.stringify({
-      model: 'sonar',
-      messages: [
-        { role: 'system', content: ZONING_SYSTEM },
-        { role: 'user', content: promptText + block },
-      ],
-      temperature: 0.2,
-      max_tokens: 2000,
-    });
-    const routes = ['/.netlify/functions/perplexity-chat', 'https://api.perplexity.ai/chat/completions'];
-    for (const route of routes) {
-      for (let attempt = 0; attempt < 2; attempt++) {
-        const res = await fetchWithTimeout(route, 30000, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
-          body,
-        });
-        if (res.ok) {
-          const data = await res.json();
-          const content = data?.choices?.[0]?.message?.content;
-          const citations = Array.isArray(data?.citations)
-            ? data.citations.map((v: unknown) => typeof v === 'string' ? v : String((v as any)?.url || '')).filter(Boolean)
-            : [];
-          return content ? parseZoningResult(content, [...evidenceUrls, ...citations], countyName) : null;
-        }
-        if ((res.status === 429 || res.status >= 500) && attempt === 0) {
-          await new Promise((r) => setTimeout(r, 1500));
-          continue;
-        }
-        if (res.status < 500 && res.status !== 429) break;
-      }
-    }
-    return null;
-  } catch (e) {
-    console.warn('Zoning web lookup via Perplexity failed:', e);
-    return null;
-  }
+function normalizedZoningCode(value: string): string {
+  return value.toUpperCase().replace(/[^A-Z0-9]/g, '');
+}
+
+function zoningStandardsScore(value?: ZoningResearchStandards): number {
+  if (!value) return 0;
+  return [
+    value.minimumLotAreaSqft,
+    value.maxLotCoveragePct,
+    value.maxHeightFt,
+    value.floorAreaRatio,
+    value.setbacks?.frontFt,
+    value.setbacks?.rearFt,
+    value.setbacks?.sideFt,
+  ].filter((item) => Number.isFinite(Number(item))).length;
+}
+
+function mergeAgreedZoningResults(results: ZoningResult[]): ZoningResult {
+  const primary = [...results].sort((a, b) => {
+    const standardsDelta = zoningStandardsScore(b.standards) - zoningStandardsScore(a.standards);
+    return standardsDelta || b.sources.length - a.sources.length;
+  })[0];
+  return {
+    ...primary,
+    description: [...results].sort((a, b) => b.description.length - a.description.length)[0].description,
+    sources: [...new Set(results.flatMap((result) => result.sources))],
+  };
 }
 
 /**
- * Gemini 3.5 Flash or DeepSeek V4 Pro with Perplexity web search over the official
- * county/city zoning sources. The caller COMBINES this with the county GIS layer to
- * resolve the district (see executeLandAnalysis STAGE 3). Optionally seeded with the
- * GIS code so the AI can confirm/correct the authoritative layer.
+ * Parcel zoning resolver. Perplexity Search discovers the current official pages,
+ * Crawlee extracts them, and Gemini/DeepSeek independently analyze the same
+ * evidence pack. Agreement is merged; disagreement receives a separate fusion
+ * pass. No direct GIS or model-owned search can bypass this result.
  */
 export async function fetchZoningViaWebSearch(
   address: string,
@@ -4396,8 +4340,8 @@ export async function fetchZoningViaWebSearch(
   const perplexityKey = getPerplexityKey();
   const deepSeekKey = getDeepSeekKey();
   const geminiApiKey = getUserKeys().gemini || "";
-  if (!perplexityKey && !deepSeekKey && !geminiApiKey) {
-    console.warn("No Perplexity, DeepSeek, or Gemini API key is configured in Account Settings.");
+  if (!perplexityKey || (!deepSeekKey && !geminiApiKey)) {
+    console.warn("Zoning requires a Perplexity Search key plus a Gemini or DeepSeek model key.");
     return null;
   }
 
@@ -4441,6 +4385,7 @@ Also verify the CURRENT dimensional standards and return this expanded JSON shap
   "permittedUses": ["Single-family detached dwelling"],
   "sources": ["https://..."]
 }
+
 The ordinance alone does not prove the parcel's district. parcelSource must be an official parcel-specific result, and matchMethod must explain the match. Every allowance must be supported by ordinanceSource; use null for missing values. Use only URLs present in the supplied live evidence.${parcelLine}`;
 
   // Parallel batched Perplexity searches over the official zoning sources.
@@ -4452,22 +4397,44 @@ The ordinance alone does not prove the parcel's district. parcelSource must be a
     `${cityPart || countyBaseName(countyName || '') || ''} ${state} planning department zoning lookup`.trim(),
   ];
 
-  // Perplexity's `sonar` model runs its own live web search over official sources
-  // — try it first when a key is configured, then fall back to DeepSeek/Gemini.
-  if (perplexityKey) {
-    const pplxResult = await zoningViaPerplexity(researchPrompt, queries, countyName);
-    if (pplxResult) return pplxResult;
-  }
+  // Build one fresh source packet. mode:hard forces the Crawlee extraction path
+  // after Perplexity discovery; the fallback packet still contains the Search API
+  // snippets if an official site refuses automated page access.
+  const { block: evidenceBlock, urls: evidenceUrls } = await perplexityResearchBlock(
+    queries,
+    { maxResultsPerQuery: 8, maxSources: 28, mode: 'hard' },
+  );
+  if (!evidenceBlock || evidenceUrls.length === 0) return null;
 
-  if (deepSeekKey && perplexityKey) {
-    const deepSeekResult = await zoningViaDeepSeek(researchPrompt, queries, countyName);
-    if (deepSeekResult) return deepSeekResult;
-    if (!geminiApiKey) return null;
-    return await zoningViaGemini(researchPrompt, geminiApiKey, queries, countyName);
-  } else if (geminiApiKey) {
-    return await zoningViaGemini(researchPrompt, geminiApiKey, queries, countyName);
-  }
-  return null;
+  const expertDrafts = (await Promise.all([
+    geminiApiKey
+      ? zoningExpertViaGemini(researchPrompt, evidenceBlock, evidenceUrls, geminiApiKey, countyName || '')
+      : Promise.resolve(null),
+    deepSeekKey
+      ? zoningExpertViaDeepSeek(researchPrompt, evidenceBlock, evidenceUrls, deepSeekKey, countyName || '')
+      : Promise.resolve(null),
+  ])).filter((draft): draft is ZoningExpertDraft => !!draft);
+  const valid = expertDrafts.filter((draft): draft is ZoningExpertDraft & { result: ZoningResult } => !!draft.result);
+  if (valid.length === 0) return null;
+  if (valid.length === 1) return valid[0].result;
+
+  const codes = new Set(valid.map((draft) => normalizedZoningCode(draft.result.code)));
+  if (codes.size === 1) return mergeAgreedZoningResults(valid.map((draft) => draft.result));
+
+  // Conflicting district assignments are never settled by whichever model
+  // returned first. A lead model receives both drafts and the same source packet.
+  const conflictPrompt = `${researchPrompt}
+
+MODEL EXPERT DRAFTS:
+${valid.map((draft, index) => `Expert ${index + 1}:\n${draft.raw.slice(0, 5000)}`).join('\n\n')}
+
+The experts disagree. Reconcile them against the supplied evidence. Return a
+district only when an official parcel-specific source resolves the conflict;
+otherwise return {"zoningCode": null}.`;
+  const judge = geminiApiKey
+    ? await zoningExpertViaGemini(conflictPrompt, evidenceBlock, evidenceUrls, geminiApiKey, countyName || '')
+    : await zoningExpertViaDeepSeek(conflictPrompt, evidenceBlock, evidenceUrls, deepSeekKey, countyName || '');
+  return judge?.result || null;
 }
 
 /**
@@ -6486,10 +6453,32 @@ Return ONLY JSON: {"small":<int>,"medium":<int>,"large":<int>,"canopyCoverPct":<
 
 interface TreeRates {
   small: number; medium: number; large: number; stumpGrind: number;
+  smallLow: number; smallHigh: number;
+  mediumLow: number; mediumHigh: number;
+  largeLow: number; largeHigh: number;
+  stumpGrindLow: number; stumpGrindHigh: number;
   mulchPerAcre: number; mulchDayRate: number;
+  mulchPerAcreLow: number; mulchPerAcreHigh: number;
+  mulchDayRateLow: number; mulchDayRateHigh: number;
   clearingPerAcre: number; clearingDayRate: number;
+  clearingPerAcreLow: number; clearingPerAcreHigh: number;
+  clearingDayRateLow: number; clearingDayRateHigh: number;
   haulOff: number;
+  haulOffLow: number; haulOffHigh: number;
   sources: string[];
+  scope: 'local' | 'regional';
+}
+
+function emptyTreeRates(): TreeRates {
+  return {
+    small: 0, medium: 0, large: 0, stumpGrind: 0,
+    smallLow: 0, smallHigh: 0, mediumLow: 0, mediumHigh: 0,
+    largeLow: 0, largeHigh: 0, stumpGrindLow: 0, stumpGrindHigh: 0,
+    mulchPerAcre: 0, mulchDayRate: 0, clearingPerAcre: 0, clearingDayRate: 0, haulOff: 0,
+    mulchPerAcreLow: 0, mulchPerAcreHigh: 0, mulchDayRateLow: 0, mulchDayRateHigh: 0,
+    clearingPerAcreLow: 0, clearingPerAcreHigh: 0, clearingDayRateLow: 0, clearingDayRateHigh: 0,
+    haulOffLow: 0, haulOffHigh: 0, sources: [], scope: 'regional',
+  };
 }
 
 /** Grounded Google Search for CURRENT LOCAL per-tree removal rates AND bulk
@@ -6503,23 +6492,23 @@ async function fetchTreeRemovalRates(county: string, zip: string, geminiKey: str
   const baseCounty = countyBaseName(county);
 
   const locality = zip ? `ZIP ${zip} (${baseCounty} County, ${state})` : `${baseCounty} County, ${state}`;
-  const prompt = `Find CURRENT LOCAL land-clearing prices near ${locality} (${new Date().getFullYear()}).
+  const prompt = `Find CURRENT land-clearing budget ranges near ${locality} (${new Date().getFullYear()}).
 Return ONLY a JSON object in a \`\`\`json code block:
 \`\`\`json
-{ "small": 0, "medium": 0, "large": 0, "stumpGrind": 0, "mulchPerAcre": 0, "mulchDayRate": 0, "clearingPerAcre": 0, "clearingDayRate": 0, "haulOff": 0, "sources": ["https://..."] }
+{ "smallLow": 0, "smallHigh": 0, "mediumLow": 0, "mediumHigh": 0, "largeLow": 0, "largeHigh": 0, "stumpGrindLow": 0, "stumpGrindHigh": 0, "mulchPerAcreLow": 0, "mulchPerAcreHigh": 0, "mulchDayRateLow": 0, "mulchDayRateHigh": 0, "clearingPerAcreLow": 0, "clearingPerAcreHigh": 0, "clearingDayRateLow": 0, "clearingDayRateHigh": 0, "haulOffLow": 0, "haulOffHigh": 0, "sources": ["https://..."] }
 \`\`\`
-- small/medium/large = remove ONE tree (<30ft / 30-60ft / 60-80+ft)
-- stumpGrind = grind one stump
-- mulchPerAcre = forestry MULCHING per acre; mulchDayRate = forestry mulcher day rate (1-day minimum)
-- clearingPerAcre = TRADITIONAL excavator land clearing per acre (trees pulled by roots, debris removed); clearingDayRate = excavator crew day rate
-- haulOff = typical debris haul-off / dump fee for a small lot
-Use CURRENT LOCAL prices from credible tree-service / land-clearing / excavation sources; cite them; never invent (set unknown values to 0).`;
+- small/medium/large low/high = remove ONE tree (<30ft / 30-60ft / 60-80+ft)
+- stumpGrind low/high = grind one stump
+- mulchPerAcre and mulchDayRate low/high = forestry mulching rates
+- clearingPerAcre and clearingDayRate low/high = traditional excavator clearing with root removal
+- haulOff low/high = debris haul-off / dump allowance for a small lot
+Prefer current county/ZIP sources. If those pages do not publish prices, use current NC/SC regional contractor sources and make the range wide enough to contain the cited figures. Every nonzero range needs at least one URL from the supplied evidence. Do not use national cost aggregators and never invent a rate.`;
   const zipStr = zip ? `${zip} ` : '';
   const diag: { perplexityAttempted: boolean; perplexitySources: number; perplexityUrls?: string[] } = { perplexityAttempted: false, perplexitySources: 0 };
   const text = await groundedGeminiText(
     geminiKey,
     prompt,
-    'You are a land-clearing / tree-service pricing assistant. Use the live web search results for current local prices. Return only the JSON; cite sources; never invent prices.',
+    'You are a land-clearing pricing analyst. Use only the supplied live sources. Return current source-backed local or Carolinas regional ranges, not uncited fallback constants. Return only JSON.',
     60000,
     // Parallel batched Perplexity searches — kept LOCAL to this county so the
     // cited sources are relevant to the address, not national averages.
@@ -6529,6 +6518,8 @@ Use CURRENT LOCAL prices from credible tree-service / land-clearing / excavation
       `forestry mulching cost per acre ${baseCounty} County ${state}`,
       `land clearing cost per acre ${baseCounty} County ${state}`,
       `excavator land clearing day rate debris haul off ${baseCounty} County ${state}`,
+      `current tree removal price ranges ${stateFull}`,
+      `current forestry mulching and site clearing rates ${stateFull}`,
     ],
     diag,
   );
@@ -6537,27 +6528,55 @@ Use CURRENT LOCAL prices from credible tree-service / land-clearing / excavation
   if (!m) return null;
   try {
     const o = JSON.parse((m[1] || m[0]).replace(/,\s*([}\\]])/g, '$1'));
-    const num = (v: any) => { const n = Number(v); return Number.isFinite(n) && n > 0 ? Math.round(n) : 0; };
-    const small = num(o.small), medium = num(o.medium), large = num(o.large);
-    if (!small && !medium && !large) return null;
-    const modelSources = Array.isArray(o.sources) ? o.sources.map((s: any) => String(s)) : [];
+    const range = (name: string): { low: number; high: number; midpoint: number } => {
+      return normalizeSourcedRange(o[name], o[`${name}Low`], o[`${name}High`])
+        || { low: 0, high: 0, midpoint: 0 };
+    };
+    const small = range('small');
+    const medium = range('medium');
+    const large = range('large');
+    const stumpGrind = range('stumpGrind');
+    const mulchPerAcre = range('mulchPerAcre');
+    const mulchDayRate = range('mulchDayRate');
+    const clearingPerAcre = range('clearingPerAcre');
+    const clearingDayRate = range('clearingDayRate');
+    const haulOff = range('haulOff');
+    if (![small, medium, large, mulchPerAcre, clearingPerAcre].some((value) => value.midpoint > 0)) return null;
+    const modelSources: string[] = Array.isArray(o.sources) ? o.sources.map((s: any) => String(s)) : [];
     const discoveredHosts = new Set((diag.perplexityUrls || []).map((url) => {
       try { return new URL(url).hostname.toLowerCase(); } catch { return ''; }
     }).filter(Boolean));
-    const sources = filterLocalSources([...modelSources, ...(diag.perplexityUrls || [])], [baseCounty, `${baseCounty.toLowerCase()}county`, stateFullLower, stateLower])
-      .filter((url) => !diag.perplexityAttempted || discoveredHosts.size === 0 || discoveredHosts.has(new URL(url).hostname.toLowerCase()));
+    const modelGrounded = modelSources.filter((url) => {
+      try {
+        const host = new URL(url).hostname.toLowerCase();
+        return !NATIONAL_AGGREGATORS.some((blocked) => host.includes(blocked))
+          && (!diag.perplexityAttempted || discoveredHosts.size === 0 || discoveredHosts.has(host));
+      } catch { return false; }
+    });
+    if (modelGrounded.length === 0) return null;
+    const sources: string[] = [...new Set<string>([
+      ...modelGrounded,
+      ...filterLocalSources(diag.perplexityUrls || [], [baseCounty, `${baseCounty.toLowerCase()}county`, stateFullLower, stateLower]),
+    ])].slice(0, 8);
     if (!sources.length) return null;
+    const compactLocality = `${baseCounty}${zip}`.toLowerCase().replace(/[^a-z0-9]/g, '');
+    const scope = sources.some((url) => url.toLowerCase().replace(/[^a-z0-9]/g, '').includes(baseCounty.toLowerCase().replace(/[^a-z0-9]/g, ''))
+      || (!!zip && url.includes(zip))
+      || (!!compactLocality && url.toLowerCase().replace(/[^a-z0-9]/g, '').includes(compactLocality)))
+      ? 'local'
+      : 'regional';
     return {
-      small,
-      medium,
-      large,
-      stumpGrind: num(o.stumpGrind),
-      mulchPerAcre: num(o.mulchPerAcre),
-      mulchDayRate: num(o.mulchDayRate),
-      clearingPerAcre: num(o.clearingPerAcre),
-      clearingDayRate: num(o.clearingDayRate),
-      haulOff: num(o.haulOff),
-      sources: sources.slice(0, 6),
+      small: small.midpoint, smallLow: small.low, smallHigh: small.high,
+      medium: medium.midpoint, mediumLow: medium.low, mediumHigh: medium.high,
+      large: large.midpoint, largeLow: large.low, largeHigh: large.high,
+      stumpGrind: stumpGrind.midpoint, stumpGrindLow: stumpGrind.low, stumpGrindHigh: stumpGrind.high,
+      mulchPerAcre: mulchPerAcre.midpoint, mulchPerAcreLow: mulchPerAcre.low, mulchPerAcreHigh: mulchPerAcre.high,
+      mulchDayRate: mulchDayRate.midpoint, mulchDayRateLow: mulchDayRate.low, mulchDayRateHigh: mulchDayRate.high,
+      clearingPerAcre: clearingPerAcre.midpoint, clearingPerAcreLow: clearingPerAcre.low, clearingPerAcreHigh: clearingPerAcre.high,
+      clearingDayRate: clearingDayRate.midpoint, clearingDayRateLow: clearingDayRate.low, clearingDayRateHigh: clearingDayRate.high,
+      haulOff: haulOff.midpoint, haulOffLow: haulOff.low, haulOffHigh: haulOff.high,
+      sources,
+      scope,
     };
   } catch { return null; }
 }
@@ -6565,20 +6584,12 @@ Use CURRENT LOCAL prices from credible tree-service / land-clearing / excavation
 /** Build the two bulk-clearing method options (forestry mulching vs. traditional
  *  excavator) with cost RANGES, applying day-rate minimums on small lots. */
 function buildClearingMethods(acres: number, treeCount: number, largeCount: number, r: TreeRates): ClearingMethod[] {
-  const mulchPerAcre = r.mulchPerAcre;
-  const mulchDay = r.mulchDayRate;
-  const clearPerAcre = r.clearingPerAcre;
-  const clearDay = r.clearingDayRate;
-  const haul = r.haulOff;
-
-  // Forestry mulching: per-acre cost, floored by the 1–2 day machine minimum.
-  const mulchAcreCost = acres * mulchPerAcre;
-  const mulchLow = Math.round(Math.max(mulchAcreCost, mulchDay));
-  const mulchHigh = Math.round(Math.max(mulchAcreCost * 1.6, mulchDay * 1.6));
-  // Traditional: higher per-acre + crew day-rate floor; haul-off pushes the top.
-  const clearAcreCost = acres * clearPerAcre;
-  const clearLow = Math.round(Math.max(clearAcreCost, clearDay));
-  const clearHigh = Math.round(Math.max(clearAcreCost * 1.6, clearDay * 1.75) + haul);
+  // Apply the researched rate ranges directly and honor one-day minimums. The
+  // high end includes the sourced haul-off allowance for traditional clearing.
+  const mulchLow = Math.round(Math.max(acres * r.mulchPerAcreLow, r.mulchDayRateLow));
+  const mulchHigh = Math.round(Math.max(acres * r.mulchPerAcreHigh, r.mulchDayRateHigh));
+  const clearLow = Math.round(Math.max(acres * r.clearingPerAcreLow, r.clearingDayRateLow));
+  const clearHigh = Math.round(Math.max(acres * r.clearingPerAcreHigh, r.clearingDayRateHigh) + r.haulOffHigh);
 
   const heavyHardwoods = largeCount >= Math.max(5, treeCount * 0.3);
   return [
@@ -6634,29 +6645,48 @@ export async function fetchLandClearingEstimate(reportData: SiteFeasibilityData)
   if (!vision) throw new Error('The satellite tree count didn\'t answer (a slow or rate-limited moment) — tap Retry.');
   const rates = await ratesPromise;
 
-  const r: TreeRates = rates || { small: 0, medium: 0, large: 0, stumpGrind: 0, mulchPerAcre: 0, mulchDayRate: 0, clearingPerAcre: 0, clearingDayRate: 0, haulOff: 0, sources: [] as string[] };
+  const r = rates || emptyTreeRates();
   const sizes = ['small', 'medium', 'large'] as const;
+  const rateRanges = {
+    small: { low: r.smallLow, high: r.smallHigh, midpoint: r.small },
+    medium: { low: r.mediumLow, high: r.mediumHigh, midpoint: r.medium },
+    large: { low: r.largeLow, high: r.largeHigh, midpoint: r.large },
+  };
   const trees: TreeRemovalLine[] = sizes
-    .map((size) => ({ size, count: vision[size], unitCost: r[size], cost: Math.round(vision[size] * r[size]) }))
-    .filter((t) => t.count > 0 && t.unitCost > 0);
+    .map((size) => ({
+      size,
+      count: vision[size],
+      unitCost: rateRanges[size].midpoint,
+      unitCostLow: rateRanges[size].low,
+      unitCostHigh: rateRanges[size].high,
+      cost: Math.round(vision[size] * rateRanges[size].midpoint),
+      costLow: Math.round(vision[size] * rateRanges[size].low),
+      costHigh: Math.round(vision[size] * rateRanges[size].high),
+    }))
+    .filter((tree) => tree.count > 0 && tree.unitCost > 0);
   const treeCount = vision.small + vision.medium + vision.large;
   const treeRemovalCost = trees.reduce((s, t) => s + t.cost, 0);
+  const treeRemovalCostLow = trees.reduce((sum, tree) => sum + tree.costLow, 0);
+  const treeRemovalCostHigh = trees.reduce((sum, tree) => sum + tree.costHigh, 0);
   const stumpGrindCost = Math.round(treeCount * r.stumpGrind);
+  const stumpGrindCostLow = Math.round(treeCount * r.stumpGrindLow);
+  const stumpGrindCostHigh = Math.round(treeCount * r.stumpGrindHigh);
 
   // Bulk machine-clearing METHODS (forestry mulching vs. traditional excavator),
   // each with a real-time cost range; plus the key cost-driving factors.
   const clearingMethods = buildClearingMethods(acres, treeCount, vision.large, r);
-  const haul = r.haulOff;
+  const haulLow = r.haulOffLow;
+  const haulHigh = r.haulOffHigh;
   const clearingFactors = [
     vision.large >= Math.max(5, treeCount * 0.3)
       ? `Tree diameter: ~${vision.large} large/mature trees (>12 in) — too big for a mulcher, so an excavator + chainsaw crew is needed, pushing cost toward the high end.`
       : `Tree diameter: mostly small/medium trees — a forestry mulcher can clear these quickly (often a 1-day job).`,
-    r.stumpGrind > 0
-      ? `Stump management: mulching leaves the root balls in the ground. The cited local rate is about $${r.stumpGrind.toLocaleString()} per stump; ${treeCount.toLocaleString()} stumps would be about $${stumpGrindCost.toLocaleString()}.`
-      : 'Stump management: mulching leaves root balls in place; no current local stump-grinding price was verified.',
-    haul > 0
-      ? `Haul-off: leaving mulch on site is cheapest; the cited local debris allowance is about $${haul.toLocaleString()}.`
-      : 'Haul-off: no current local debris-hauling price was verified.',
+    r.stumpGrindHigh > 0
+      ? `Stump management: mulching leaves root balls in the ground. The sourced range is $${r.stumpGrindLow.toLocaleString()}-$${r.stumpGrindHigh.toLocaleString()} per stump; ${treeCount.toLocaleString()} stumps budget at $${stumpGrindCostLow.toLocaleString()}-$${stumpGrindCostHigh.toLocaleString()}.`
+      : 'Stump management: mulching leaves root balls in place; no current sourced stump-grinding range was found.',
+    haulHigh > 0
+      ? `Haul-off: leaving mulch on site is cheapest; the sourced debris allowance is $${haulLow.toLocaleString()}-$${haulHigh.toLocaleString()}.`
+      : 'Haul-off: no current sourced debris-hauling allowance was found.',
   ];
   const imagerySources = [
     `https://www.google.com/maps/@${lat},${lng},19z/data=!3m1!1e3`,
@@ -6670,9 +6700,17 @@ export async function fetchLandClearingEstimate(reportData: SiteFeasibilityData)
     treeCount,
     trees,
     treeRemovalCost,
+    treeRemovalCostLow,
+    treeRemovalCostHigh,
     stumpGrindUnit: r.stumpGrind,
+    stumpGrindUnitLow: r.stumpGrindLow,
+    stumpGrindUnitHigh: r.stumpGrindHigh,
     stumpGrindCost,
+    stumpGrindCostLow,
+    stumpGrindCostHigh,
     total: treeRemovalCost + stumpGrindCost,
+    totalLow: treeRemovalCostLow + stumpGrindCostLow,
+    totalHigh: treeRemovalCostHigh + stumpGrindCostHigh,
     clearingMethods,
     clearingFactors,
     satelliteUrl,
@@ -6680,7 +6718,8 @@ export async function fetchLandClearingEstimate(reportData: SiteFeasibilityData)
     imagerySources,
     locality,
     pricingSources: r.sources,
-    pricingStatus: rates ? 'verified' : 'unavailable',
+    pricingStatus: rates ? 'estimated' : 'unavailable',
+    pricingScope: rates?.scope,
     realTimePricing: !!rates,
     generatedAt: Date.now(),
   };
@@ -6755,7 +6794,7 @@ export async function fetchUtilitiesEstimate(reportData: SiteFeasibilityData): P
     ? `Inside the incorporated limits of ${place}, ${state}`
     : `Unincorporated ${baseCounty} County, ${state} (no municipal limits at this location)`;
 
-  const prompt = `For the property at ${locality}, determine (A) whether the address is served by PUBLIC water and PUBLIC sewer, needs a private WELL / SEPTIC, or is a MIX of the two, and (B) the CURRENT LOCAL cost of each applicable connection as a SINGLE EXACT DOLLAR AMOUNT (not a range), for building a home (${new Date().getFullYear()}).
+  const prompt = `For the property at ${locality}, determine (A) whether the address is served by PUBLIC water and PUBLIC sewer, needs a private WELL / SEPTIC, or is a MIX of the two, and (B) the CURRENT LOCAL cost of each applicable connection for building a home (${new Date().getFullYear()}). Use an exact published amount when one exists; otherwise return a current source-backed budget range.
 JURISDICTION AT THIS EXACT PARCEL (from the U.S. Census place boundaries): ${jurisdiction}.
 ${incorporated
     ? `Because this parcel is INSIDE ${place}'s municipal limits, public water & sewer are typically available — confirm each MAIN actually reaches this street/address, then find ${place}'s (or the county authority's) EXACT water and sewer tap/connection/impact fee.`
@@ -6763,21 +6802,21 @@ ${incorporated
 DETERMINE AVAILABILITY SEPARATELY for water and for sewer — a parcel can be public water + septic, well + public sewer, both public, or well + septic. Base each call on whether a main actually serves THIS address, not merely the city limits. Then give ONE EXACT COST for each applicable line:
 1) PUBLIC/municipal WATER available at this address? If yes, the EXACT water tap / connection / impact fee for the STANDARD RESIDENTIAL SERVICE SIZE, with that size + fee-schedule name in waterTapDetail (e.g. "3/4-inch service — City of Kannapolis fee schedule"). These fees are fixed published amounts — give the exact figure, not a range.
 2) PUBLIC/municipal SEWER available at this address? If yes, the EXACT sewer tap / connection / impact fee for the standard residential size, with the size + schedule name in sewerTapDetail.
-3) If PUBLIC WATER is NOT available, the single MOST TYPICAL current LOCAL all-in cost to drill a private WELL (drilling + pump + connection) in this county.
-4) If PUBLIC SEWER is NOT available, the single MOST TYPICAL current LOCAL all-in cost of a conventional SEPTIC system (perc/soil test + install) in this county.
+3) If PUBLIC WATER is NOT available, the current LOCAL low/high all-in cost to drill a private WELL (drilling + pump + connection) in this county.
+4) If PUBLIC SEWER is NOT available, the current LOCAL low/high all-in cost of a conventional SEPTIC system (perc/soil test + install) in this county.
 5) The jurisdiction's CURRENT RESIDENTIAL PERMIT FEES from its adopted fee schedule: the flat residential ZONING permit fee, the flat DRIVEWAY permit fee (if it has one), and the typical TOTAL building + trade permits (building, electrical, plumbing, mechanical, inspections) for a NEW 1,400–1,800 sqft single-family home CALCULATED FROM the schedule's actual method (per-sqft or valuation-based). Note the calculation basis in permitNote.
 Name the local water/sewer authority if known.
 Return ONLY a JSON object in a \`\`\`json code block:
 \`\`\`json
-{ "publicWater": "available|not-available|unknown", "publicWaterSource": "https://...", "waterTap": 0, "waterTapDetail": "", "waterTapSource": "https://...", "publicSewer": "available|not-available|unknown", "publicSewerSource": "https://...", "sewerTap": 0, "sewerTapDetail": "", "sewerTapSource": "https://...", "well": 0, "wellSource": "https://...", "septic": 0, "septicSource": "https://...", "zoningPermitFee": 0, "zoningPermitSource": "https://...", "drivewayPermitFee": 0, "drivewayPermitSource": "https://...", "buildingPermitLow": 0, "buildingPermitHigh": 0, "buildingPermitSource": "https://...", "permitNote": "", "provider": "", "sources": ["https://..."] }
+{ "publicWater": "available|not-available|unknown", "publicWaterSource": "https://...", "waterTap": 0, "waterTapLow": 0, "waterTapHigh": 0, "waterTapDetail": "", "waterTapSources": ["https://..."], "publicSewer": "available|not-available|unknown", "publicSewerSource": "https://...", "sewerTap": 0, "sewerTapLow": 0, "sewerTapHigh": 0, "sewerTapDetail": "", "sewerTapSources": ["https://..."], "well": 0, "wellLow": 0, "wellHigh": 0, "wellSources": ["https://..."], "septic": 0, "septicLow": 0, "septicHigh": 0, "septicSources": ["https://..."], "zoningPermitFee": 0, "zoningPermitLow": 0, "zoningPermitHigh": 0, "zoningPermitSources": ["https://..."], "drivewayPermitFee": 0, "drivewayPermitLow": 0, "drivewayPermitHigh": 0, "drivewayPermitSources": ["https://..."], "buildingPermitFee": 0, "buildingPermitLow": 0, "buildingPermitHigh": 0, "buildingPermitSources": ["https://..."], "permitNote": "", "provider": "", "sources": ["https://..."] }
 \`\`\`
-STRICT PRICING RULES — REAL FIGURES ONLY:
-- Each cost is ONE EXACT DOLLAR AMOUNT, never a range. Public taps: the exact published fee for the standard residential size. Well & septic: the single most typical current LOCAL installed cost for this county.
-- Every dollar figure MUST come from a page you actually found with Google Search: the utility authority's CURRENT published fee schedule / rate ordinance for tap-connection-impact fees, the jurisdiction's CURRENT adopted permit fee schedule, or named LOCAL well-drilling & septic contractors' current pricing for this county.
-- Put that exact page in the matching *Source field. A number without its line-specific source URL is invalid and must be 0.
-- List in "sources" EVERY distinct source URL you used across all the lines — aim for 6–12 different local sources (fee schedules, rate ordinances, contractor pages), not just one or two. A figure without a source URL is not allowed.
-- If you cannot find a verifiable current local figure for a line, you MUST leave it 0. NEVER estimate, NEVER use national/regional averages, NEVER guess.`;
-  const utilitiesSystem = `You are a site-development utilities and permit-fee analyst for ${stateFull} — any city, town, or county. Use web search to find the LOCAL water/sewer provider for the given jurisdiction, its CURRENT published tap/connection/impact fee schedule, the jurisdiction's CURRENT adopted residential permit fee schedule, and current local well & septic contractor pricing. Determine public-water and public-sewer availability SEPARATELY (a parcel may be public water + septic, well + public sewer, both, or neither) and report EACH cost as a single exact dollar amount. Return only the JSON. Every number must be traceable to a cited source URL; leave any unverifiable number 0 — never estimate or use regional averages.`;
+PRICING EVIDENCE RULES:
+- For a fixed published fee, set the single-value field and repeat it as low/high.
+- When no exact fee applies or the final amount depends on depth, soil, plans, meter size, or valuation, return a defensible low/high budget range synthesized from current local sources. Use nearby regional sources only when local pages do not publish numbers.
+- Put every page supporting a line in its matching *Sources array. A number without a line-specific source URL is invalid and must be 0.
+- Do not use national cost aggregators. Do not infer utility availability from city limits alone.
+- A range is an estimate, not a quote. Keep it broad enough to contain the cited figures and never invent a midpoint.`;
+  const utilitiesSystem = `You are a site-development utilities and permit-fee analyst for ${stateFull}. Use the supplied live research to find current address-level utility evidence, official fee schedules, and local or regional contractor pricing. Exact published fees and source-backed budget ranges are both useful, but must be distinguished in the JSON. Every number needs line-specific source URLs. Never use an uncited fallback or claim service availability from municipal limits alone.`;
 
   // Live searching on the Perplexity Search API (parallel batched queries →
   // many ranked fee-schedule sources), synthesis on Gemini/DeepSeek. Runs
@@ -6813,7 +6852,6 @@ STRICT PRICING RULES — REAL FIGURES ONLY:
     const m = text.match(/```json\s*([\s\S]*?)\s*```/) || text.match(/\{[\s\S]*\}/);
     if (m) { try { o = JSON.parse((m[1] || m[0]).replace(/,\s*([}\]])/g, '$1')); } catch { o = {}; } }
   }
-  const num = (v: any) => { const n = Number(v); return Number.isFinite(n) && n > 0 ? Math.round(n) : 0; };
   const norm = (v: any): 'available' | 'not-available' | 'unknown' => {
     const s = String(v || '').toLowerCase();
     if (s.startsWith('avail') || s === 'yes' || s === 'true') return 'available';
@@ -6824,108 +6862,152 @@ STRICT PRICING RULES — REAL FIGURES ONLY:
   // Address-level availability needs its own supporting source.
   const modelSources = Array.isArray(o.sources) ? o.sources.map((s: any) => String(s)) : [];
   const evidencePool = (diag.perplexityUrls || []).filter((url) => /^https?:\/\//i.test(url));
-  const lineSource = (value: any): string | undefined => {
-    const candidate = String(value || '').trim();
-    if (!/^https?:\/\//i.test(candidate)) return undefined;
-    try {
-      const parsed = new URL(candidate);
-      if (NATIONAL_AGGREGATORS.some((host) => parsed.hostname.toLowerCase().includes(host))) return undefined;
-      const supported = evidencePool.length > 0
-        ? evidencePool.some((raw) => {
-            try { return new URL(raw).hostname.toLowerCase() === parsed.hostname.toLowerCase(); } catch { return false; }
-          })
-        : filterLocalSources([candidate], [place || '', baseCounty, `${baseCounty}county`, zip, state]).length > 0;
-      return supported ? candidate : undefined;
-    } catch { return undefined; }
+  const lineSources = (...values: any[]): string[] => {
+    const candidates = values.flatMap((value) => Array.isArray(value) ? value : [value]);
+    const supported: string[] = [];
+    for (const value of candidates) {
+      const candidate = String(value || '').trim();
+      if (!/^https?:\/\//i.test(candidate)) continue;
+      try {
+        const parsed = new URL(candidate);
+        if (NATIONAL_AGGREGATORS.some((host) => parsed.hostname.toLowerCase().includes(host))) continue;
+        const grounded = evidencePool.length > 0
+          ? evidencePool.some((raw) => {
+              try { return new URL(raw).hostname.toLowerCase() === parsed.hostname.toLowerCase(); } catch { return false; }
+            })
+          : filterLocalSources([candidate], [place || '', baseCounty, `${baseCounty}county`, zip, state]).length > 0;
+        if (grounded) supported.push(candidate);
+      } catch { /* ignore malformed model URLs */ }
+    }
+    return [...new Set(supported)];
   };
+  const lineSource = (...values: any[]): string | undefined => lineSources(...values)[0];
   const publicWaterSource = lineSource(o.publicWaterSource);
   const publicSewerSource = lineSource(o.publicSewerSource);
   const publicWater = publicWaterSource ? norm(o.publicWater) : 'unknown';
   const publicSewer = publicSewerSource ? norm(o.publicSewer) : 'unknown';
 
-  // REAL PRICES ONLY: a line is "verified" only when the grounded search
-  // returned an actual figure. Each cost is now a SINGLE EXACT amount (low ===
-  // high) — an exact published tap fee, or the single typical local well/septic
-  // cost. Unverified lines carry NO dollar amount (no averages, no guesses). A
-  // legacy low/high pair is tolerated and collapsed to one figure for resilience.
-  const exact = (val: any, sourceValue: any, legacyLow?: any, legacyHigh?: any): { low: number; high: number; verified: boolean; sourceUrl?: string } => {
-    let v = num(val);
-    if (!v) { const lo = num(legacyLow), hi = num(legacyHigh); v = (lo && hi) ? Math.round((lo + hi) / 2) : (lo || hi); }
-    const sourceUrl = lineSource(sourceValue);
-    if (!v || !sourceUrl) return { low: 0, high: 0, verified: false };
-    return { low: v, high: v, verified: true, sourceUrl };
+  type SourcedCost = Pick<UtilityLine, 'low' | 'high' | 'verified' | 'estimated' | 'sourceUrl' | 'sourceUrls'>;
+  const sourcedCost = (input: {
+    exactValue?: any;
+    lowValue?: any;
+    highValue?: any;
+    sourceValues: any[];
+    exactPublished?: boolean;
+  }): SourcedCost => {
+    const sourceUrls = lineSources(...input.sourceValues);
+    if (sourceUrls.length === 0) return { low: 0, high: 0, verified: false };
+    const published = normalizeSourcedRange(input.exactValue, undefined, undefined);
+    if (published && input.exactPublished) {
+      return { low: published.low, high: published.high, verified: true, estimated: false, sourceUrl: sourceUrls[0], sourceUrls };
+    }
+    const range = normalizeSourcedRange(input.exactValue, input.lowValue, input.highValue);
+    if (!range) return { low: 0, high: 0, verified: false };
+    return { low: range.low, high: range.high, verified: false, estimated: true, sourceUrl: sourceUrls[0], sourceUrls };
   };
 
   const detailOf = (v: any) => { const s = String(v || '').trim(); return s ? s.slice(0, 120) : undefined; };
-  // A missing source leaves the line unavailable instead of inserting a range.
+  const waterTapCost = sourcedCost({
+    exactValue: o.waterTap,
+    lowValue: o.waterTapLow,
+    highValue: o.waterTapHigh,
+    sourceValues: [o.waterTapSources, o.waterTapSource],
+    exactPublished: true,
+  });
+  const sewerTapCost = sourcedCost({
+    exactValue: o.sewerTap,
+    lowValue: o.sewerTapLow,
+    highValue: o.sewerTapHigh,
+    sourceValues: [o.sewerTapSources, o.sewerTapSource],
+    exactPublished: true,
+  });
+  const wellCost = sourcedCost({
+    exactValue: o.well,
+    lowValue: o.wellLow,
+    highValue: o.wellHigh,
+    sourceValues: [o.wellSources, o.wellSource],
+  });
+  const septicCost = sourcedCost({
+    exactValue: o.septic,
+    lowValue: o.septicLow,
+    highValue: o.septicHigh,
+    sourceValues: [o.septicSources, o.septicSource],
+  });
+
   const lines: UtilityLine[] = [];
-  // WATER: public tap fee when served, else private well.
   if (publicWater === 'available') {
-    const r = exact(o.waterTap, o.waterTapSource, o.waterTapLow, o.waterTapHigh);
-    lines.push({ name: 'Public water tap fee', kind: 'water', isPublic: true, status: 'available', ...r, detail: detailOf(o.waterTapDetail), note: 'municipal water tap / connection / impact fee' });
+    lines.push({ name: 'Public water tap fee', kind: 'water', isPublic: true, status: 'available', ...waterTapCost, detail: detailOf(o.waterTapDetail), note: 'municipal water tap / connection / impact fee' });
   } else if (publicWater === 'not-available') {
-    const r = exact(o.well, o.wellSource, o.wellLow, o.wellHigh);
-    lines.push({ name: 'Private well', kind: 'water', isPublic: false, status: publicWater, ...r, note: 'drill + pump + connection (no public water)' });
+    lines.push({ name: 'Private well', kind: 'water', isPublic: false, status: publicWater, ...wellCost, note: 'drill + pump + connection (no public water)' });
   } else {
-    lines.push({ name: 'Water service', kind: 'water', isPublic: false, status: 'unknown', low: 0, high: 0, verified: false, sourceUrl: publicWaterSource, note: 'Address-level public water availability was not verified.' });
-  }
-  // SEWER: public tap fee when served, else septic.
-  if (publicSewer === 'available') {
-    const r = exact(o.sewerTap, o.sewerTapSource, o.sewerTapLow, o.sewerTapHigh);
-    lines.push({ name: 'Public sewer tap fee', kind: 'sewer', isPublic: true, status: 'available', ...r, detail: detailOf(o.sewerTapDetail), note: 'municipal sewer tap / connection / impact fee' });
-  } else if (publicSewer === 'not-available') {
-    const r = exact(o.septic, o.septicSource, o.septicLow, o.septicHigh);
-    lines.push({ name: 'Septic system', kind: 'sewer', isPublic: false, status: publicSewer, ...r, note: 'perc/soil test + conventional system install (no public sewer)' });
-  } else {
-    lines.push({ name: 'Sewer service', kind: 'sewer', isPublic: false, status: 'unknown', low: 0, high: 0, verified: false, sourceUrl: publicSewerSource, note: 'Address-level public sewer availability was not verified.' });
+    if (waterTapCost.low > 0) lines.push({ name: 'Public water tap scenario', kind: 'water', isPublic: true, status: 'unknown', scenario: true, ...waterTapCost, detail: detailOf(o.waterTapDetail), note: 'Budget only if the utility confirms a main and capacity at this address.' });
+    if (wellCost.low > 0) lines.push({ name: 'Private well scenario', kind: 'water', isPublic: false, status: 'unknown', scenario: true, ...wellCost, note: 'Budget alternative if public water is not available.' });
+    if (waterTapCost.low <= 0 && wellCost.low <= 0) {
+      lines.push({ name: 'Water service', kind: 'water', isPublic: false, status: 'unknown', low: 0, high: 0, verified: false, sourceUrl: publicWaterSource, note: 'Address-level public water availability and a sourced cost range were not verified.' });
+    }
   }
 
-  // Residential permit fees from the jurisdiction's adopted fee schedule —
-  // verified figures only, same no-guessing rule as the tap fees.
+  if (publicSewer === 'available') {
+    lines.push({ name: 'Public sewer tap fee', kind: 'sewer', isPublic: true, status: 'available', ...sewerTapCost, detail: detailOf(o.sewerTapDetail), note: 'municipal sewer tap / connection / impact fee' });
+  } else if (publicSewer === 'not-available') {
+    lines.push({ name: 'Septic system', kind: 'sewer', isPublic: false, status: publicSewer, ...septicCost, note: 'perc/soil test + conventional system install (no public sewer)' });
+  } else {
+    if (sewerTapCost.low > 0) lines.push({ name: 'Public sewer tap scenario', kind: 'sewer', isPublic: true, status: 'unknown', scenario: true, ...sewerTapCost, detail: detailOf(o.sewerTapDetail), note: 'Budget only if the utility confirms a main and capacity at this address.' });
+    if (septicCost.low > 0) lines.push({ name: 'Septic system scenario', kind: 'sewer', isPublic: false, status: 'unknown', scenario: true, ...septicCost, note: 'Budget alternative if public sewer is not available; a soil evaluation is still required.' });
+    if (sewerTapCost.low <= 0 && septicCost.low <= 0) {
+      lines.push({ name: 'Sewer service', kind: 'sewer', isPublic: false, status: 'unknown', low: 0, high: 0, verified: false, sourceUrl: publicSewerSource, note: 'Address-level public sewer availability and a sourced cost range were not verified.' });
+    }
+  }
+
   const permits: PermitFeeLine[] = [];
-  const zp = num(o.zoningPermitFee);
-  const zpSource = lineSource(o.zoningPermitSource);
-  permits.push(zp && zpSource
-    ? { name: 'Residential zoning permit', low: zp, high: zp, verified: true, sourceUrl: zpSource }
-    : { name: 'Residential zoning permit', low: 0, high: 0, verified: false });
-  const dp = num(o.drivewayPermitFee);
-  const dpSource = lineSource(o.drivewayPermitSource);
-  permits.push(dp && dpSource
-    ? { name: 'Driveway permit', low: dp, high: dp, verified: true, sourceUrl: dpSource }
-    : { name: 'Driveway permit', low: 0, high: 0, verified: false });
-  const bl = num(o.buildingPermitLow), bh = num(o.buildingPermitHigh);
-  const buildingPermitSource = lineSource(o.buildingPermitSource);
-  permits.push((bl || bh) && buildingPermitSource
-    ? {
-        name: 'Building + trade permits (new SFH, ~1,400–1,800 sqft)',
-        low: bl || bh, high: Math.max(bl, bh),
-        note: detailOf(o.permitNote) || 'calculated from square footage / construction valuation — exact amount depends on the plans',
-        verified: true,
-        sourceUrl: buildingPermitSource,
-      }
-    : {
-        name: 'Building + trade permits (new SFH, ~1,400–1,800 sqft)',
-        low: 0, high: 0,
-        note: `typical ${state} total for building + electrical + plumbing + mechanical permits — confirm with the jurisdiction`,
-        verified: false,
-      });
+  const zoningPermitCost = sourcedCost({
+    exactValue: o.zoningPermitFee,
+    lowValue: o.zoningPermitLow,
+    highValue: o.zoningPermitHigh,
+    sourceValues: [o.zoningPermitSources, o.zoningPermitSource],
+    exactPublished: true,
+  });
+  permits.push({ name: 'Residential zoning permit', ...zoningPermitCost });
+  const drivewayPermitCost = sourcedCost({
+    exactValue: o.drivewayPermitFee,
+    lowValue: o.drivewayPermitLow,
+    highValue: o.drivewayPermitHigh,
+    sourceValues: [o.drivewayPermitSources, o.drivewayPermitSource],
+    exactPublished: true,
+  });
+  permits.push({ name: 'Driveway permit', ...drivewayPermitCost });
+  const buildingPermitCost = sourcedCost({
+    exactValue: o.buildingPermitFee,
+    lowValue: o.buildingPermitLow,
+    highValue: o.buildingPermitHigh,
+    sourceValues: [o.buildingPermitSources, o.buildingPermitSource],
+    exactPublished: true,
+  });
+  permits.push({
+    name: 'Building + trade permits (new SFH, ~1,400-1,800 sqft)',
+    ...buildingPermitCost,
+    note: detailOf(o.permitNote) || (buildingPermitCost.low > 0
+      ? 'Source-backed calculation; the final amount depends on plans and construction valuation.'
+      : 'No sourced local or regional fee calculation was found.'),
+  });
 
   // Developer-prepaid caveat — tap fees on subdivision lots are often already
   // satisfied by the developer's infrastructure installation.
-  if (!permits[2].verified) permits[2].note = 'No adopted local fee schedule was verified for this calculation.';
+  if (!permits[2].verified && !permits[2].estimated) permits[2].note = 'No sourced local or regional fee calculation was found.';
   const tapNote = (publicWater === 'available' || publicSewer === 'available')
     ? 'These tap fees are not necessarily still owed: if this lot is in a subdivision where the developer already installed and paid for the taps, the fees may be satisfied. Ask the utility whether taps were purchased for this lot before budgeting — it can change the development cost by thousands.'
     : undefined;
 
-  const real = lines.some((l) => l.verified) || permits.some((p) => p.verified);
-  // Totals sum verified priced lines; unavailable lines remain zero internally.
-  const totalLow = lines.reduce((s, l) => s + l.low, 0);
-  const totalHigh = lines.reduce((s, l) => s + l.high, 0);
+  const real = lines.some((line) => line.verified || line.estimated) || permits.some((permit) => permit.verified || permit.estimated);
+  // Unknown-service scenarios are mutually exclusive, so they are shown but not
+  // added together into a misleading connection total.
+  const totalLow = lines.filter((line) => !line.scenario).reduce((sum, line) => sum + line.low, 0);
+  const totalHigh = lines.filter((line) => !line.scenario).reduce((sum, line) => sum + line.high, 0);
   const bothPublic = publicWater === 'available' && publicSewer === 'available';
   const neitherPublic = publicWater === 'not-available' && publicSewer === 'not-available';
   const availabilityUnknown = publicWater === 'unknown' || publicSewer === 'unknown';
   const summary = availabilityUnknown
-    ? 'Address-level utility availability is not verified; confirm service with the cited provider.'
+    ? 'Address-level utility availability is unverified; sourced public/private budget scenarios are shown where research found them.'
     : bothPublic
     ? 'Public water + sewer available — budget tap/impact fees.'
     : neitherPublic
@@ -6977,7 +7059,9 @@ STRICT PRICING RULES — REAL FIGURES ONLY:
   );
   const sources = [...new Set([
     ...localSources,
+    ...lines.flatMap((line) => line.sourceUrls || []),
     ...lines.map((line) => line.sourceUrl).filter((url): url is string => !!url),
+    ...permits.flatMap((permit) => permit.sourceUrls || []),
     ...permits.map((permit) => permit.sourceUrl).filter((url): url is string => !!url),
     'https://tigerweb.geo.census.gov/arcgis/rest/services/TIGERweb/Places_CouSub_ConCity_SubMCD/MapServer/4',
   ])];
@@ -7470,10 +7554,10 @@ After the report, answer follow-up questions conversationally from the stored co
 ${redfinTable || `- ${marketStatsLine}`}
 
 ### 3. Zoning & Estimated Density Allowances
-- Zoning Classification (from county GIS): ${reportData.zoningCode} (${reportData.zoningDescription})
-- ESTIMATED Development Capacity (typical for the use category — must be confirmed against the local ordinance): Max Building Footprint: ${reportData.gridics?.maxBuildingFootprintSqft?.toLocaleString() || 'N/A'} SF, Max Height: ${reportData.gridics?.maxHeightFt || 'N/A'} ft, Floor Area Ratio (FAR): ${reportData.gridics?.floorAreaRatio || 'N/A'}
-- Estimated Dimensional Setbacks: Front: ${reportData.gridics?.setbacks.frontFt || 0} ft | Rear: ${reportData.gridics?.setbacks.rearFt || 0} ft | Side: ${reportData.gridics?.setbacks.sideFt || 0} ft
-- Estimated net buildable envelope: ${reportData.gridics?.netBuildableAreaSqft?.toLocaleString() || 'N/A'} SF
+- Zoning Classification (Perplexity+Crawlee model fusion): ${reportData.zoningCode} (${reportData.zoningDescription})
+- Development Capacity: ${reportData.zoningVerificationStatus === 'official-research' ? `Max Building Footprint: ${reportData.gridics?.maxBuildingFootprintSqft?.toLocaleString() || 'N/A'} SF, Max Height: ${reportData.gridics?.maxHeightFt || 'N/A'} ft, Floor Area Ratio (FAR): ${reportData.gridics?.floorAreaRatio || 'N/A'}` : 'Unavailable because the fusion lookup did not verify a parcel-specific official zoning assignment.'}
+- Dimensional Setbacks: ${reportData.zoningVerificationStatus === 'official-research' ? `Front: ${reportData.gridics?.setbacks.frontFt || 'N/A'} ft | Rear: ${reportData.gridics?.setbacks.rearFt || 'N/A'} ft | Side: ${reportData.gridics?.setbacks.sideFt || 'N/A'} ft` : 'Unavailable'}
+- Net buildable envelope: ${reportData.zoningVerificationStatus === 'official-research' ? `${reportData.gridics?.netBuildableAreaSqft?.toLocaleString() || 'N/A'} SF` : 'Unavailable'}
 
 ### 4. SOLD New-Construction Comps (built 2025–2026, zoning-use-matched, CLOSED sales only, no sqft limits, sold ≤12 months, within 5 driving miles, RealtyAPI: Realtor + Redfin + Zillow). Each comp lists its property type.
 ${reportData.comps && reportData.comps.length > 0

@@ -1862,7 +1862,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
     }
     const labelsFC = { type: 'FeatureCollection', features: labelFeatures };
 
-    const gr = data.gridics;
+    const gr = data.zoningVerificationStatus === 'official-research' ? data.gridics : undefined;
     const escapeHtml = (v: any) => String(v ?? '').replace(/[&<>"']/g, (ch) => ({
       '&': '&amp;',
       '<': '&lt;',
@@ -4081,7 +4081,9 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                       ? 'Dimensional standards were read from the cited adopted ordinance.'
                       : data.zoningStandardsStatus === 'mixed'
                         ? 'Some standards came from the ordinance; missing fields remain labeled estimates.'
-                        : 'No complete adopted standard was found; displayed screening values are estimates.'}
+                        : data.zoningStandardsStatus === 'unavailable'
+                          ? 'No parcel-specific district and adopted standards were verified, so allowance figures are hidden.'
+                          : 'No complete adopted standard was found; displayed screening values are estimates.'}
                     style={{
                       fontSize: '10px',
                       backgroundColor: 'var(--warning-bg, rgba(245, 158, 11, 0.12))',
@@ -4146,7 +4148,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                   emptyText="No parcel-specific official zoning source was verified."
                 />
 
-                {data.gridics && (
+                {data.gridics && data.zoningVerificationStatus === 'official-research' ? (
                   <>
                     <div className="gridics-stats-grid" style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '15px', marginTop: '12px' }}>
                       <div>
@@ -4216,6 +4218,8 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                       </span>
                     </div>
                   </>
+                ) : (
+                  <div className="cost-disclaimer">Development allowances are unavailable until the fusion lookup verifies this parcel's district from an official parcel source.</div>
                 )}
               </div>
 
@@ -4565,18 +4569,22 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                               {ln.low > 0 ? (ln.low === ln.high ? `$${ln.low.toLocaleString()}` : `$${ln.low.toLocaleString()} - $${ln.high.toLocaleString()}`) : 'Unavailable'}{' '}
                               {ln.verified
                                 ? <span className="util-verified-tag">{ln.isPublic ? 'exact published fee' : 'typical local cost'}</span>
-                                : <span className="util-verified-tag util-estimate-tag">no verified source</span>}
+                                : ln.estimated
+                                  ? <span className="util-verified-tag util-estimate-tag">sourced estimate</span>
+                                  : <span className="util-verified-tag util-estimate-tag">no sourced amount</span>}
                               {ln.sourceUrl && <a href={ln.sourceUrl} target="_blank" rel="noreferrer" style={{ marginLeft: '6px' }}>source</a>}
                             </div>
                           </div>
                         ))}
                         {(utilities.totalLow > 0 || utilities.totalHigh > 0) && (
                           <div className="util-row util-total">
-                            <span>{utilities.publicWater === 'available' && utilities.publicSewer === 'available'
-                              ? 'Total tap fees'
-                              : utilities.publicWater !== 'available' && utilities.publicSewer !== 'available'
-                                ? 'Total well + septic'
-                                : 'Total to connect'}</span>
+                            <span>{utilities.lines.some((line) => !line.scenario && line.low <= 0)
+                              ? 'Sourced connection subtotal'
+                              : utilities.publicWater === 'available' && utilities.publicSewer === 'available'
+                                ? 'Total tap fees'
+                                : utilities.publicWater !== 'available' && utilities.publicSewer !== 'available'
+                                  ? 'Total well + septic'
+                                  : 'Total to connect'}</span>
                             <span className="util-cost">{utilities.totalLow === utilities.totalHigh ? `$${utilities.totalLow.toLocaleString()}` : `$${utilities.totalLow.toLocaleString()} – $${utilities.totalHigh.toLocaleString()}`}</span>
                           </div>
                         )}
@@ -4598,7 +4606,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                               {p.note && <div className="util-note">{p.note}</div>}
                               <div className="util-cost">
                                 {p.low > 0 ? (p.low === p.high ? `$${p.low.toLocaleString()}` : `$${p.low.toLocaleString()} - $${p.high.toLocaleString()}`) : 'Unavailable'}{' '}
-                                <span className={`util-verified-tag ${p.verified ? '' : 'util-estimate-tag'}`}>{p.verified ? 'fee schedule' : 'no verified source'}</span>
+                                <span className={`util-verified-tag ${p.verified ? '' : 'util-estimate-tag'}`}>{p.verified ? 'exact fee schedule' : p.estimated ? 'sourced estimate' : 'no sourced amount'}</span>
                                 {p.sourceUrl && <a href={p.sourceUrl} target="_blank" rel="noreferrer" style={{ marginLeft: '6px' }}>source</a>}
                               </div>
                             </div>
@@ -4610,7 +4618,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                             if (tl <= 0 && th <= 0) return null;
                             return (
                               <div className="util-row util-total">
-                                <span>Estimated development fees (taps + permits)</span>
+                                <span>{utilities.permits.some((permit) => permit.low <= 0) ? 'Sourced taps + permits subtotal' : 'Estimated development fees (taps + permits)'}</span>
                                 <span className="util-cost">{tl === th ? `$${tl.toLocaleString()}` : `~$${tl.toLocaleString()} – $${th.toLocaleString()}`}</span>
                               </div>
                             );
@@ -4618,7 +4626,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                         </div>
                       )}
                       <SourceLinks label="Sources" sources={utilities.sources} emptyText="No current local utility or fee source was verified." />
-                      <div className="cost-disclaimer">{utilities.realTime ? 'Every dollar figure above was found live in the cited local sources (current fee schedules / local contractor pricing) — no estimates or regional averages are ever shown.' : 'No verifiable current local prices were found online for this location, so no figures are shown — nothing is estimated or guessed.'} Tap/impact fees + well/septic costs vary by lot, depth, and soil — confirm with the utility authority and a local well/septic contractor (a septic perc test is required before building).</div>
+                      <div className="cost-disclaimer">{utilities.realTime ? 'Dollar figures are either exact published fees or current source-backed local/regional budget ranges, labeled on each line.' : 'No current source-backed price was found, so no dollar amount is shown.'} Utility scenarios do not prove service at the parcel. Confirm availability, capacity, tap status, soil suitability, and final fees with the cited authority or contractor.</div>
                     </>
                   ) : null}
                 </div>
@@ -4665,33 +4673,35 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                         <div className="clearing-hero-meta">
                           <span className="clearing-treecount">~{landClearing.treeCount.toLocaleString()} trees to remove</span>
                           {landClearing.canopyCoverPct != null && <span className="clearing-canopy">~{landClearing.canopyCoverPct}% tree canopy · {landClearing.density}</span>}
-                          <span className="clearing-acres">{landClearing.acres.toLocaleString()} acres · {landClearing.realTimePricing ? 'live local rates' : 'pricing unavailable'}</span>
+                          <span className="clearing-acres">{landClearing.acres.toLocaleString()} acres · {landClearing.realTimePricing ? `live sourced ${landClearing.pricingScope || 'regional'} estimate` : 'pricing unavailable'}</span>
                         </div>
                       </div>
-                      {landClearing.pricingStatus === 'verified' ? (
+                      {landClearing.pricingStatus !== 'unavailable' && landClearing.trees.length > 0 ? (
                       <div className="clearing-rows">
                         <div className="clearing-row clearing-row-head"><span>Trees</span><span>Each</span><span>Cost</span></div>
                         {landClearing.trees.map((t, i) => (
                           <div key={i} className="clearing-row clearing-tree">
                             <span className="clearing-tree-size">{t.count.toLocaleString()} {t.size}</span>
-                            <span>${t.unitCost.toLocaleString()}</span>
-                            <span className="clearing-amt">${t.cost.toLocaleString()}</span>
+                            <span>{t.unitCostLow === t.unitCostHigh ? `$${t.unitCostLow.toLocaleString()}` : `$${t.unitCostLow.toLocaleString()} - $${t.unitCostHigh.toLocaleString()}`}</span>
+                            <span className="clearing-amt">{t.costLow === t.costHigh ? `$${t.costLow.toLocaleString()}` : `$${t.costLow.toLocaleString()} - $${t.costHigh.toLocaleString()}`}</span>
                           </div>
                         ))}
                         {landClearing.stumpGrindCost > 0 && (
                           <div className="clearing-row clearing-tree">
                             <span className="clearing-tree-size">{landClearing.treeCount.toLocaleString()} stump grind</span>
-                            <span>${landClearing.stumpGrindUnit.toLocaleString()}</span>
-                            <span className="clearing-amt">${landClearing.stumpGrindCost.toLocaleString()}</span>
+                            <span>{landClearing.stumpGrindUnitLow === landClearing.stumpGrindUnitHigh ? `$${landClearing.stumpGrindUnitLow.toLocaleString()}` : `$${landClearing.stumpGrindUnitLow.toLocaleString()} - $${landClearing.stumpGrindUnitHigh.toLocaleString()}`}</span>
+                            <span className="clearing-amt">{landClearing.stumpGrindCostLow === landClearing.stumpGrindCostHigh ? `$${landClearing.stumpGrindCostLow.toLocaleString()}` : `$${landClearing.stumpGrindCostLow.toLocaleString()} - $${landClearing.stumpGrindCostHigh.toLocaleString()}`}</span>
                           </div>
                         )}
                         <div className="clearing-row clearing-total">
                           <span>Per-tree removal total</span>
-                          <span className="clearing-amt">${landClearing.total.toLocaleString()}</span>
+                          <span className="clearing-amt">{landClearing.totalLow === landClearing.totalHigh ? `$${landClearing.totalLow.toLocaleString()}` : `$${landClearing.totalLow.toLocaleString()} - $${landClearing.totalHigh.toLocaleString()}`}</span>
                         </div>
                       </div>
                       ) : (
-                        <div className="cost-disclaimer">No current local clearing price was supported by a source, so no dollar estimate is shown.</div>
+                        landClearing.pricingStatus === 'unavailable'
+                          ? <div className="cost-disclaimer">No current local or Carolinas regional clearing price was supported by a source, so no dollar estimate is shown.</div>
+                          : null
                       )}
 
                       {/* Bulk machine-clearing methods (forestry mulching vs. traditional) */}
@@ -4719,8 +4729,8 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                       )}
 
                       <SourceLinks label="Imagery sources" sources={landClearing.imagerySources} />
-                      <SourceLinks label="Pricing sources" sources={landClearing.pricingSources} emptyText="No current local pricing source was verified; no dollar estimate is shown." />
-                      <div className="cost-disclaimer">Tree count and canopy are AI interpretations of the cited imagery. {landClearing.realTimePricing ? 'Every displayed dollar figure comes from the cited current local pricing pages.' : 'No unsourced regional baseline is displayed.'} A ground assessment and contractor bid are still required.</div>
+                      <SourceLinks label="Pricing sources" sources={landClearing.pricingSources} emptyText="No current pricing source was verified; no dollar estimate is shown." />
+                      <div className="cost-disclaimer">Tree count and canopy are AI interpretations of the cited imagery. {landClearing.realTimePricing ? 'Displayed ranges are synthesized from the cited current local or Carolinas regional pricing pages; they are budget estimates, not quotes.' : 'No unsourced fallback price is displayed.'} A ground assessment and contractor bid are still required.</div>
                     </>
                   ) : null}
                 </div>
