@@ -15,6 +15,8 @@ const evidenceCompiled = ts.transpileModule(evidenceSource, {
 const evidence = await import(`data:text/javascript;base64,${Buffer.from(evidenceCompiled).toString('base64')}`);
 const serviceSource = await readFile(new URL('../../../src/services/feasibilityService.ts', import.meta.url), 'utf8');
 const componentSource = await readFile(new URL('../../../src/components/FeasibilitySearch.tsx', import.meta.url), 'utf8');
+const perplexityProxySource = await readFile(new URL('../perplexity.js', import.meta.url), 'utf8');
+const viteSource = await readFile(new URL('../../../vite.config.ts', import.meta.url), 'utf8');
 
 test('state-qualified NC and SC county names resolve to their zoning services', () => {
   assert.equal(zoning.normalizeCountyKey('Mecklenburg, NC'), 'mecklenburg');
@@ -77,20 +79,39 @@ test('zoning uses official GIS first and grounded Gemini 3.5 Flash for research'
   assert.match(resolver, /fetchCountyZoningCode/);
   assert.match(serviceSource, /const GEMINI_ZONING_MODEL = 'gemini-3\.5-flash'/);
   assert.match(serviceSource, /tools: \[\{ google_search: \{\} \}\]/);
-  assert.match(resolver, /return bestOfficialResult \|\| officialGisFallback \|\| bestListingResult/);
+  assert.match(resolver, /return bestOfficialResult[\s\S]*officialGisFallback[\s\S]*bestListingResult[\s\S]*statewideHintFallback[\s\S]*planningFallback[\s\S]*reviewFallback/);
   assert.match(resolver, /completeSetbacks[\s\S]*standards\?\.restrictions/);
-  assert.match(resolver, /mode: 'hard'/);
-  assert.match(resolver, /for \(let round = 0; round < 3; round\+\+\)/);
+  assert.match(serviceSource, /ZONING_FAST_SEARCH_BUDGET[\s\S]*mode: 'perplexity'/);
+  assert.match(serviceSource, /ZONING_HARD_FALLBACK_BUDGET[\s\S]*mode: 'hard'/);
+  assert.match(resolver, /const maxRounds = 2/);
+  assert.match(resolver, /zoningResearchStartedAt[\s\S]*> 20000/);
+  assert.match(resolver, /setTimeout\(\(\) => resolve\(null\), 6000\)/);
+  assert.match(resolver, /onQuickResult/);
   assert.match(resolver, /zoningQueriesForRound/);
   assert.match(resolver, /bestListingResult/);
+  assert.match(resolver, /statewideHintFallback/);
+  assert.match(resolver, /planningFallback/);
+  assert.match(resolver, /code: 'OFFICIAL MAP REVIEW'/);
   assert.match(serviceSource, /site:zillow\.com[\s\S]*site:realtor\.com[\s\S]*site:redfin\.com/);
   assert.doesNotMatch(resolver, /zoningExpertViaDeepSeek|deepSeekKey|model: 'sonar'/);
+  assert.doesNotMatch(serviceSource, /NOT PUBLISHED|"UNZONED"/);
   assert.match(serviceSource, /method: 'POST',\s+cache: 'no-store',/);
   assert.match(componentSource, /CORROBORATED: PROPERTY LISTINGS/);
   assert.match(componentSource, /REPORTED: PROPERTY LISTING/);
   assert.match(componentSource, /Setback rules and exceptions/);
   assert.match(componentSource, /Published zoning restrictions/);
-  assert.match(componentSource, /data\.gridics && data\.zoningVerificationStatus !== 'unavailable'/);
+  assert.match(componentSource, /STANDARDS:[\s\S]*REVIEW REQUIRED/);
+  assert.doesNotMatch(componentSource, /Zoning \(not published\)/);
+});
+
+test('Perplexity uses the direct Search API without an agent dispatch model', () => {
+  assert.match(perplexityProxySource, /api\.perplexity\.ai\/search/);
+  assert.doesNotMatch(perplexityProxySource, /\/v1\/agent/);
+  assert.match(viteSource, /rewrite: \(\) => '\/search'/);
+  assert.doesNotMatch(viteSource, /\/v1\/agent/);
+  assert.match(serviceSource, /perplexitySearchRequest/);
+  assert.match(serviceSource, /flattenPplxResults/);
+  assert.doesNotMatch(serviceSource, /AGENT_SEARCH_MODEL|perplexityAgentRequest|agentSearchResultGroups/);
 });
 
 test('comps use RealtyAPI records filtered by zoning while retaining Gemini Vision photos', () => {

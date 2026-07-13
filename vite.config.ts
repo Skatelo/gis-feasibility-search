@@ -7,9 +7,9 @@ export default defineConfig({
   server: {
     proxy: {
       // Dev-only: browsers can't call api.perplexity.ai directly (it sends no
-      // CORS headers). In production the Netlify function at this same path
-      // proxies the Perplexity Search API; plain `vite` doesn't serve Netlify
-      // functions, so forward that path to the API here. The app's Authorization
+      // CORS headers). In production the Netlify functions at these same paths
+      // proxy the Perplexity Search API; plain `vite` doesn't serve Netlify
+      // functions, so forward the paths to the API here. The app's Authorization
       // header (the user's Perplexity key) and JSON body pass straight through,
       // so `npm run dev` gets live Perplexity search without `netlify dev`.
       '/.netlify/functions/perplexity-chat': {

@@ -1079,6 +1079,8 @@ export const FeasibilitySearch: FC = () => {
     const d = data;
     if (!d || !d.coordinates) return;
     const seq = searchSeqRef.current;
+    const zoningCanDriveComps = !['review-required', 'planning-designation', 'unavailable'].includes(String(d.zoningVerificationStatus))
+      && !/^(official map review|land use:|no adopted district)/i.test(String(d.zoningCode || ''));
     setCompsRefetching(true);
     try {
       const run = await fetchGoogleDistanceMatrixComps(
@@ -1091,7 +1093,7 @@ export const FeasibilitySearch: FC = () => {
         d.countyName || '',
         undefined,
         newRadius,
-        d.zoningVerificationStatus !== 'unavailable',
+        zoningCanDriveComps,
       );
       if (seq !== searchSeqRef.current) return; // a new search superseded this
       setData((prev) => (prev ? { ...prev, comps: run.comps, compRunSummary: run.summary } : prev));
@@ -4091,7 +4093,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                       : data.zoningStandardsStatus === 'mixed'
                         ? 'Some standards came from the ordinance; missing fields remain labeled estimates.'
                         : data.zoningStandardsStatus === 'unavailable'
-                          ? 'No parcel-specific district and adopted standards were verified, so allowance figures are hidden.'
+                          ? 'Open the cited official map or planning source before relying on dimensional allowances.'
                           : 'No complete adopted standard was found; displayed screening values are estimates.'}
                     style={{
                       fontSize: '10px',
@@ -4103,7 +4105,9 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                       border: '1px solid var(--warning-border, rgba(245, 158, 11, 0.35))'
                     }}
                   >
-                    STANDARDS: {(data.zoningStandardsStatus || 'unavailable').toUpperCase()}
+                    STANDARDS: {data.zoningStandardsStatus === 'unavailable'
+                      ? 'REVIEW REQUIRED'
+                      : (data.zoningStandardsStatus || 'REVIEW REQUIRED').toUpperCase()}
                   </span>
                 </div>
 
@@ -4120,13 +4124,29 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                               ? 'CORROBORATED: PROPERTY LISTINGS'
                               : data.zoningVerificationStatus === 'listing-research'
                                 ? 'REPORTED: PROPERTY LISTING'
-                            : data.zoningVerificationStatus === 'conflict'
-                              ? 'CONFLICT: GIS RETAINED'
-                              : 'NOT VERIFIED'}
+                                : data.zoningVerificationStatus === 'statewide-reported'
+                                  ? 'REPORTED: STATEWIDE PARCEL'
+                                  : data.zoningVerificationStatus === 'planning-designation'
+                                    ? 'OFFICIAL PLANNING DESIGNATION'
+                                    : data.zoningVerificationStatus === 'review-required'
+                                      ? 'OPEN OFFICIAL ZONING MAP'
+                                      : data.zoningVerificationStatus === 'conflict'
+                                        ? 'CONFLICT: GIS RETAINED'
+                                        : 'NOT VERIFIED'}
                       </span>
                     </span>
                     {data.zoningCode ? (
-                      <span className={`zoning-badge ${data.zoningSource === 'county-gis' ? 'active-zone' : 'fallback-zone'}`}>
+                      <span
+                        className={`zoning-badge ${data.zoningSource === 'county-gis' ? 'active-zone' : 'fallback-zone'}`}
+                        style={String(data.zoningCode).length > 14 ? {
+                          maxWidth: '15rem',
+                          fontSize: '0.85rem',
+                          lineHeight: 1.25,
+                          letterSpacing: 0,
+                          overflowWrap: 'anywhere',
+                          textAlign: 'right',
+                        } : undefined}
+                      >
                         {data.zoningCode}
                       </span>
                     ) : (
@@ -4158,10 +4178,10 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                 <SourceLinks
                   label="Zoning evidence sources"
                   sources={[...(data.zoningSources || []), ...(data.zoningSourceUrl ? [data.zoningSourceUrl] : [])]}
-                  emptyText="No parcel-specific zoning evidence source was found."
+                  emptyText="Open the official jurisdiction map to review this parcel."
                 />
 
-                {data.gridics && data.zoningVerificationStatus !== 'unavailable' ? (
+                {data.gridics ? (
                   <>
                     <div className="gridics-stats-grid" style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '15px', marginTop: '12px' }}>
                       <div>
@@ -4256,7 +4276,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                     </div>
                   </>
                 ) : (
-                  <div className="cost-disclaimer">Development allowances are hidden because official GIS and Gemini 3.5 Flash did not find a source that explicitly assigns a zoning district to this exact parcel.</div>
+                  <div className="cost-disclaimer">Open the cited official zoning or planning map before relying on setbacks, density, height, or lot-coverage allowances for this parcel.</div>
                 )}
               </div>
 
@@ -4339,12 +4359,12 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                   <div style={{ display: 'flex', alignItems: 'flex-start', gap: '10px', padding: '10px 0', color: 'var(--text-secondary)', fontSize: '0.82rem', lineHeight: 1.45 }}>
                     <AlertCircle size={16} style={{ flexShrink: 0, marginTop: '2px', color: 'var(--warning, #d97706)' }} />
                     <span>
-                      {data.zoningVerificationStatus === 'unavailable'
+                      {['review-required', 'planning-designation', 'unavailable'].includes(String(data.zoningVerificationStatus))
                         ? (data.compRunSummary || 'RealtyAPI comps are waiting for a source-backed zoning classification so property-use categories are not mixed.')
                         : `No qualifying comps found: no new-construction sales (built 2025–2026) matching this parcel's zoning use closed within the last 12 months inside the ${compRadius} driving-mile radius (RealtyAPI: Realtor, Redfin, Zillow). The chat bubble has the run breakdown. Try a wider radius:`}
                     </span>
                   </div>
-                  {data.zoningVerificationStatus !== 'unavailable' && (
+                  {!['review-required', 'planning-designation', 'unavailable'].includes(String(data.zoningVerificationStatus)) && (
                     <div className="comp-filter-bar">
                       <div className="comp-filter-group">
                         <span className="comp-filter-label">Radius</span>
@@ -5000,7 +5020,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                     const countyGis = hasCountyZoning(data.countyName);
                     const webZoning = data.zoningSource === 'web';
                     const canToggle = countyGis || webZoning; // tiles for GIS, label for web
-                    const label = countyGis ? "Zoning (County GIS)" : webZoning ? "Zoning (web lookup)" : "Zoning (not published)";
+                    const label = countyGis ? "Zoning (County GIS)" : webZoning ? "Zoning (web lookup)" : "Zoning (official map review)";
                     const title = countyGis
                       ? `Overlay zoning districts from ${data.countyName} County's own GIS server`
                       : webZoning

@@ -11,7 +11,7 @@ A high-performance real estate feasibility screening dashboard built with React,
   - **Cabarrus County** (Concord/Kannapolis)
 * **Topography & Elevation Metrics**: Integrates with OpenTopography (Copernicus COP30 DEM) to gauge site slope and buildability classification (Buildable vs. Non-Buildable).
 * **Zoning & Setbacks Capacity**: Approximates setbacks, max heights, floor-area ratios, and net buildable envelope dimensions.
-* **Hybrid Live Web Data**: Perplexity handles fast searches and source discovery; a bounded Crawlee scraper reads harder zoning, utility, fee, cost, and report sources plus linked PDF, DOCX, XLSX, CSV, JSON, XML, and text documents.
+* **Hybrid Live Web Data**: the Perplexity Search API handles fast ranked searches and source discovery; a bounded Crawlee scraper reads harder zoning, utility, fee, cost, and report sources plus linked PDF, DOCX, XLSX, CSV, JSON, XML, and text documents.
 * **Comparable Sold Listings**: Scrapes verified sold properties from Realtor.com via Google Search grounding to calculateDeveloped After Repair Value (ARV).
 * **Interactive Gemini Q&A Chatbot**: A contextual chatbot capable of explaining setbacks, zoning rules, or construction options utilizing the current parcel context.
 * **Printable Feasibility Report**: Generates vector PDF-ready feasibility reports for wholesalers and developers.

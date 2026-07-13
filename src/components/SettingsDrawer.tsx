@@ -287,7 +287,7 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
                   {showPerplexityKey ? <EyeOff size={16} /> : <Eye size={16} />}
                 </button>
               </div>
-              <p className="field-help">Perplexity handles fast searches and finds candidate sources. Hard research is automatically handed to the built-in Crawlee scraper, which reads the source pages and linked PDF, DOCX, XLSX, CSV, JSON, XML, and text documents. Get a key at perplexity.ai/settings/api.</p>
+              <p className="field-help">Live searches run directly on the Perplexity Search API to find ranked candidate sources without an agent-model dispatch step. Hard research is automatically handed to the built-in Crawlee scraper, which reads source pages and linked PDF, DOCX, XLSX, CSV, JSON, XML, and text documents. Get a key at perplexity.ai/settings/api.</p>
             </div>
 
             {/* Mapbox — satellite base map for the parcel aerial view */}

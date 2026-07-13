@@ -269,10 +269,10 @@ export interface SiteFeasibilityData {
   statePlaneRings?: number[][][];
   zoningDescription?: string;
   /** Where the zoning came from: the county's GIS, or a web search fallback. */
-  zoningSource?: 'county-gis' | 'web';
+  zoningSource?: 'county-gis' | 'statewide-gis' | 'official-map' | 'web';
   zoningSourceUrl?: string;
   zoningSources?: string[];
-  zoningVerificationStatus?: 'official-gis' | 'official-research' | 'corroborated-research' | 'listing-research' | 'conflict' | 'unavailable';
+  zoningVerificationStatus?: 'official-gis' | 'official-research' | 'corroborated-research' | 'listing-research' | 'statewide-reported' | 'planning-designation' | 'review-required' | 'conflict' | 'unavailable';
   zoningJurisdiction?: string;
   zoningStandardsStatus?: 'official' | 'mixed' | 'estimated' | 'unavailable';
   zoningStandardsSourceUrl?: string;
