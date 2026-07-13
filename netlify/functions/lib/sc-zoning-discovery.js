@@ -155,6 +155,7 @@ async function incorporatedPlaceAtPoint(lng, lat, fetcher) {
   });
   const url = `https://tigerweb.geo.census.gov/arcgis/rest/services/TIGERweb/Places_CouSub_ConCity_SubMCD/MapServer/4/query?${params}`;
   const data = await request(url, fetcher);
+  if (!data) return undefined;
   const attributes = data?.features?.[0]?.attributes;
   if (!attributes) return null;
   return String(attributes.BASENAME || attributes.NAME || '').replace(/\s+(city|town|village)$/i, '').trim() || null;
@@ -342,16 +343,113 @@ async function queryLayer(layer, lng, lat, fetcher) {
   return null;
 }
 
-export async function resolveOfficialScZoning({ county, lng, lat, fetcher = fetch }) {
+function normalizeParcelId(value) {
+  return String(value || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+}
+
+function normalizeStreetAddress(value) {
+  return String(value || '')
+    .split(',')[0]
+    .toUpperCase()
+    .replace(/\bROAD\b/g, 'RD')
+    .replace(/\bSTREET\b/g, 'ST')
+    .replace(/\bAVENUE\b/g, 'AVE')
+    .replace(/\bHIGHWAY\b/g, 'HWY')
+    .replace(/\bBOULEVARD\b/g, 'BLVD')
+    .replace(/\bDRIVE\b/g, 'DR')
+    .replace(/\bLANE\b/g, 'LN')
+    .replace(/\bCOURT\b/g, 'CT')
+    .replace(/[^A-Z0-9]+/g, ' ')
+    .trim()
+    .replace(/\s+/g, ' ');
+}
+
+function chooseWmsZoningFeature(features, config, address, parcelId) {
+  const candidates = (Array.isArray(features) ? features : [])
+    .map((feature) => feature?.properties || {})
+    .map((properties) => ({
+      properties,
+      code: cleanCode(properties?.[config.codeField]),
+      secondaryCode: cleanCode(properties?.[config.secondaryCodeField]),
+      parcelId: normalizeParcelId(properties?.[config.parcelField]),
+      address: normalizeStreetAddress(properties?.[config.addressField]),
+    }))
+    .filter((candidate) => candidate.code);
+  if (!candidates.length) return null;
+
+  const expectedParcel = normalizeParcelId(parcelId);
+  const parcelMatch = expectedParcel
+    ? candidates.find((candidate) => candidate.parcelId === expectedParcel)
+    : null;
+  if (parcelMatch) return parcelMatch;
+
+  const expectedAddress = normalizeStreetAddress(address);
+  const addressMatch = expectedAddress
+    ? candidates.find((candidate) => candidate.address === expectedAddress)
+    : null;
+  if (addressMatch) return addressMatch;
+
+  // Address geocoders commonly return a road-centerline point a few feet from
+  // the parcel. Accept nearby official parcels only when every clicked feature
+  // agrees on the same base district; mixed districts remain unresolved.
+  const codes = [...new Set(candidates.map((candidate) => candidate.code))];
+  return codes.length === 1 ? candidates[0] : null;
+}
+
+async function queryOfficialWmsAtPoint(config, lng, lat, address, parcelId, fetcher) {
+  if (!config?.url || !config?.layer || !config?.codeField) return null;
+  const passes = [
+    { delta: 0.0015, size: 151 },
+    { delta: 0.002, size: 101 },
+  ];
+  for (const { delta, size } of passes) {
+    const params = new URLSearchParams({
+      SERVICE: 'WMS',
+      VERSION: '1.1.1',
+      REQUEST: 'GetFeatureInfo',
+      LAYERS: config.layer,
+      QUERY_LAYERS: config.layer,
+      STYLES: '',
+      SRS: 'EPSG:4326',
+      BBOX: `${lng - delta},${lat - delta},${lng + delta},${lat + delta}`,
+      WIDTH: String(size),
+      HEIGHT: String(size),
+      X: String(Math.floor(size / 2)),
+      Y: String(Math.floor(size / 2)),
+      INFO_FORMAT: 'application/json',
+      FEATURE_COUNT: '50',
+    });
+    const data = await request(`${config.url}?${params}`, fetcher);
+    const hit = chooseWmsZoningFeature(data?.features, config, address, parcelId);
+    if (hit) {
+      return {
+        code: hit.code,
+        description: hit.secondaryCode ? `Secondary zoning overlay: ${hit.secondaryCode}` : null,
+        sourceUrl: config.url,
+      };
+    }
+  }
+  return null;
+}
+
+export async function resolveOfficialScZoning({ county, lng, lat, address = '', parcelId = '', fetcher = fetch }) {
   const entry = scZoningCoverage(county);
   if (!entry || !Number.isFinite(Number(lng)) || !Number.isFinite(Number(lat))) return null;
-  const [countyServices, municipality] = await Promise.all([
+  const [countyServices, municipality, wmsHit] = await Promise.all([
     discoverOfficialZoningServices(entry, fetcher),
     incorporatedPlaceAtPoint(Number(lng), Number(lat), fetcher),
+    queryOfficialWmsAtPoint(entry.zoningWms, Number(lng), Number(lat), address, parcelId, fetcher),
   ]);
+  if (wmsHit && municipality === null) {
+    return {
+      ...wmsHit,
+      officialMapUrl: entry.officialMapUrl,
+      jurisdiction: `${entry.county} County`,
+      discovery: 'official-wms-point',
+    };
+  }
   const municipalServices = await discoverOfficialMunicipalServices(municipality, entry.county, fetcher);
   const services = dedupe([...municipalServices, ...countyServices]);
-  if (!services.length) return null;
   const priority = services.filter((url) => isBaseZoningName(decodeURIComponent(url))).slice(0, 10);
   const secondary = services.filter((url) => !priority.includes(url)).slice(0, 10);
   for (const group of [priority, secondary]) {
@@ -370,6 +468,24 @@ export async function resolveOfficialScZoning({ county, lng, lat, fetcher = fetc
         discovery: 'official-arcgis-portal',
       };
     }
+  }
+  if (wmsHit) {
+    return {
+      ...wmsHit,
+      officialMapUrl: entry.officialMapUrl,
+      jurisdiction: municipality || `${entry.county} County`,
+      discovery: 'official-wms-point',
+    };
+  }
+  if (municipality === null && entry.noCountywideZoningSource) {
+    return {
+      code: 'NO ADOPTED DISTRICT',
+      description: 'This parcel is outside incorporated municipal limits, and the official county code does not establish a county zoning district here',
+      sourceUrl: entry.noCountywideZoningSource,
+      officialMapUrl: entry.officialMapUrl,
+      jurisdiction: `Unincorporated ${entry.county} County`,
+      discovery: 'official-no-countywide-district',
+    };
   }
   return null;
 }

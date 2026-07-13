@@ -1080,7 +1080,7 @@ export const FeasibilitySearch: FC = () => {
     if (!d || !d.coordinates) return;
     const seq = searchSeqRef.current;
     const zoningCanDriveComps = !['review-required', 'planning-designation', 'unavailable'].includes(String(d.zoningVerificationStatus))
-      && !/^(official map review|land use:|no adopted district)/i.test(String(d.zoningCode || ''));
+      && !/^(official map review|zoning code unresolved|land use:|no adopted district)/i.test(String(d.zoningCode || ''));
     setCompsRefetching(true);
     try {
       const run = await fetchGoogleDistanceMatrixComps(

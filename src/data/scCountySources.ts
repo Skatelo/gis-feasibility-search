@@ -55,7 +55,7 @@ export const SC_COUNTY_SOURCES: readonly ScCountySource[] = [
   { county: 'Oconee', fips: '45073', provider: 'beacon', portalUrl: 'https://beacon.schneidercorp.com/Application.aspx?AppID=1030&LayerID=21692&PageTypeID=1&PageID=9255' },
   { county: 'Orangeburg', fips: '45075', provider: 'arcgis', portalUrl: 'https://experience.arcgis.com/experience/02a8eeae9f074df9a0821ae7e1125c86', alternateUrl: 'https://beacon.schneidercorp.com/Application.aspx?AppID=1214&LayerID=36780&PageTypeID=1&PageID=14063', treasurerUrl: 'https://orangeburgtreasurer.qpaybill.com/Taxes/TaxesDefaultType4.aspx' },
   { county: 'Pickens', fips: '45077', provider: 'qpublic', portalUrl: 'https://qpublic.schneidercorp.com/Application.aspx?AppID=927&LayerID=18058&PageTypeID=1&PageID=8074' },
-  { county: 'Richland', fips: '45079', provider: 'county', portalUrl: 'http://www.richlandmaps.com/' },
+  { county: 'Richland', fips: '45079', provider: 'county', portalUrl: 'https://richlandmaps.com/apps/dataviewer/' },
   { county: 'Saluda', fips: '45081', provider: 'county', portalUrl: 'https://saludacountysc.net/SaludaCountyViewer/', treasurerUrl: 'https://saludacountytreasurer.qpaybill.com/Taxes/TaxesDefaultType4.aspx' },
   { county: 'Spartanburg', fips: '45083', provider: 'arcgis', portalUrl: 'https://maps.spartanburgcounty.org/portal/apps/webappviewer/index.html?id=8a88ed02adb845938c81f8c0c4214b9e', alternateUrl: 'https://beacon.schneidercorp.com/Application.aspx?AppID=857&LayerID=16069&PageTypeID=1&PageID=0' },
   { county: 'Sumter', fips: '45085', provider: 'qpublic', portalUrl: 'https://qpublic.schneidercorp.com/Application.aspx?App=SumterCountySC&PageType=Map', treasurerUrl: 'https://sumtercounty.qpaybill.com/Taxes/TaxesDefaultType4.aspx' },

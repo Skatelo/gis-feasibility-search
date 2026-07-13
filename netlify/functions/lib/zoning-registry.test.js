@@ -135,6 +135,64 @@ test('incorporated SC parcels discover zoning only from a matching official muni
   assert.ok(requests.every((request) => request.options.cache === 'no-store'));
 });
 
+test('Richland official WMS resolves the parcel district instead of map review', async () => {
+  const requests = [];
+  const json = (body) => new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
+  const fetcher = async (value, options = {}) => {
+    const url = String(value);
+    requests.push({ url, options });
+    if (url.includes('Places_CouSub_ConCity_SubMCD')) return json({ features: [] });
+    if (url.startsWith('https://a.richlandmaps.com/geoserver/wms?')) {
+      return json({ features: [
+        { properties: { tms: 'R18913-01-03', situs_addr: '1749 PINCUSHION RD', zoning_pri: 'RT', zoning_sec: null } },
+        { properties: { tms: 'R18816-01-04', situs_addr: '1747 PINCUSHION RD', zoning_pri: 'RT', zoning_sec: null } },
+      ] });
+    }
+    if (url === 'https://richlandmaps.com/apps/dataviewer/') {
+      return new Response('<html><body>Richland County Dataviewer</body></html>', { status: 200 });
+    }
+    return json({});
+  };
+
+  const result = await resolveOfficialScZoning({
+    county: 'Richland',
+    lng: -80.902991275234,
+    lat: 33.917673846451,
+    address: '1761 Pincushion Rd, Columbia, SC 29209',
+    fetcher,
+  });
+  assert.equal(result.code, 'RT');
+  assert.equal(result.discovery, 'official-wms-point');
+  assert.equal(result.jurisdiction, 'Richland County');
+  assert.match(result.sourceUrl, /richlandmaps\.com\/geoserver\/wms$/);
+  const wmsRequest = requests.find((request) => request.url.includes('GetFeatureInfo'));
+  assert.ok(wmsRequest);
+  assert.match(wmsRequest.url, /QUERY_LAYERS=postgisworkspace%3Arcgeo_zoning_wgs84/);
+  assert.ok(requests.every((request) => request.options.cache === 'no-store'));
+});
+
+test('unincorporated Union returns the official no-district result, never map review', async () => {
+  const json = (body) => new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
+  const fetcher = async (value) => {
+    const url = String(value);
+    if (url.includes('Places_CouSub_ConCity_SubMCD')) return json({ features: [] });
+    if (url.includes('qpublic.schneidercorp.com')) return new Response('<html><body>Union property map</body></html>', { status: 200 });
+    return json({});
+  };
+  const result = await resolveOfficialScZoning({
+    county: 'Union',
+    lng: -81.524699942265,
+    lat: 34.798728189004,
+    address: '116 Wright Sims Road, Union, SC 29379',
+    parcelId: '049-00-00-112-000',
+    fetcher,
+  });
+  assert.equal(result.code, 'NO ADOPTED DISTRICT');
+  assert.equal(result.discovery, 'official-no-countywide-district');
+  assert.match(result.sourceUrl, /library\.municode\.com\/sc\/union_county/);
+  assert.doesNotMatch(result.code, /map review/i);
+});
+
 test('official SC FeatureServers are queried at the exact property point', async () => {
   const originalFetch = globalThis.fetch;
   const requests = [];
@@ -217,8 +275,8 @@ test('zoning uses official GIS first and grounded Gemini 3.5 Flash for research'
   assert.match(resolver, /completeSetbacks[\s\S]*standards\?\.restrictions/);
   assert.match(serviceSource, /ZONING_FAST_SEARCH_BUDGET[\s\S]*mode: 'perplexity'/);
   assert.match(serviceSource, /ZONING_HARD_FALLBACK_BUDGET[\s\S]*mode: 'hard'/);
-  assert.match(resolver, /const maxRounds = 2/);
-  assert.match(resolver, /zoningResearchStartedAt[\s\S]*> 20000/);
+  assert.match(resolver, /const maxRounds = state === 'SC' \? 3 : 2/);
+  assert.match(resolver, /zoningResearchStartedAt[\s\S]*elapsed > 20000[\s\S]*elapsed > 32000/);
   assert.match(resolver, /setTimeout\(\(\) => resolve\(null\), 12000\)/);
   assert.match(resolver, /onQuickResult/);
   assert.match(resolver, /zoningQueriesForRound/);
@@ -230,7 +288,8 @@ test('zoning uses official GIS first and grounded Gemini 3.5 Flash for research'
   assert.match(resolver, /noAdoptedDistrictFallback/);
   assert.match(serviceSource, /SC_NO_COUNTYWIDE_ZONING_SOURCES[\s\S]*Union:[\s\S]*library\.municode\.com\/sc\/union_county/);
   assert.match(resolver, /incorporatedPlaceAtPoint[\s\S]*code: 'NO ADOPTED DISTRICT'/);
-  assert.match(resolver, /code: 'OFFICIAL MAP REVIEW'/);
+  assert.match(resolver, /reviewFallback[\s\S]*state === 'NC'[\s\S]*code: 'OFFICIAL MAP REVIEW'/);
+  assert.match(stage, /selectedState === 'SC'[\s\S]*zoningCode = 'ZONING CODE UNRESOLVED'/);
   assert.match(serviceSource, /site:zillow\.com[\s\S]*site:realtor\.com[\s\S]*site:redfin\.com/);
   assert.doesNotMatch(resolver, /zoningExpertViaDeepSeek|deepSeekKey|model: 'sonar'/);
   assert.doesNotMatch(serviceSource, /NOT PUBLISHED|"UNZONED"/);

@@ -384,6 +384,8 @@ export interface ResolvedZoning {
   code: string;
   description: string | null;
   sourceUrl?: string;
+  jurisdiction?: string;
+  resolution?: 'district' | 'no-district';
 }
 
 // --- Zoning attribute extraction --------------------------------------------
@@ -549,14 +551,19 @@ async function queryZoningAtPoint(service: ZoningService, lng: number, lat: numb
   return null;
 }
 
-async function discoverScZoningAtPoint(countyName: string, lng: number, lat: number): Promise<ResolvedZoning | null> {
+async function discoverScZoningAtPoint(
+  countyName: string,
+  lng: number,
+  lat: number,
+  context: { address?: string; parcelId?: string } = {},
+): Promise<ResolvedZoning | null> {
   if (!/,\s*sc\s*$/i.test(countyName)) return null;
   try {
     const response = await fetch('/.netlify/functions/sc-zoning', {
       method: 'POST',
       cache: 'no-store',
       headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-      body: JSON.stringify({ county: countyName, lng, lat }),
+      body: JSON.stringify({ county: countyName, lng, lat, ...context }),
     });
     if (!response.ok) return null;
     const payload = await response.json();
@@ -564,7 +571,9 @@ async function discoverScZoningAtPoint(countyName: string, lng: number, lat: num
     if (!code || isPlaceholderCode(code, null)) return null;
     const description = cleanZoningValue(payload?.data?.description);
     const sourceUrl = typeof payload?.data?.sourceUrl === 'string' ? payload.data.sourceUrl : undefined;
-    return { code, description, sourceUrl };
+    const jurisdiction = typeof payload?.data?.jurisdiction === 'string' ? payload.data.jurisdiction : undefined;
+    const resolution = /^no adopted district$/i.test(code) ? 'no-district' : 'district';
+    return { code, description, sourceUrl, jurisdiction, resolution };
   } catch (e) {
     console.warn(`Official SC zoning portal discovery failed for ${countyName}:`, e);
     return null;
@@ -581,6 +590,7 @@ export async function fetchCountyZoningCode(
   countyName: string,
   lng: number,
   lat: number,
+  context: { address?: string; parcelId?: string } = {},
 ): Promise<ResolvedZoning | null> {
   const services = getZoningServices(countyName);
   // County, municipal, and dynamically discovered official layers are
@@ -591,7 +601,7 @@ export async function fetchCountyZoningCode(
       ? await queryZoningAtPoint(service, lng, lat)
       : await identifyZoning(service, lng, lat);
   });
-  if (/,\s*sc\s*$/i.test(countyName)) candidates.push(discoverScZoningAtPoint(countyName, lng, lat));
+  if (/,\s*sc\s*$/i.test(countyName)) candidates.push(discoverScZoningAtPoint(countyName, lng, lat, context));
   if (!candidates.length) return null;
   try {
     return await Promise.any(candidates.map(async (candidate) => {
