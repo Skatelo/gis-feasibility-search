@@ -2101,7 +2101,7 @@ export async function executeLandAnalysis(
   // Frontage comes from the real parcel geometry, not the estimate. Computed as
   // a function because it's re-derived once the real zoning district resolves.
   const buildGridics = () => {
-    if (!zoningCode || /^(n\/?a|official map review|land use:|no adopted district)/i.test(zoningCode)) return undefined;
+    if (!zoningCode || /^(n\/?a|official map review|zoning code unresolved|land use:|no adopted district)/i.test(zoningCode)) return undefined;
     const estimated = estimateZoningStandards(zoningCode, zoningDescription);
     const researched = researchedZoningStandards;
     const valid = (value: unknown): value is number => Number.isFinite(Number(value));
@@ -2446,11 +2446,20 @@ export async function executeLandAnalysis(
       } else {
         applyResearchStandards(geminiZoning);
       }
+    } else if (selectedState === 'SC') {
+      zoningCode = 'ZONING CODE UNRESOLVED';
+      zoningDescription = 'The official county and municipal sources did not return a source-backed district code for this parcel';
+      zoningSource = 'official-map';
+      zoningSourceUrl = officialMapUrl || 'https://www.sciway.net/maps/sc-gis-county-maps.html';
+      zoningSources = [zoningSourceUrl];
+      zoningVerificationStatus = 'unavailable';
+      zoningStandardsStatus = 'unavailable';
+      zoningSetbacksStatus = 'unavailable';
     } else {
       zoningCode = 'OFFICIAL MAP REVIEW';
       zoningDescription = 'Use the cited jurisdiction map to confirm the final district code for this parcel';
       zoningSource = 'official-map';
-      zoningSourceUrl = officialMapUrl || (selectedState === 'SC' ? 'https://www.sciway.net/maps/sc-gis-county-maps.html' : 'https://www.nconemap.gov/');
+      zoningSourceUrl = officialMapUrl || 'https://www.nconemap.gov/';
       zoningSources = [zoningSourceUrl];
       zoningVerificationStatus = 'review-required';
       zoningStandardsStatus = 'unavailable';
@@ -2483,7 +2492,7 @@ export async function executeLandAnalysis(
   // the right area — the parcel's situs field is often street-only.
   const compLocationAddress = `${addressString}${info.scity && !addressString.toLowerCase().includes(String(info.scity).toLowerCase()) ? `, ${info.scity}` : ''}`;
   const zoningSupportsComps = !['review-required', 'planning-designation', 'unavailable'].includes(String(zoningVerificationStatus))
-    && !/^(official map review|land use:|no adopted district)/i.test(zoningCode.trim());
+    && !/^(official map review|zoning code unresolved|land use:|no adopted district)/i.test(zoningCode.trim());
   const compRun = await fetchGoogleDistanceMatrixComps(
     lat,
     lng,
@@ -4642,7 +4651,7 @@ export async function fetchZoningViaWebSearch(
   // the research uses the Census place boundary so it searches the governing
   // municipality rather than assuming every parcel is county-zoned.
   const directGisLookupPromise: Promise<ResolvedZoning | null> = countyName && Number.isFinite(lat) && Number.isFinite(lng)
-    ? fetchCountyZoningCode(countyName, Number(lng), Number(lat)).catch((error) => {
+    ? fetchCountyZoningCode(countyName, Number(lng), Number(lat), { address, parcelId }).catch((error) => {
         console.warn('Official zoning GIS point lookup failed:', error);
         return null;
       })
@@ -4667,8 +4676,8 @@ export async function fetchZoningViaWebSearch(
         description: directGis?.description || 'Official GIS zoning district',
         sourceUrl: fallbackSource,
         sources: [fallbackSource],
-        jurisdiction: countyName ? `${countyBaseName(countyName)} County` : undefined,
-        matchMethod: 'parcel-gis',
+        jurisdiction: directGis?.jurisdiction || (countyName ? `${countyBaseName(countyName)} County` : undefined),
+        matchMethod: directGis?.resolution === 'no-district' ? 'official-no-district' : 'parcel-gis',
         evidenceTier: 'official',
       }
     : null;
@@ -4723,7 +4732,7 @@ export async function fetchZoningViaWebSearch(
     ? 'https://www.sciway.net/maps/sc-gis-county-maps.html'
     : 'https://www.nconemap.gov/';
   const reviewSource = hints.officialMapUrl || registeredGisUrl || hints.codeSourceUrl || hints.landUseSourceUrl || directoryUrl;
-  const reviewFallback: ZoningResult = {
+  const reviewFallback: ZoningResult | null = state === 'NC' ? {
     code: 'OFFICIAL MAP REVIEW',
     description: 'The jurisdiction requires an interactive official-map review before a final district code can be confirmed',
     sourceUrl: reviewSource,
@@ -4731,7 +4740,7 @@ export async function fetchZoningViaWebSearch(
     jurisdiction: countyName ? `${countyBaseName(countyName)} County` : undefined,
     matchMethod: 'official-map-review',
     evidenceTier: 'reported',
-  };
+  } : null;
   const immediateFallback = officialGisFallback || statewideHintFallback || planningFallback || noAdoptedDistrictFallback || reviewFallback;
   if (!officialGisFallback && noAdoptedDistrictFallback) hints.onQuickResult?.(noAdoptedDistrictFallback);
 
@@ -4821,10 +4830,11 @@ The ordinance alone does not prove the parcel's district. For official methods, 
 
   // One direct Search API pass handles the common path. A single Crawlee pass
   // follows only when the first result still lacks a district or standards.
-  const maxRounds = 2;
+  const maxRounds = state === 'SC' ? 3 : 2;
   const zoningResearchStartedAt = Date.now();
   for (let round = 0; round < maxRounds; round++) {
-    if (round === 1 && Date.now() - zoningResearchStartedAt > 20000) break;
+    const elapsed = Date.now() - zoningResearchStartedAt;
+    if ((round === 1 && elapsed > 20000) || (round === 2 && elapsed > 32000)) break;
     const queries = zoningQueriesForRound({
       round,
       address,
@@ -4852,8 +4862,8 @@ The ordinance alone does not prove the parcel's district. For official methods, 
     const evidenceBlock = evidenceBlocks.join('').slice(-56000);
     const roundPrompt = `${researchPrompt}
 
-This is research round ${round + 1} of 2. ${candidateCode ? `Earlier evidence suggested "${candidateCode}"; verify it rather than assuming it.` : ''}
-${round < 1
+This is research round ${round + 1} of ${maxRounds}. ${candidateCode ? `Earlier evidence suggested "${candidateCode}"; verify it rather than assuming it.` : ''}
+${round < maxRounds - 1
   ? 'Prefer an official parcel assignment. If only listing evidence exists, return it with the correct listing matchMethod so the next round can seek official confirmation.'
   : 'This is the final pass. Return the strongest exact-address result: official first, two-provider listing corroboration second, or one clearly labeled exact-address listing report last.'}`;
     const draft = await zoningExpertViaGemini(
@@ -5986,7 +5996,7 @@ export async function fetchGoogleDistanceMatrixComps(
 ): Promise<CompRunResult> {
   onStageChange?.("Searching sold listings...");
 
-  if (!zoningVerified || !zoningCode || /^(n\/?a|unknown|official map review|land use:|no adopted district)/i.test(zoningCode.trim())) {
+  if (!zoningVerified || !zoningCode || /^(n\/?a|unknown|official map review|zoning code unresolved|land use:|no adopted district)/i.test(zoningCode.trim())) {
     return {
       comps: [],
       summary: 'RealtyAPI comp search was not run because the parcel does not yet have a source-backed zoning classification. This prevents residential, commercial, or multifamily records from being mixed under an assumed use category.',

@@ -33,7 +33,13 @@ export const handler = async (event) => {
     if (!entry || !Number.isFinite(lng) || !Number.isFinite(lat)) {
       return json(400, { success: false, error: 'A supported South Carolina county and coordinates are required' });
     }
-    const data = await resolveOfficialScZoning({ county: entry.county, lng, lat });
+    const data = await resolveOfficialScZoning({
+      county: entry.county,
+      lng,
+      lat,
+      address: String(body.address || '').slice(0, 300),
+      parcelId: String(body.parcelId || '').slice(0, 120),
+    });
     return json(200, { success: true, data, officialMapUrl: entry.officialMapUrl });
   } catch (error) {
     return json(502, { success: false, error: String(error?.message || error || 'Zoning lookup failed').slice(0, 300) });
