@@ -4283,7 +4283,7 @@ type ZoningResult = {
 };
 
 const GEMINI_ZONING_MODEL = 'gemini-3.5-flash';
-const ZONING_SYSTEM = "You are a persistent zoning research analyst. Use Google Search plus any supplied Perplexity and Crawlee evidence. Prefer official parcel GIS, official address results, and official parcel reports. If official assignment evidence is unavailable, an exact-address Zillow, Realtor, or Redfin record may be reported, and two independent matching listing providers may be corroborated. Never describe listing evidence as official. An ordinance alone cannot assign a parcel. Setbacks, dimensional standards, and restrictions require an adopted ordinance or official zoning-code URL. Return only the requested JSON and never fabricate.";
+const ZONING_SYSTEM = "You are a persistent zoning research analyst. Use Google Search plus the supplied Crawlee-extracted page and document evidence. Prefer official parcel GIS, official address results, and official parcel reports. If official assignment evidence is unavailable, an exact-address Zillow, Realtor, or Redfin record may be reported, and two independent matching listing providers may be corroborated. Never describe listing evidence as official. An ordinance alone cannot assign a parcel. Setbacks, dimensional standards, and restrictions require an adopted ordinance or official zoning-code URL. Return only the requested JSON and never fabricate.";
 
 function cleanEvidenceUrl(value: unknown): string | null {
   if (typeof value !== 'string' || !/^https?:\/\//i.test(value.trim())) return null;
@@ -4612,11 +4612,81 @@ function zoningQueriesForRound(input: {
   return [...new Set(rounds[Math.min(input.round, rounds.length - 1)].filter((query) => query.trim()))];
 }
 
-/** Per-round Perplexity + Crawlee budget for zoning research. Ranked results
- * front-load the useful sources, so a leaner crawl keeps the same official
- * hit rate while cutting the dominant per-round wait (the page crawl). */
-const ZONING_FAST_SEARCH_BUDGET = { maxResultsPerQuery: 5, maxSources: 12, mode: 'perplexity' } as const;
-const ZONING_HARD_FALLBACK_BUDGET = { maxResultsPerQuery: 5, maxSources: 14, maxScrapeTargets: 5, mode: 'hard' } as const;
+/** Per-round Crawlee budget for zoning research. The zoning section discovers
+ * source URLs with Google Search and treats the Crawlee scraper as the PRIMARY
+ * lookup (deep page + document extraction). Round 0 is lean; later rounds crawl
+ * wider. (Perplexity is not used for zoning — only for the other sections.) */
+const ZONING_DISCOVERY_MAX_URLS = 10;
+const ZONING_FAST_SEARCH_BUDGET = { maxScrapeTargets: 5, maxSources: 12 } as const;
+const ZONING_HARD_FALLBACK_BUDGET = { maxScrapeTargets: 6, maxSources: 14 } as const;
+
+/** Google Search URL discovery for the zoning section: one Gemini pass with the
+ * google_search grounding tool whose only job is to surface the canonical
+ * county/municipal GIS, parcel-viewer, ordinance, and exact-address listing
+ * pages for the queries. Returns the discovered page URLs (canonical URLs the
+ * model wrote out first — directly scrapeable — then grounding-redirect URLs as
+ * a backup) to hand to the Crawlee scraper. */
+async function googleSearchDiscoverUrls(queries: string[], geminiKey: string, maxUrls = ZONING_DISCOVERY_MAX_URLS): Promise<string[]> {
+  // Cap the queries per grounding call: google_search runs each sub-query, so a
+  // long list balloons latency and truncates the URL list at the token cap.
+  const qs = queries.map((q) => q.trim()).filter(Boolean).slice(0, 5);
+  if (!geminiKey || !qs.length) return [];
+  const prompt = `Use Google Search to find the web pages that answer these property-zoning lookups. Do NOT answer the questions — only search.\n${qs.map((q, i) => `${i + 1}. ${q}`).join('\n')}\nReply with ONLY the full canonical https URLs of the most relevant official county/municipal GIS, parcel-viewer, zoning-ordinance, and exact-address property pages — one URL per line, nothing else.`;
+  try {
+    const res = await queueGemini(() => fetchWithTimeout(
+      `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_ZONING_MODEL}:generateContent?key=${geminiKey}`,
+      18000,
+      {
+        method: 'POST',
+        cache: 'no-store',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ role: 'user', parts: [{ text: prompt }] }],
+          tools: [{ google_search: {} }],
+          // Enough headroom for a full URL list (each URL is token-heavy);
+          // MAX_TOKENS truncation drops trailing URLs but earlier ones are kept.
+          generationConfig: { maxOutputTokens: 1024 },
+        }),
+      },
+    ), 'high', 'primary');
+    if (!res.ok) return [];
+    const data = await res.json();
+    // Canonical URLs the model wrote out (directly scrapeable) first, then the
+    // grounding-redirect URLs the search tool attached as a backup set.
+    const urls = [...urlsInText(geminiResponseText(data)), ...geminiGroundingUrls(data)];
+    return [...new Set(urls)].slice(0, maxUrls);
+  } catch {
+    return [];
+  }
+}
+
+/** Zoning research pack — Google Search discovers the source URLs and the
+ * Crawlee scraper is the PRIMARY lookup, deep-extracting each page and any
+ * linked PDF/DOCX/XLSX ordinance or fee document. Perplexity is not used here.
+ * Returns block '' when no key / nothing extracted, so the caller falls back to
+ * Gemini's own Google Search grounding during synthesis. */
+async function zoningResearchViaGoogleCrawlee(
+  queries: string[],
+  geminiKey: string,
+  opts?: WebResearchOptions,
+): Promise<{ block: string; urls: string[] }> {
+  if (!geminiKey) return { block: '', urls: [] };
+  const discovered = await googleSearchDiscoverUrls(queries, geminiKey);
+  const seedUrls = [...new Set([...(opts?.seedUrls || []), ...discovered])];
+  if (!seedUrls.length) return { block: '', urls: [] };
+  // Crawlee is the primary extractor: it reads the official pages + linked docs.
+  const results = await crawleeScrapeBatch(seedUrls, queries, opts?.maxScrapeTargets);
+  if (results.length) {
+    return {
+      block: `\n\nLIVE ZONING RESEARCH (Google Search discovery + Crawlee page/document extraction — primary source). Base every figure on THESE extracted sources and cite their URLs in "sources"; do not invent anything beyond them:\n\n${formatCrawleeSources(results, opts?.maxSources ?? 24)}`,
+      urls: results.map((r) => r.url),
+    };
+  }
+  // Crawlee extracted nothing (endpoint unavailable or every page blocked) —
+  // still hand the Google-discovered URLs to the synthesizer so it can
+  // ground/verify them via its own Google Search tool.
+  return { block: '', urls: discovered };
+}
 
 interface ZoningLookupHints {
   code?: string | null;
@@ -4629,8 +4699,10 @@ interface ZoningLookupHints {
 }
 
 /** Gemini 3.5 Flash zoning resolver. A fresh official ArcGIS point result is
- * retained as the authoritative fallback; Gemini uses Google Search plus
- * optional Perplexity/Crawlee evidence to read the adopted standards. */
+ * retained as the authoritative fallback; for web research the zoning section
+ * uses Google Search to discover sources and the Crawlee scraper as the primary
+ * lookup, then Gemini reads the adopted district and standards from that
+ * extracted evidence (plus its own Google Search grounding). */
 export async function fetchZoningViaWebSearch(
   address: string,
   countyName?: string,
@@ -4640,7 +4712,6 @@ export async function fetchZoningViaWebSearch(
   hints: ZoningLookupHints = {},
 ): Promise<ZoningResult | null> {
   const geminiKey = (getUserKeys().gemini || '').trim();
-  const perplexityKey = getPerplexityKey();
   const state = countyName ? countyState(countyName) : 'NC';
   const county = countyBaseName(countyName || '');
   const noCountywideZoningSource = state === 'SC'
@@ -4661,9 +4732,10 @@ export async function fetchZoningViaWebSearch(
         return null;
       })
     : Promise.resolve(null);
-  const round0ResearchPromise = geminiKey && perplexityKey
-    ? incorporatedPlacePromise.then((municipality) => perplexityResearchBlock(
+  const round0ResearchPromise = geminiKey
+    ? incorporatedPlacePromise.then((municipality) => zoningResearchViaGoogleCrawlee(
         zoningQueriesForRound({ round: 0, address, parcelId, countyName, state, candidateCode: null, municipality }),
+        geminiKey,
         ZONING_FAST_SEARCH_BUDGET,
       )).catch(() => ({ block: '', urls: [] as string[] }))
     : Promise.resolve({ block: '', urls: [] as string[] });
@@ -4856,13 +4928,13 @@ The ordinance alone does not prove the parcel's district. For official methods, 
     });
     const research = round === 0
       ? await round0ResearchPromise
-      : perplexityKey
+      : geminiKey
         ? await Promise.race([
-            perplexityResearchBlock(queries, {
+            zoningResearchViaGoogleCrawlee(queries, geminiKey, {
               ...ZONING_HARD_FALLBACK_BUDGET,
               seedUrls: hints.officialMapUrl ? [hints.officialMapUrl] : [],
             }),
-            new Promise<{ block: string; urls: string[] }>((resolve) => setTimeout(() => resolve({ block: '', urls: [] }), 12000)),
+            new Promise<{ block: string; urls: string[] }>((resolve) => setTimeout(() => resolve({ block: '', urls: [] }), 14000)),
           ]).catch(() => ({ block: '', urls: [] as string[] }))
         : { block: '', urls: [] as string[] };
     if (research.block && research.urls.length > 0) {
