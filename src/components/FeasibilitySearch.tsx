@@ -4119,7 +4119,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                         {data.zoningVerificationStatus === 'official-gis'
                           ? 'VERIFIED: OFFICIAL GIS'
                           : data.zoningVerificationStatus === 'official-research'
-                            ? 'VERIFIED: OFFICIAL PARCEL SOURCE'
+                            ? 'VERIFIED: OFFICIAL JURISDICTION'
                             : data.zoningVerificationStatus === 'corroborated-research'
                               ? 'CORROBORATED: PROPERTY LISTINGS'
                               : data.zoningVerificationStatus === 'listing-research'

@@ -99,6 +99,11 @@ const NC_PARCEL_ENGINE = "https://services.gis.nc.gov/secure/rest/services/NC1Ma
 // down (they fail independently more often than together).
 const NC_PARCEL_ENGINE_MIRROR = "https://services.nconemap.gov/secure/rest/services/NC1Map_Parcels/MapServer/1/query";
 const SC_STATEWIDE_PARCEL_LAYER = "https://smpesri.scdot.org/arcgis/rest/services/GISMapping/SC_Parcels/MapServer/0";
+const SC_NO_COUNTYWIDE_ZONING_SOURCES: Partial<Record<(typeof SC_COUNTY_NAMES)[number], string>> = {
+  // Municipalities retain their own zoning. This source-backed fallback applies
+  // only after the Census place query confirms the parcel is unincorporated.
+  Union: 'https://library.municode.com/sc/union_county',
+};
 
 // Only the fields the app actually uses — requesting these instead of `*` keeps
 // the response small so the (sometimes overloaded) statewide server is far less
@@ -1504,19 +1509,19 @@ async function countyAtPoint(lat: number, lng: number): Promise<CountyAtPointRes
  * UNINCORPORATED county land — the strongest address-specific signal for whether
  * public water/sewer are likely available vs. well/septic territory.
  */
-async function incorporatedPlaceAtPoint(lat: number, lng: number): Promise<string | null> {
+async function incorporatedPlaceAtPoint(lat: number, lng: number): Promise<string | null | undefined> {
   try {
     const url = `https://tigerweb.geo.census.gov/arcgis/rest/services/TIGERweb/Places_CouSub_ConCity_SubMCD/MapServer/4/query` +
       `?geometry=${lng},${lat}&geometryType=esriGeometryPoint&inSR=4326&spatialRel=esriSpatialRelIntersects` +
       `&outFields=BASENAME,NAME&returnGeometry=false&f=json`;
     const res = await fetchWithTimeout(url, 9000, { cache: 'no-store' });
-    if (!res.ok) return null;
+    if (!res.ok) return undefined;
     const data = await res.json();
     const a = data?.features?.[0]?.attributes;
     if (!a) return null;
     const name = String(a.BASENAME || a.NAME || '').replace(/\s+(city|town|village)$/i, '').trim();
     return name || null;
-  } catch { return null; }
+  } catch { return undefined; }
 }
 
 export async function detectNcCounty(address: string, googleKey: string): Promise<string | null> {
@@ -2340,13 +2345,14 @@ export async function executeLandAnalysis(
     const sourceForZoningResult = (result: ZoningResult): SiteFeasibilityData['zoningSource'] => {
       if (result.matchMethod === 'parcel-gis') return 'county-gis';
       if (result.matchMethod === 'statewide-parcel') return 'statewide-gis';
-      if (result.matchMethod === 'official-map-review') return 'official-map';
+      if (result.matchMethod === 'official-map-review' || result.matchMethod === 'official-no-district') return 'official-map';
       return 'web';
     };
     const statusForZoningResult = (result: ZoningResult): SiteFeasibilityData['zoningVerificationStatus'] => {
       if (result.matchMethod === 'parcel-gis') return 'official-gis';
       if (result.matchMethod === 'statewide-parcel') return 'statewide-reported';
       if (result.matchMethod === 'planning-designation') return 'planning-designation';
+      if (result.matchMethod === 'official-no-district') return 'official-research';
       if (result.matchMethod === 'official-map-review') return 'review-required';
       if (result.evidenceTier === 'official') return 'official-research';
       if (result.evidenceTier === 'corroborated') return 'corroborated-research';
@@ -2356,6 +2362,7 @@ export async function executeLandAnalysis(
       if (result.matchMethod === 'parcel-gis') return 'official GIS point result';
       if (result.matchMethod === 'statewide-parcel') return 'statewide parcel snapshot';
       if (result.matchMethod === 'planning-designation') return 'official planning designation';
+      if (result.matchMethod === 'official-no-district') return 'official county code and unincorporated-place boundary';
       if (result.matchMethod === 'official-map-review') return 'official map link';
       if (result.evidenceTier === 'official') return 'official parcel source';
       if (result.evidenceTier === 'corroborated') return 'matching exact-address property listings';
@@ -2426,6 +2433,7 @@ export async function executeLandAnalysis(
       zoningSources = geminiZoning.sources;
       zoningVerificationStatus = statusForZoningResult(geminiZoning);
       if (geminiZoning.matchMethod === 'planning-designation'
+        || geminiZoning.matchMethod === 'official-no-district'
         || geminiZoning.matchMethod === 'official-map-review'
         || /^no adopted district$/i.test(geminiZoning.code)) {
         zoningStandardsStatus = 'unavailable';
@@ -4232,6 +4240,7 @@ type ZoningMatchMethod =
   | 'listing-address-result'
   | 'statewide-parcel'
   | 'planning-designation'
+  | 'official-no-district'
   | 'official-map-review';
 type ZoningEvidenceTier = 'official' | 'corroborated' | 'reported';
 type ZoningResearchStandards = Partial<ZoningStandards> & {
@@ -4611,6 +4620,10 @@ export async function fetchZoningViaWebSearch(
   const geminiKey = (getUserKeys().gemini || '').trim();
   const perplexityKey = getPerplexityKey();
   const state = countyName ? countyState(countyName) : 'NC';
+  const county = countyBaseName(countyName || '');
+  const noCountywideZoningSource = state === 'SC'
+    ? SC_NO_COUNTYWIDE_ZONING_SOURCES[county as (typeof SC_COUNTY_NAMES)[number]]
+    : undefined;
   // The official GIS point lookup and the first research round run CONCURRENTLY:
   // round-0 queries don't depend on the GIS result, so a slow county server
   // no longer stalls the whole stage serially before research even starts.
@@ -4626,6 +4639,13 @@ export async function fetchZoningViaWebSearch(
         ZONING_FAST_SEARCH_BUDGET,
       ).catch(() => ({ block: '', urls: [] as string[] }))
     : Promise.resolve({ block: '', urls: [] as string[] });
+  const incorporatedPlacePromise: Promise<string | null | undefined> = noCountywideZoningSource
+    && Number.isFinite(lat) && Number.isFinite(lng)
+    ? Promise.race([
+        incorporatedPlaceAtPoint(Number(lat), Number(lng)),
+        new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), 4500)),
+      ])
+    : Promise.resolve(undefined);
   const directGis = await Promise.race<ResolvedZoning | null>([
     directGisLookupPromise,
     new Promise<null>((resolve) => setTimeout(() => resolve(null), 6000)),
@@ -4676,6 +4696,22 @@ export async function fetchZoningViaWebSearch(
         evidenceTier: 'reported',
       }
     : null;
+  const incorporatedPlace = await incorporatedPlacePromise;
+  const noAdoptedDistrictFallback: ZoningResult | null = !officialGisFallback
+    && !statewideHintFallback
+    && !planningFallback
+    && noCountywideZoningSource
+    && incorporatedPlace === null
+    ? {
+        code: 'NO ADOPTED DISTRICT',
+        description: 'The point is outside incorporated municipal limits, and the current official county code does not establish county parcel zoning districts; other land-development rules still apply',
+        sourceUrl: noCountywideZoningSource,
+        sources: [noCountywideZoningSource],
+        jurisdiction: `Unincorporated ${county} County`,
+        matchMethod: 'official-no-district',
+        evidenceTier: 'official',
+      }
+    : null;
   const directoryUrl = state === 'SC'
     ? 'https://www.sciway.net/maps/sc-gis-county-maps.html'
     : 'https://www.nconemap.gov/';
@@ -4689,7 +4725,8 @@ export async function fetchZoningViaWebSearch(
     matchMethod: 'official-map-review',
     evidenceTier: 'reported',
   };
-  const immediateFallback = officialGisFallback || statewideHintFallback || planningFallback || reviewFallback;
+  const immediateFallback = officialGisFallback || statewideHintFallback || planningFallback || noAdoptedDistrictFallback || reviewFallback;
+  if (!officialGisFallback && noAdoptedDistrictFallback) hints.onQuickResult?.(noAdoptedDistrictFallback);
 
   if (!geminiKey) {
     console.warn('Gemini API key is not configured; returning the strongest source-backed zoning fallback.');
@@ -4746,7 +4783,7 @@ Also verify the CURRENT dimensional standards and return this expanded JSON shap
 
 The ordinance alone does not prove the parcel's district. For official methods, parcelSource must be an official parcel-specific result. Use corroborated-listings only when at least two independent Zillow/Realtor/Redfin exact-address pages show the same code. Use listing-address-result only as a final fallback when one exact-address listing explicitly publishes the code and no official result was found after every research round. If the official authority explicitly states that no zoning ordinance applies, return zoningCode "NO ADOPTED DISTRICT" with that official parcel or jurisdiction source. Every setback, allowance, setback note, permitted use, and restriction must be supported by an adopted ordinanceSource; use null or [] for missing values. Restrictions should summarize parcel-relevant limits such as conditional uses, accessory structures, buffers, parking, signs, overlays, and special street or corner-lot rules. Return canonical source URLs, not Google redirect URLs.${parcelLine}`;
 
-  const fallbackEvidence = officialGisFallback || statewideHintFallback || planningFallback;
+  const fallbackEvidence = officialGisFallback || statewideHintFallback || planningFallback || noAdoptedDistrictFallback;
   const evidenceBlocks: string[] = fallbackEvidence
     ? [`\n\n=== EXISTING PARCEL EVIDENCE ===\nClassification: ${fallbackEvidence.code}\nURL: ${fallbackEvidence.sourceUrl}`]
     : [];
@@ -4839,6 +4876,7 @@ ${round < 1
     || bestListingResult
     || statewideHintFallback
     || planningFallback
+    || noAdoptedDistrictFallback
     || reviewFallback;
 }
 
