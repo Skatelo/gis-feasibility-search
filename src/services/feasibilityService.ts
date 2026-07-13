@@ -302,6 +302,7 @@ interface WebResearchOptions {
   maxSources?: number;
   maxScrapeTargets?: number;
   mode?: WebResearchMode;
+  seedUrls?: string[];
 }
 
 const SCRAPE_HEAVY_QUERY_RE = /\b(ordinance|code\s+of\s+ordinances|zoning\s+(map|ordinance|district|lookup)|parcel\s+viewer|gis|planning\s+department|permit\s+fees?|fee\s+schedule|tap\s+fees?|impact\s+fees?|water\s+sewer|utilities|well\s+septic|minimum\s+lot|setbacks?|subdivision|rezoning|registered\s+agent|secretary\s+of\s+state|annual\s+report|bizapedia|corporationwiki|contractor|material\s+prices?|construction\s+costs?)\b/i;
@@ -348,7 +349,11 @@ function formatCrawleeSources(results: CrawleeResult[], maxSources = 24, maxSnip
 }
 
 async function crawleeResearchBlock(searchResults: PplxResult[], queries: string[], opts?: WebResearchOptions): Promise<{ block: string; urls: string[] }> {
-  const results = await crawleeScrapeBatch(searchResults.map((result) => result.url), queries, opts?.maxScrapeTargets);
+  const urls = [
+    ...(opts?.seedUrls || []),
+    ...searchResults.map((result) => result.url),
+  ];
+  const results = await crawleeScrapeBatch(urls, queries, opts?.maxScrapeTargets);
   if (!results.length) return { block: '', urls: [] };
   return {
     block: `\n\nLIVE WEB RESEARCH (Perplexity discovery + Crawlee page/document extraction). Base every figure on THESE extracted sources and cite their URLs in "sources"; do not invent anything beyond them:\n\n${formatCrawleeSources(results, opts?.maxSources ?? 24)}`,
@@ -471,11 +476,11 @@ function formatPplxSources(results: PplxResult[], maxSources = 24, maxSnippetCha
  *  grounding: many ranked sources with extracted content. '' = nothing found. */
 async function perplexityResearchBlock(queries: string[], opts?: WebResearchOptions): Promise<{ block: string; urls: string[] }> {
   const results = await perplexitySearchBatch(queries, { maxResultsPerQuery: opts?.maxResultsPerQuery ?? 6 });
-  if (!results.length) return { block: '', urls: [] };
   if (wantsCrawleeResearch(queries, opts)) {
     const crawled = await crawleeResearchBlock(results, queries, opts);
     if (crawled.block) return crawled;
   }
+  if (!results.length) return { block: '', urls: [] };
   return {
     block: `\n\nLIVE WEB SEARCH RESULTS (Perplexity Search API — ranked, current, with extracted page content). Base every figure on THESE sources and cite their URLs in "sources"; do not invent anything beyond them:\n\n${formatPplxSources(results, opts?.maxSources ?? 24)}`,
     urls: results.map((r) => r.url),
@@ -4545,15 +4550,17 @@ function zoningQueriesForRound(input: {
   countyName?: string;
   state: string;
   candidateCode?: string | null;
+  municipality?: string | null;
 }): string[] {
   const county = input.countyName ? `${countyBaseName(input.countyName)} County ${input.state}` : input.state;
+  const jurisdiction = input.municipality ? `${input.municipality} ${input.state}` : county;
   const parcel = input.parcelId && input.parcelId.toUpperCase() !== 'N/A' ? input.parcelId : '';
   const candidate = input.candidateCode ? ` "${input.candidateCode}"` : '';
   const rounds = [
     [
       `zoning district "${input.address}"${parcel ? ` parcel "${parcel}"` : ''}`,
       `"${input.address}" zoning GIS parcel viewer`,
-      `${county} official zoning map address search`,
+      `${jurisdiction} official zoning map address search`,
       `site:zillow.com OR site:realtor.com OR site:redfin.com "${input.address}" zoning`,
       `"${input.address}" "zoning" property`,
     ],
@@ -4563,13 +4570,13 @@ function zoningQueriesForRound(input: {
       parcel ? `"${parcel}" zoning ${county}` : `${county} parcel ID zoning search`,
       `${county} assessor property record zoning`,
       `${county} qPublic Beacon WTHGIS zoning`,
-      `${county} planning department zoning verification`,
-      `${county} zoning ordinance district${candidate} setbacks permitted uses restrictions`,
+      `${jurisdiction} planning department zoning verification`,
+      `${jurisdiction} zoning ordinance district${candidate} setbacks permitted uses restrictions`,
     ],
     [
-      `${county} official GIS identify zoning "${input.address}"${candidate}`,
-      `${county} zoning ordinance district${candidate} setbacks minimum lot permitted uses restrictions`,
-      `${county} municipal zoning map "${input.address}"`,
+      `${jurisdiction} official GIS identify zoning "${input.address}"${candidate}`,
+      `${jurisdiction} zoning ordinance district${candidate} setbacks minimum lot permitted uses restrictions`,
+      `${jurisdiction} municipal zoning map "${input.address}"`,
       parcel ? `${county} zoning map parcel "${parcel}"` : `${county} zoning map parcel search`,
       `site:arcgis.com ${county} zoning`,
       `"${input.address}" zoning official government GIS`,
@@ -4583,8 +4590,8 @@ function zoningQueriesForRound(input: {
       `${county} tax parcel report zoning field`,
       `${county} open data zoning polygons`,
       `site:zillow.com OR site:realtor.com OR site:redfin.com "${input.address}"`,
-      `${county} zoning administrator address lookup`,
-      `${county} adopted zoning map${candidate}`,
+      `${jurisdiction} zoning administrator address lookup`,
+      `${jurisdiction} adopted zoning map${candidate}`,
     ],
   ];
   return [...new Set(rounds[Math.min(input.round, rounds.length - 1)].filter((query) => query.trim()))];
@@ -4624,9 +4631,16 @@ export async function fetchZoningViaWebSearch(
   const noCountywideZoningSource = state === 'SC'
     ? SC_NO_COUNTYWIDE_ZONING_SOURCES[county as (typeof SC_COUNTY_NAMES)[number]]
     : undefined;
+  const incorporatedPlacePromise: Promise<string | null | undefined> = state === 'SC'
+    && Number.isFinite(lat) && Number.isFinite(lng)
+    ? Promise.race([
+        incorporatedPlaceAtPoint(Number(lat), Number(lng)),
+        new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), 4500)),
+      ])
+    : Promise.resolve(undefined);
   // The official GIS point lookup and the first research round run CONCURRENTLY:
-  // round-0 queries don't depend on the GIS result, so a slow county server
-  // no longer stalls the whole stage serially before research even starts.
+  // the research uses the Census place boundary so it searches the governing
+  // municipality rather than assuming every parcel is county-zoned.
   const directGisLookupPromise: Promise<ResolvedZoning | null> = countyName && Number.isFinite(lat) && Number.isFinite(lng)
     ? fetchCountyZoningCode(countyName, Number(lng), Number(lat)).catch((error) => {
         console.warn('Official zoning GIS point lookup failed:', error);
@@ -4634,21 +4648,14 @@ export async function fetchZoningViaWebSearch(
       })
     : Promise.resolve(null);
   const round0ResearchPromise = geminiKey && perplexityKey
-    ? perplexityResearchBlock(
-        zoningQueriesForRound({ round: 0, address, parcelId, countyName, state, candidateCode: null }),
+    ? incorporatedPlacePromise.then((municipality) => perplexityResearchBlock(
+        zoningQueriesForRound({ round: 0, address, parcelId, countyName, state, candidateCode: null, municipality }),
         ZONING_FAST_SEARCH_BUDGET,
-      ).catch(() => ({ block: '', urls: [] as string[] }))
+      )).catch(() => ({ block: '', urls: [] as string[] }))
     : Promise.resolve({ block: '', urls: [] as string[] });
-  const incorporatedPlacePromise: Promise<string | null | undefined> = noCountywideZoningSource
-    && Number.isFinite(lat) && Number.isFinite(lng)
-    ? Promise.race([
-        incorporatedPlaceAtPoint(Number(lat), Number(lng)),
-        new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), 4500)),
-      ])
-    : Promise.resolve(undefined);
   const directGis = await Promise.race<ResolvedZoning | null>([
     directGisLookupPromise,
-    new Promise<null>((resolve) => setTimeout(() => resolve(null), 6000)),
+    new Promise<null>((resolve) => setTimeout(() => resolve(null), 12000)),
   ]);
   const registeredGisUrl = directGis?.sourceUrl || (countyName ? getZoningServices(countyName)[0]?.url : undefined);
   const gisHint = hints.code && !/^(n\/?a|unknown|null)$/i.test(hints.code.trim()) ? hints.code.trim() : '';
@@ -4735,7 +4742,11 @@ export async function fetchZoningViaWebSearch(
 
   const stateFull = state === 'SC' ? 'South Carolina' : 'North Carolina';
 
-  const countyLine = countyName ? ` It is in ${countyBaseName(countyName)} County, ${stateFull}.` : '';
+  const jurisdictionLine = incorporatedPlace
+    ? ` It is inside the incorporated limits of ${incorporatedPlace}, ${stateFull}, in ${county} County.`
+    : incorporatedPlace === null
+      ? ` It is in unincorporated ${county} County, ${stateFull}.`
+      : countyName ? ` It is in ${countyBaseName(countyName)} County, ${stateFull}.` : '';
   const coordLine = (lat != null && lng != null) ? ` The parcel is at coordinates ${lat.toFixed(6)}, ${lng.toFixed(6)}.` : '';
   const parcelLine = parcelId && parcelId.toUpperCase() !== 'N/A' ? ` The parcel ID is "${parcelId}".` : '';
   const authoritativeHint = directGis?.code || (hints.codeConfidence === 'official' ? gisHint : '');
@@ -4745,7 +4756,7 @@ export async function fetchZoningViaWebSearch(
   const statewideHintLine = !authoritativeHint && statewideHintFallback
     ? `\nA statewide parcel snapshot reports "${statewideHintFallback.code}". Treat it only as a candidate and replace it with a current county or municipal source whenever possible.`
     : '';
-  const lookupPrompt = `Find the ZONING DISTRICT for this exact property: "${address}".${countyLine}${coordLine}${hintLine}
+  const lookupPrompt = `Find the ZONING DISTRICT for this exact property: "${address}".${jurisdictionLine}${coordLine}${hintLine}
 ${statewideHintLine}
 Search in this order: (1) county/municipal GIS or parcel report, (2) assessor/planning address result, (3) Zillow, Realtor, and Redfin exact-address property records. Check whether city or county zoning has jurisdiction. Listing records are candidates, not official records.
 Return ONLY a JSON object inside a markdown code block:
@@ -4788,6 +4799,10 @@ The ordinance alone does not prove the parcel's district. For official methods, 
     ? [`\n\n=== EXISTING PARCEL EVIDENCE ===\nClassification: ${fallbackEvidence.code}\nURL: ${fallbackEvidence.sourceUrl}`]
     : [];
   const evidenceUrls: string[] = fallbackEvidence ? [fallbackEvidence.sourceUrl] : [];
+  if (hints.officialMapUrl && !evidenceUrls.includes(hints.officialMapUrl)) {
+    evidenceUrls.push(hints.officialMapUrl);
+    evidenceBlocks.push(`\n\n=== OFFICIAL COUNTY GIS ENTRY POINT ===\nURL: ${hints.officialMapUrl}`);
+  }
   let candidateCode = officialGisFallback?.code || statewideHintFallback?.code || authoritativeHint || null;
   let bestOfficialResult: ZoningResult | null = null;
   let bestListingResult: ZoningResult | null = null;
@@ -4817,12 +4832,16 @@ The ordinance alone does not prove the parcel's district. For official methods, 
       countyName,
       state,
       candidateCode,
+      municipality: incorporatedPlace,
     });
     const research = round === 0
       ? await round0ResearchPromise
       : perplexityKey
         ? await Promise.race([
-            perplexityResearchBlock(queries, ZONING_HARD_FALLBACK_BUDGET),
+            perplexityResearchBlock(queries, {
+              ...ZONING_HARD_FALLBACK_BUDGET,
+              seedUrls: hints.officialMapUrl ? [hints.officialMapUrl] : [],
+            }),
             new Promise<{ block: string; urls: string[] }>((resolve) => setTimeout(() => resolve({ block: '', urls: [] }), 12000)),
           ]).catch(() => ({ block: '', urls: [] as string[] }))
         : { block: '', urls: [] as string[] };

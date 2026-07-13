@@ -272,6 +272,15 @@ const SC_ZONING_OVERRIDES: Record<string, CountyZoningConfig> = {
     zoning_field_mapping: "ZoningDistrict", description_field: null, zoning_layers: "show:0",
     zoning_query_field: "ZoningDistrict", zoning_renderable: F, use_state_fallback: F,
   },
+  "spartanburg,_sc": {
+    county_id: "083", name: "Spartanburg, SC", lat: 34.9506, lng: -81.9320,
+    // Official county IZM service. The adopted zoning polygons cover the
+    // county's zoned planning area; municipal addresses continue through the
+    // incorporated-place portal discovery path when this layer has no hit.
+    zoning_mapserver_url: "https://maps.spartanburgcounty.org/server/rest/services/IZM_Districts/MapServer",
+    zoning_field_mapping: "District", description_field: null, zoning_layers: "show:3",
+    zoning_query_field: "District", use_state_fallback: F,
+  },
   "york,_sc": {
     county_id: "091", name: "York, SC", lat: 34.9740, lng: -81.1848,
     zoning_mapserver_url: "https://services1.arcgis.com/2AGLxyiJoNiVHKwq/arcgis/rest/services/York%20County%20Zoning%20(regions)/FeatureServer",
@@ -540,6 +549,28 @@ async function queryZoningAtPoint(service: ZoningService, lng: number, lat: numb
   return null;
 }
 
+async function discoverScZoningAtPoint(countyName: string, lng: number, lat: number): Promise<ResolvedZoning | null> {
+  if (!/,\s*sc\s*$/i.test(countyName)) return null;
+  try {
+    const response = await fetch('/.netlify/functions/sc-zoning', {
+      method: 'POST',
+      cache: 'no-store',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify({ county: countyName, lng, lat }),
+    });
+    if (!response.ok) return null;
+    const payload = await response.json();
+    const code = cleanZoningValue(payload?.data?.code);
+    if (!code || isPlaceholderCode(code, null)) return null;
+    const description = cleanZoningValue(payload?.data?.description);
+    const sourceUrl = typeof payload?.data?.sourceUrl === 'string' ? payload.data.sourceUrl : undefined;
+    return { code, description, sourceUrl };
+  } catch (e) {
+    console.warn(`Official SC zoning portal discovery failed for ${countyName}:`, e);
+    return null;
+  }
+}
+
 /**
  * Resolves the real zoning code/description at a WGS84 point for a county by
  * trying each of its zoning services (primary + extras) in order, returning the
@@ -552,12 +583,23 @@ export async function fetchCountyZoningCode(
   lat: number,
 ): Promise<ResolvedZoning | null> {
   const services = getZoningServices(countyName);
-  // County and municipal layers are independent. Query them together so an
-  // address inside a town does not wait for every preceding county-layer miss.
-  const hits = await Promise.all(services.map(async (service) => {
+  // County, municipal, and dynamically discovered official layers are
+  // independent. The first real district wins; null results reject only inside
+  // Promise.any so one slow county service cannot block a faster municipal hit.
+  const candidates: Promise<ResolvedZoning | null>[] = services.map(async (service) => {
     return service.query_field
       ? await queryZoningAtPoint(service, lng, lat)
       : await identifyZoning(service, lng, lat);
-  }));
-  return hits.find((hit): hit is ResolvedZoning => !!hit) || null;
+  });
+  if (/,\s*sc\s*$/i.test(countyName)) candidates.push(discoverScZoningAtPoint(countyName, lng, lat));
+  if (!candidates.length) return null;
+  try {
+    return await Promise.any(candidates.map(async (candidate) => {
+      const hit = await candidate;
+      if (!hit) throw new Error('No zoning district at point');
+      return hit;
+    }));
+  } catch {
+    return null;
+  }
 }
