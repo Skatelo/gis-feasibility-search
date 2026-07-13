@@ -2448,22 +2448,15 @@ export async function executeLandAnalysis(
       } else {
         applyResearchStandards(geminiZoning);
       }
-    } else if (selectedState === 'SC') {
+    } else {
       zoningCode = 'ZONING CODE UNRESOLVED';
       zoningDescription = 'The official county and municipal sources did not return a source-backed district code for this parcel';
       zoningSource = 'official-map';
-      zoningSourceUrl = officialMapUrl || 'https://www.sciway.net/maps/sc-gis-county-maps.html';
+      zoningSourceUrl = officialMapUrl || (selectedState === 'SC'
+        ? 'https://www.sciway.net/maps/sc-gis-county-maps.html'
+        : 'https://www.nconemap.gov/');
       zoningSources = [zoningSourceUrl];
       zoningVerificationStatus = 'unavailable';
-      zoningStandardsStatus = 'unavailable';
-      zoningSetbacksStatus = 'unavailable';
-    } else {
-      zoningCode = 'OFFICIAL MAP REVIEW';
-      zoningDescription = 'Use the cited jurisdiction map to confirm the final district code for this parcel';
-      zoningSource = 'official-map';
-      zoningSourceUrl = officialMapUrl || 'https://www.nconemap.gov/';
-      zoningSources = [zoningSourceUrl];
-      zoningVerificationStatus = 'review-required';
       zoningStandardsStatus = 'unavailable';
       zoningSetbacksStatus = 'unavailable';
     }
@@ -4642,8 +4635,7 @@ export async function fetchZoningViaWebSearch(
   const noCountywideZoningSource = state === 'SC'
     ? SC_NO_COUNTYWIDE_ZONING_SOURCES[county as (typeof SC_COUNTY_NAMES)[number]]
     : undefined;
-  const incorporatedPlacePromise: Promise<string | null | undefined> = state === 'SC'
-    && Number.isFinite(lat) && Number.isFinite(lng)
+  const incorporatedPlacePromise: Promise<string | null | undefined> = Number.isFinite(lat) && Number.isFinite(lng)
     ? Promise.race([
         incorporatedPlaceAtPoint(Number(lat), Number(lng)),
         new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), 4500)),
@@ -4666,7 +4658,7 @@ export async function fetchZoningViaWebSearch(
     : Promise.resolve({ block: '', urls: [] as string[] });
   const directGis = await Promise.race<ResolvedZoning | null>([
     directGisLookupPromise,
-    new Promise<null>((resolve) => setTimeout(() => resolve(null), 12000)),
+    new Promise<null>((resolve) => setTimeout(() => resolve(null), state === 'NC' ? 18000 : 12000)),
   ]);
   const registeredGisUrl = directGis?.sourceUrl || (countyName ? getZoningServices(countyName)[0]?.url : undefined);
   const gisHint = hints.code && !/^(n\/?a|unknown|null)$/i.test(hints.code.trim()) ? hints.code.trim() : '';
@@ -4730,20 +4722,7 @@ export async function fetchZoningViaWebSearch(
         evidenceTier: 'official',
       }
     : null;
-  const directoryUrl = state === 'SC'
-    ? 'https://www.sciway.net/maps/sc-gis-county-maps.html'
-    : 'https://www.nconemap.gov/';
-  const reviewSource = hints.officialMapUrl || registeredGisUrl || hints.codeSourceUrl || hints.landUseSourceUrl || directoryUrl;
-  const reviewFallback: ZoningResult | null = state === 'NC' ? {
-    code: 'OFFICIAL MAP REVIEW',
-    description: 'The jurisdiction requires an interactive official-map review before a final district code can be confirmed',
-    sourceUrl: reviewSource,
-    sources: [reviewSource],
-    jurisdiction: countyName ? `${countyBaseName(countyName)} County` : undefined,
-    matchMethod: 'official-map-review',
-    evidenceTier: 'reported',
-  } : null;
-  const immediateFallback = officialGisFallback || statewideHintFallback || planningFallback || noAdoptedDistrictFallback || reviewFallback;
+  const immediateFallback = officialGisFallback || statewideHintFallback || planningFallback || noAdoptedDistrictFallback;
   if (!officialGisFallback && noAdoptedDistrictFallback) hints.onQuickResult?.(noAdoptedDistrictFallback);
 
   if (!geminiKey) {
@@ -4830,9 +4809,10 @@ The ordinance alone does not prove the parcel's district. For official methods, 
       + (Number.isFinite(Number(standards.minimumLotAreaSqft)) ? 1 : 0);
   };
 
-  // One direct Search API pass handles the common path. A single Crawlee pass
-  // follows only when the first result still lacks a district or standards.
-  const maxRounds = state === 'SC' ? 3 : 2;
+  // The official point resolver handles the common path. Up to three research
+  // rounds remain available for county portals, municipal layers, and adopted
+  // standards when the registered service does not expose a district directly.
+  const maxRounds = 3;
   const zoningResearchStartedAt = Date.now();
   for (let round = 0; round < maxRounds; round++) {
     const elapsed = Date.now() - zoningResearchStartedAt;
@@ -4907,8 +4887,7 @@ ${round < maxRounds - 1
     || bestListingResult
     || statewideHintFallback
     || planningFallback
-    || noAdoptedDistrictFallback
-    || reviewFallback;
+    || noAdoptedDistrictFallback;
 }
 
 /**
