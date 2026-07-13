@@ -2,7 +2,8 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import ts from 'typescript';
-import { resolveOfficialScZoning } from './sc-zoning-discovery.js';
+import { resolveOfficialNcZoning, resolveOfficialScZoning } from './sc-zoning-discovery.js';
+import { NC_ZONING_COUNTIES } from './nc-zoning-manifest.js';
 import { SC_ZONING_COVERAGE } from './sc-zoning-manifest.js';
 
 const source = await readFile(new URL('../../../src/data/ncZoning.ts', import.meta.url), 'utf8');
@@ -59,6 +60,14 @@ test('South Carolina zoning routing manifest covers all 46 counties', () => {
       'Saluda', 'Spartanburg', 'Sumter', 'Union', 'Williamsburg', 'York',
     ].sort(),
   );
+});
+
+test('North Carolina zoning routing manifest covers all 100 counties', () => {
+  assert.equal(NC_ZONING_COUNTIES.length, 100);
+  assert.equal(new Set(NC_ZONING_COUNTIES).size, 100);
+  assert.ok(NC_ZONING_COUNTIES.includes('Wake'));
+  assert.ok(NC_ZONING_COUNTIES.includes('New Hanover'));
+  assert.ok(NC_ZONING_COUNTIES.includes('Yancey'));
 });
 
 test('official ArcGIS app discovery resolves a base zoning district at the parcel point', async () => {
@@ -144,6 +153,83 @@ test('incorporated SC parcels discover zoning only from a matching official muni
   assert.ok(!requests.some((request) => request.url.includes('22222222222222222222222222222222')));
   assert.ok(requests.some((request) => request.url.includes(`/content/items/${itemId}?`)), 'item metadata supplies the missing organization id');
   assert.ok(requests.every((request) => request.options.cache === 'no-store'));
+});
+
+test('incorporated NC parcels resolve a district from the official municipal ArcGIS catalog', async () => {
+  const requests = [];
+  const itemId = '55555555555555555555555555555555';
+  const derivedItemId = '66666666666666666666666666666666';
+  const service = 'https://maps.raleighnc.gov/arcgis/rest/services/Planning/Zoning/MapServer';
+  const json = (body) => new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
+  const fetcher = async (value, options = {}) => {
+    const url = String(value);
+    requests.push({ url, options });
+    if (url.includes('Places_CouSub_ConCity_SubMCD')) {
+      return json({ features: [{ attributes: { BASENAME: 'Raleigh' } }] });
+    }
+    if (url.includes('/sharing/rest/search?')) {
+      return json({ results: [
+        { id: derivedItemId, title: 'Zoning districts within a heat analysis area', type: 'Feature Service', owner: 'RaleighGIS', tags: ['zoning'] },
+        { id: itemId, title: 'City of Raleigh Zoning Map', type: 'Web Map', owner: 'RaleighGIS', tags: ['zoning'] },
+      ] });
+    }
+    if (url.includes('/portals/raleigh-org?')) return json({ name: 'City of Raleigh, North Carolina', urlKey: 'raleigh' });
+    if (url.includes(`/content/items/${itemId}/data`)) return json({ operationalLayers: [{ title: 'Zoning districts', url: service }] });
+    if (url.includes(`/content/items/${itemId}?`)) return json({ id: itemId, owner: 'RaleighGIS', orgId: 'raleigh-org', tags: ['zoning'] });
+    if (url === `${service}?f=json`) return json({ layers: [{ id: 0, name: 'Zoning Districts' }] });
+    if (url === `${service}/0?f=json`) return json({ fields: [
+      { name: 'UDO', alias: 'Current zoning code' },
+      { name: 'ZONE_GEN', alias: 'Zoning description' },
+    ] });
+    if (url.startsWith(`${service}/0/query?`)) {
+      return json({ features: [{ attributes: { UDO: 'R-10', ZONE_GEN: 'Residential-10' } }] });
+    }
+    return json({});
+  };
+
+  const result = await resolveOfficialNcZoning({ county: 'Wake', lng: -78.6382, lat: 35.7796, fetcher });
+  assert.equal(result.code, 'R-10');
+  assert.equal(result.description, 'Residential-10');
+  assert.equal(result.jurisdiction, 'Raleigh');
+  assert.equal(result.discovery, 'official-arcgis-catalog');
+  assert.match(result.sourceUrl, /Planning\/Zoning\/MapServer\/0$/);
+  assert.ok(requests.some((request) => request.url.includes('%22Raleigh%22%20AND%20zoning')));
+  assert.ok(!requests.some((request) => request.url.includes(derivedItemId)));
+  assert.ok(requests.every((request) => request.options.cache === 'no-store'));
+});
+
+test('NC counties without a static service use the fresh server-side point resolver', async () => {
+  const originalFetch = globalThis.fetch;
+  const requests = [];
+  globalThis.fetch = async (url, options = {}) => {
+    requests.push({ url: String(url), options });
+    return new Response(JSON.stringify({
+      success: true,
+      data: {
+        code: 'R-15',
+        description: 'Residential district',
+        sourceUrl: 'https://official.example.gov/arcgis/rest/services/Zoning/MapServer/0',
+        jurisdiction: 'Burlington',
+      },
+    }), { status: 200, headers: { 'content-type': 'application/json' } });
+  };
+  try {
+    const result = await zoning.fetchCountyZoningCode(
+      'Alamance, NC',
+      -79.4378,
+      36.0957,
+      { address: '100 Example St, Burlington, NC', parcelId: '12345' },
+    );
+    assert.equal(result.code, 'R-15');
+    assert.equal(result.jurisdiction, 'Burlington');
+    assert.equal(requests.length, 1);
+    assert.equal(requests[0].url, '/.netlify/functions/nc-zoning');
+    assert.equal(requests[0].options.method, 'POST');
+    assert.equal(requests[0].options.cache, 'no-store');
+    assert.match(requests[0].options.body, /100 Example St/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test('non-ArcGIS county portals fall back to a publisher-verified ArcGIS catalog item', async () => {
@@ -360,13 +446,13 @@ test('zoning uses official GIS first and grounded Gemini 3.5 Flash for research'
   assert.match(resolver, /fetchCountyZoningCode/);
   assert.match(serviceSource, /const GEMINI_ZONING_MODEL = 'gemini-3\.5-flash'/);
   assert.match(serviceSource, /tools: \[\{ google_search: \{\} \}\]/);
-  assert.match(resolver, /return bestOfficialResult[\s\S]*officialGisFallback[\s\S]*bestListingResult[\s\S]*statewideHintFallback[\s\S]*planningFallback[\s\S]*reviewFallback/);
+  assert.match(resolver, /return bestOfficialResult[\s\S]*officialGisFallback[\s\S]*bestListingResult[\s\S]*statewideHintFallback[\s\S]*planningFallback[\s\S]*noAdoptedDistrictFallback/);
   assert.match(resolver, /completeSetbacks[\s\S]*standards\?\.restrictions/);
   assert.match(serviceSource, /ZONING_FAST_SEARCH_BUDGET[\s\S]*mode: 'perplexity'/);
   assert.match(serviceSource, /ZONING_HARD_FALLBACK_BUDGET[\s\S]*mode: 'hard'/);
-  assert.match(resolver, /const maxRounds = state === 'SC' \? 3 : 2/);
+  assert.match(resolver, /const maxRounds = 3/);
   assert.match(resolver, /zoningResearchStartedAt[\s\S]*elapsed > 20000[\s\S]*elapsed > 32000/);
-  assert.match(resolver, /setTimeout\(\(\) => resolve\(null\), 12000\)/);
+  assert.match(resolver, /state === 'NC' \? 18000 : 12000/);
   assert.match(resolver, /onQuickResult/);
   assert.match(resolver, /zoningQueriesForRound/);
   assert.match(resolver, /municipality: incorporatedPlace/);
@@ -377,8 +463,8 @@ test('zoning uses official GIS first and grounded Gemini 3.5 Flash for research'
   assert.match(resolver, /noAdoptedDistrictFallback/);
   assert.match(serviceSource, /SC_NO_COUNTYWIDE_ZONING_SOURCES[\s\S]*Union:[\s\S]*library\.municode\.com\/sc\/union_county/);
   assert.match(resolver, /incorporatedPlaceAtPoint[\s\S]*code: 'NO ADOPTED DISTRICT'/);
-  assert.match(resolver, /reviewFallback[\s\S]*state === 'NC'[\s\S]*code: 'OFFICIAL MAP REVIEW'/);
-  assert.match(stage, /selectedState === 'SC'[\s\S]*zoningCode = 'ZONING CODE UNRESOLVED'/);
+  assert.doesNotMatch(resolver, /code: 'OFFICIAL MAP REVIEW'/);
+  assert.match(stage, /zoningCode = 'ZONING CODE UNRESOLVED'/);
   assert.match(serviceSource, /site:zillow\.com[\s\S]*site:realtor\.com[\s\S]*site:redfin\.com/);
   assert.doesNotMatch(resolver, /zoningExpertViaDeepSeek|deepSeekKey|model: 'sonar'/);
   assert.doesNotMatch(serviceSource, /NOT PUBLISHED|"UNZONED"/);

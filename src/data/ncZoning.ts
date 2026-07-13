@@ -622,15 +622,15 @@ async function queryZoningAtPoint(service: ZoningService, lng: number, lat: numb
   return null;
 }
 
-async function discoverScZoningAtPoint(
+async function discoverServerZoningAtPoint(
+  state: 'NC' | 'SC',
   countyName: string,
   lng: number,
   lat: number,
   context: { address?: string; parcelId?: string } = {},
 ): Promise<ResolvedZoning | null> {
-  if (!/,\s*sc\s*$/i.test(countyName)) return null;
   try {
-    const response = await fetch('/.netlify/functions/sc-zoning', {
+    const response = await fetch(`/.netlify/functions/${state.toLowerCase()}-zoning`, {
       method: 'POST',
       cache: 'no-store',
       headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
@@ -646,9 +646,27 @@ async function discoverScZoningAtPoint(
     const resolution = /^no adopted district$/i.test(code) ? 'no-district' : 'district';
     return { code, description, sourceUrl, jurisdiction, resolution };
   } catch (e) {
-    console.warn(`Official SC zoning portal discovery failed for ${countyName}:`, e);
+    console.warn(`Official ${state} zoning portal discovery failed for ${countyName}:`, e);
     return null;
   }
+}
+
+function discoverScZoningAtPoint(
+  countyName: string,
+  lng: number,
+  lat: number,
+  context: { address?: string; parcelId?: string } = {},
+) {
+  return discoverServerZoningAtPoint('SC', countyName, lng, lat, context);
+}
+
+function discoverNcZoningAtPoint(
+  countyName: string,
+  lng: number,
+  lat: number,
+  context: { address?: string; parcelId?: string } = {},
+) {
+  return discoverServerZoningAtPoint('NC', countyName, lng, lat, context);
 }
 
 /**
@@ -672,7 +690,11 @@ export async function fetchCountyZoningCode(
       ? await queryZoningAtPoint(service, lng, lat)
       : await identifyZoning(service, lng, lat);
   });
-  if (/,\s*sc\s*$/i.test(countyName)) candidates.push(discoverScZoningAtPoint(countyName, lng, lat, context));
+  const config = getZoningConfig(countyName);
+  const isSouthCarolina = /,\s*sc\s*$/i.test(countyName) || /,\s*SC$/i.test(config?.name || '');
+  candidates.push(isSouthCarolina
+    ? discoverScZoningAtPoint(countyName, lng, lat, context)
+    : discoverNcZoningAtPoint(countyName, lng, lat, context));
   if (!candidates.length) return null;
   try {
     return await Promise.any(candidates.map(async (candidate) => {

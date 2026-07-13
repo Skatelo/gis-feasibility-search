@@ -3,11 +3,11 @@ import { scZoningCoverage } from './sc-zoning-manifest.js';
 const ITEM_ID_RE = /^[a-f0-9]{32}$/i;
 const SERVICE_URL_RE = /https?:\\?\/\\?\/[^"'<>\s]+?(?:MapServer|FeatureServer)(?:\/\d+)?/gi;
 const BASE_ZONING_RE = /\b(zoning|zone class|zoning district|base district)\b/i;
-const EXCLUDED_LAYER_RE = /\b(future|proposed|rezon(?:e|ing)|case|request|overlay|historic|flood|school|tax|assessment|land use|comprehensive plan|enterprise|opportunity|evacuation|wind)\b/i;
-const CODE_KEY_RE = /^(?:zoning|zone|zone_?class|zone_?code|zoning_?district|zoning_?code|zclass|zcode|zdist|newzone|code)$/i;
+const EXCLUDED_LAYER_RE = /\b(future|proposed|draft|original|rezon(?:e|ing)|case|request|overlay|historic|flood|school|tax|assessment|land use|comprehensive plan|enterprise|opportunity|evacuation|wind|summar(?:y|ize)|comparison|footprint|construction|enforcement|subdistrict|canvass|lowest|cool down)\b/i;
+const CODE_KEY_RE = /^(?:zoning|zone|zone_?class|zone_?code|zoning_?district|zoning_?code|zclass|zcode|zdist|newzone|udo(?:_?label)?|code)$/i;
 const LOOSE_CODE_KEY_RE = /zon|^zn|district|^class$|^code$/i;
 const EXCLUDED_KEY_RE = /desc|name|jur|muni|city|county|town|date|case|owner|area|shape|objectid|globalid|url|link|land.?use/i;
-const DESCRIPTION_KEY_RE = /desc|definition|decode|long.?name|^(?:code|giscode|zoning|zone|district)_?name$|^name$/i;
+const DESCRIPTION_KEY_RE = /desc|definition|decode|long.?name|zone_?gen|udo_?legend|^(?:code|giscode|zoning|zone|district)_?name$|^name$/i;
 const PLACEHOLDER_RE = /^(?:city|county|etj|none|n\/?a|mun\.?|muni|municipal|municipality|split|unknown|not applicable)$/i;
 
 const isBaseZoningName = (value) => BASE_ZONING_RE.test(String(value || '').replace(/[_-]+/g, ' '));
@@ -169,14 +169,23 @@ function compactName(value) {
 const PUBLIC_ARCGIS_ROOT = 'https://www.arcgis.com/sharing/rest';
 const PUBLIC_ITEM_TYPE_RE = /^(?:Feature Service|Map Service|Web Map|Web Mapping Application|Web Experience|Experience Builder|Hub Site Application)$/i;
 
-async function verifiedArcgisCatalogItemIds(jurisdiction, county, fetcher) {
+async function verifiedArcgisCatalogItemIds(
+  jurisdiction,
+  county,
+  fetcher,
+  jurisdictionKind = 'municipality',
+) {
   if (!jurisdiction) return [];
-  const isCounty = compactName(jurisdiction) === compactName(county);
+  const isCounty = jurisdictionKind === 'county';
   const subject = isCounty ? `"${county} County"` : `"${jurisdiction}"`;
-  const query = encodeURIComponent(`${subject} South Carolina zoning`);
+  // ArcGIS full-text search treats a loose state name as an OR-like term and
+  // can crowd the actual local zoning item out of the first page. The exact
+  // jurisdiction plus AND zoning is both faster and more precise; publisher
+  // verification and the point intersection provide state-level safety.
+  const query = encodeURIComponent(`${subject} AND zoning`);
   const search = await request(`${PUBLIC_ARCGIS_ROOT}/search?f=json&num=50&sortField=modified&sortOrder=desc&q=${query}`, fetcher);
   const jurisdictionToken = compactName(jurisdiction);
-  const publisherTokens = dedupe([jurisdictionToken, compactName(county)]).filter((token) => token.length >= 3);
+  const publisherTokens = [jurisdictionToken].filter((token) => token.length >= 3);
   const candidates = (Array.isArray(search?.results) ? search.results : [])
     .filter((item) => PUBLIC_ITEM_TYPE_RE.test(String(item?.type || '')))
     .filter((item) => !isExcludedLayerName(item?.title))
@@ -188,10 +197,15 @@ async function verifiedArcgisCatalogItemIds(jurisdiction, county, fetcher) {
     const orgId = item?.orgId || searchItem?.orgId;
     const portal = orgId ? await request(`${PUBLIC_ARCGIS_ROOT}/portals/${orgId}?f=json`, fetcher) : null;
     const context = compactName(`${item?.title || searchItem?.title || ''} ${item?.tags || searchItem?.tags || ''} ${item?.description || searchItem?.description || ''}`);
-    const publisher = compactName(`${item?.owner || searchItem?.owner || ''} ${portal?.name || ''} ${portal?.urlKey || ''} ${portal?.description || ''}`);
+    const owner = compactName(item?.owner || searchItem?.owner || '');
+    const organization = compactName(`${portal?.name || ''} ${portal?.urlKey || ''} ${portal?.description || ''}`);
+    let serviceHost = '';
+    try { serviceHost = compactName(new URL(item?.url || searchItem?.url || '').hostname); } catch { /* item has no direct URL */ }
     const contextMatches = jurisdictionToken.length >= 3 && context.includes(jurisdictionToken);
-    const publisherMatches = publisherTokens.some((token) => publisher.includes(token));
-    return contextMatches && publisherMatches && ITEM_ID_RE.test(String(searchItem?.id)) ? searchItem.id : null;
+    const publisherMatches = publisherTokens.some((token) => owner.includes(token) || organization.includes(token));
+    const officialPublisher = publisherTokens.some((token) => organization.includes(token) || serviceHost.includes(token));
+    return publisherMatches && officialPublisher && (contextMatches || isBaseZoningName(context))
+      && ITEM_ID_RE.test(String(searchItem?.id)) ? searchItem.id : null;
   }));
   return dedupe(verified.filter(Boolean));
 }
@@ -212,9 +226,19 @@ async function servicesFromPublicItems(itemIds, fetcher) {
   return services;
 }
 
-export async function discoverOfficialMunicipalServices(municipality, county, fetcher = fetch) {
+export async function discoverOfficialMunicipalServices(
+  municipality,
+  county,
+  fetcher = fetch,
+  jurisdictionKind = 'municipality',
+) {
   if (!municipality) return [];
-  const itemIds = await verifiedArcgisCatalogItemIds(municipality, county, fetcher);
+  const itemIds = await verifiedArcgisCatalogItemIds(
+    municipality,
+    county,
+    fetcher,
+    jurisdictionKind,
+  );
   const services = await servicesFromPublicItems(itemIds, fetcher);
   const placeToken = compactName(municipality);
   const serviceScore = (value) => {
@@ -281,7 +305,7 @@ export async function discoverOfficialZoningServices(entry, fetcher = fetch) {
 
   const hasNamedZoningService = services.some((url) => isBaseZoningName(decodeURIComponent(url)));
   if (!hasNamedZoningService) {
-    const catalogItems = await verifiedArcgisCatalogItemIds(entry?.county, entry?.county, fetcher);
+    const catalogItems = await verifiedArcgisCatalogItemIds(entry?.county, entry?.county, fetcher, 'county');
     services.push(...await servicesFromPublicItems(catalogItems, fetcher));
   }
 
@@ -535,6 +559,54 @@ export async function resolveOfficialScZoning({ county, lng, lat, address = '', 
       jurisdiction: `Unincorporated ${entry.county} County`,
       discovery: 'official-no-countywide-district',
     };
+  }
+  return null;
+}
+
+/**
+ * Resolves North Carolina county and municipal zoning from publisher-verified
+ * ArcGIS catalog items. NC has no single statewide zoning layer, so the Census
+ * place at the property point determines which municipal catalog is queried
+ * before the county catalog is tried.
+ */
+export async function resolveOfficialNcZoning({ county, lng, lat, fetcher = fetch }) {
+  if (!county || !Number.isFinite(Number(lng)) || !Number.isFinite(Number(lat))) return null;
+  const municipality = await incorporatedPlaceAtPoint(Number(lng), Number(lat), fetcher);
+  const jurisdictions = [
+    ...(municipality ? [{ jurisdiction: municipality, kind: 'municipality' }] : []),
+    { jurisdiction: county, kind: 'county' },
+  ];
+  const discovered = await Promise.all(jurisdictions.map(async ({ jurisdiction, kind }) => ({
+    jurisdiction,
+    services: await discoverOfficialMunicipalServices(
+      jurisdiction,
+      county,
+      fetcher,
+      kind,
+    ),
+  })));
+
+  for (const group of discovered) {
+    const services = dedupe(group.services);
+    const priority = services.filter((url) => isBaseZoningName(decodeURIComponent(url))).slice(0, 10);
+    const secondary = services.filter((url) => !priority.includes(url)).slice(0, 10);
+    for (const candidates of [priority, secondary]) {
+      if (!candidates.length) continue;
+      const layerGroups = await Promise.all(candidates.map((url) => serviceLayers(url, fetcher)));
+      const layers = layerGroups.flat().slice(0, 24);
+      const results = await Promise.all(layers.map((layer) => queryLayer(layer, Number(lng), Number(lat), fetcher)));
+      const hit = results.find(Boolean);
+      if (hit) {
+        return {
+          code: hit.code,
+          description: hit.description,
+          sourceUrl: hit.sourceUrl,
+          officialMapUrl: hit.sourceUrl,
+          jurisdiction: municipality || (group.jurisdiction === county ? `${county} County` : group.jurisdiction),
+          discovery: 'official-arcgis-catalog',
+        };
+      }
+    }
   }
   return null;
 }
