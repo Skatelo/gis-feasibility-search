@@ -463,7 +463,11 @@ test('zoning uses official GIS first and grounded Gemini 3.5 Flash for research'
   assert.match(resolver, /noAdoptedDistrictFallback/);
   assert.match(serviceSource, /SC_NO_COUNTYWIDE_ZONING_SOURCES[\s\S]*Union:[\s\S]*library\.municode\.com\/sc\/union_county/);
   assert.match(resolver, /incorporatedPlaceAtPoint[\s\S]*code: 'NO ADOPTED DISTRICT'/);
-  assert.doesNotMatch(resolver, /code: 'OFFICIAL MAP REVIEW'/);
+  // NC has no statewide zoning layer, so it keeps a guaranteed review fallback:
+  // the section always routes to the official jurisdiction map rather than
+  // showing an unresolved/unavailable state.
+  assert.match(resolver, /reviewFallback[\s\S]*code: 'OFFICIAL MAP REVIEW'/);
+  assert.match(resolver, /noAdoptedDistrictFallback\s*\|\|\s*reviewFallback/);
   assert.match(stage, /zoningCode = 'ZONING CODE UNRESOLVED'/);
   assert.match(serviceSource, /site:zillow\.com[\s\S]*site:realtor\.com[\s\S]*site:redfin\.com/);
   assert.doesNotMatch(resolver, /zoningExpertViaDeepSeek|deepSeekKey|model: 'sonar'/);

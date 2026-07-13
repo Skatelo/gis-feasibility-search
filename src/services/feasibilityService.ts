@@ -2448,15 +2448,26 @@ export async function executeLandAnalysis(
       } else {
         applyResearchStandards(geminiZoning);
       }
-    } else {
+    } else if (selectedState === 'SC') {
       zoningCode = 'ZONING CODE UNRESOLVED';
       zoningDescription = 'The official county and municipal sources did not return a source-backed district code for this parcel';
       zoningSource = 'official-map';
-      zoningSourceUrl = officialMapUrl || (selectedState === 'SC'
-        ? 'https://www.sciway.net/maps/sc-gis-county-maps.html'
-        : 'https://www.nconemap.gov/');
+      zoningSourceUrl = officialMapUrl || 'https://www.sciway.net/maps/sc-gis-county-maps.html';
       zoningSources = [zoningSourceUrl];
       zoningVerificationStatus = 'unavailable';
+      zoningStandardsStatus = 'unavailable';
+      zoningSetbacksStatus = 'unavailable';
+    } else {
+      // NC has no statewide zoning layer, so a rural parcel can miss every GIS,
+      // discovery, and listing source. Guarantee a usable result that routes to
+      // the governing jurisdiction's official zoning map rather than leaving the
+      // section on an "unresolved/unavailable" state.
+      zoningCode = 'OFFICIAL MAP REVIEW';
+      zoningDescription = 'Use the cited jurisdiction map to confirm the final district code for this parcel';
+      zoningSource = 'official-map';
+      zoningSourceUrl = officialMapUrl || 'https://www.nconemap.gov/';
+      zoningSources = [zoningSourceUrl];
+      zoningVerificationStatus = 'review-required';
       zoningStandardsStatus = 'unavailable';
       zoningSetbacksStatus = 'unavailable';
     }
@@ -4722,7 +4733,24 @@ export async function fetchZoningViaWebSearch(
         evidenceTier: 'official',
       }
     : null;
-  const immediateFallback = officialGisFallback || statewideHintFallback || planningFallback || noAdoptedDistrictFallback;
+  // NC has no statewide zoning layer, so when no county/municipal service,
+  // listing, planning designation, or statewide snapshot yields a district we
+  // still return a usable result routing to the governing jurisdiction's
+  // official zoning map — never a blank/"unresolved" section.
+  const directoryUrl = state === 'SC'
+    ? 'https://www.sciway.net/maps/sc-gis-county-maps.html'
+    : 'https://www.nconemap.gov/';
+  const reviewSource = hints.officialMapUrl || registeredGisUrl || hints.codeSourceUrl || hints.landUseSourceUrl || directoryUrl;
+  const reviewFallback: ZoningResult | null = state === 'NC' ? {
+    code: 'OFFICIAL MAP REVIEW',
+    description: 'The jurisdiction requires an interactive official-map review before a final district code can be confirmed',
+    sourceUrl: reviewSource,
+    sources: [reviewSource],
+    jurisdiction: incorporatedPlace || (countyName ? `${countyBaseName(countyName)} County` : undefined),
+    matchMethod: 'official-map-review',
+    evidenceTier: 'reported',
+  } : null;
+  const immediateFallback = officialGisFallback || statewideHintFallback || planningFallback || noAdoptedDistrictFallback || reviewFallback;
   if (!officialGisFallback && noAdoptedDistrictFallback) hints.onQuickResult?.(noAdoptedDistrictFallback);
 
   if (!geminiKey) {
@@ -4887,7 +4915,8 @@ ${round < maxRounds - 1
     || bestListingResult
     || statewideHintFallback
     || planningFallback
-    || noAdoptedDistrictFallback;
+    || noAdoptedDistrictFallback
+    || reviewFallback;
 }
 
 /**
