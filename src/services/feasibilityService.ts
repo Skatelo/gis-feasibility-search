@@ -1623,7 +1623,12 @@ export async function executeLandAnalysis(
   if (!config) {
     throw new Error(`Target county context for '${countyName}' is unconfigured.`);
   }
-  const selectedState = countyState(countyName);
+  const addressState = addressString.match(/(?:,|\s)\s*(NC|SC)(?:\s+\d{5}(?:-\d{4})?)?\s*$/i)?.[1]?.toUpperCase() as SupportedState | undefined;
+  const selectedState = addressState || countyState(countyName);
+  // Keep the state attached throughout GIS resolution. Bare overlapping county
+  // names (Union, Beaufort, Cherokee, Lee) otherwise resolve to the NC registry,
+  // and bare unique SC names used to miss SC-only zoning service overrides.
+  countyName = `${countyBaseName(countyName)}, ${selectedState}`;
 
   onStageChange?.("Querying county GIS records...");
 
@@ -1870,8 +1875,7 @@ export async function executeLandAnalysis(
     const corrected = names.find((n) => n.toLowerCase() === parcelCnty.toLowerCase());
     if (corrected) {
       const qualified = `${corrected}, ${isScParcel ? 'SC' : 'NC'}`;
-      const currentQualified = `${countyBaseName(countyName)}, ${countyState(countyName)}`;
-      if (qualified.toLowerCase() !== currentQualified.toLowerCase()) {
+      if (qualified.toLowerCase() !== countyName.toLowerCase()) {
         console.log(`County corrected "${countyName}" -> "${qualified}" from parcel County field.`);
         countyName = qualified;
       }

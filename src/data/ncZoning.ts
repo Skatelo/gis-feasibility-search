@@ -25,6 +25,8 @@ export interface ZoningService {
    * every field regardless of the map service's identify field visibility.
    */
   query_field?: string | null;
+  /** False for queryable FeatureServers that do not implement MapServer export. */
+  renderable?: boolean;
 }
 
 export interface CountyZoningConfig {
@@ -39,6 +41,8 @@ export interface CountyZoningConfig {
   zoning_layers?: string | null;
   /** See ZoningService.query_field — forces the query-op lookup path. */
   zoning_query_field?: string | null;
+  /** False when the primary service supports point queries but not map export. */
+  zoning_renderable?: boolean;
   /**
    * Additional zoning MapServers to stack on the map and fall through when
    * looking up the code — used by multi-jurisdiction counties whose city,
@@ -205,12 +209,87 @@ Object.assign(
 // the district overlays on the map + seeds the AI). Each endpoint was tested
 // live against a real parcel point via the ArcGIS identify op.
 const SC_ZONING_OVERRIDES: Record<string, CountyZoningConfig> = {
+  "calhoun,_sc": {
+    county_id: "017", name: "Calhoun, SC", lat: 33.6748, lng: -80.7801,
+    // Official county ArcGIS organization. Layer 1 is adopted Sandy Run zoning;
+    // the separately published St. Matthews layer covers the municipality.
+    zoning_mapserver_url: "https://services5.arcgis.com/B3Zo1xqTw8CidOoF/arcgis/rest/services/Calhoun_County_Zoning/FeatureServer",
+    zoning_field_mapping: "ZONING", description_field: "DESCRIPTIO", zoning_layers: "show:1",
+    zoning_query_field: "ZONING", zoning_renderable: F,
+    extra_zoning: [{
+      url: "https://services5.arcgis.com/B3Zo1xqTw8CidOoF/arcgis/rest/services/St_Matthews_Zoning/FeatureServer",
+      layers: "show:0", query_field: "Zone_Class", renderable: F,
+    }],
+    use_state_fallback: F,
+  },
+  "colleton,_sc": {
+    county_id: "029", name: "Colleton, SC", lat: 32.8350, lng: -80.6692,
+    zoning_mapserver_url: "https://services1.arcgis.com/m0cnLGKdhwao8WvM/arcgis/rest/services/Colleton_County_Zoning/MapServer",
+    zoning_field_mapping: "Zoning", description_field: "Long_Desc", zoning_layers: "show:0",
+    zoning_query_field: "Zoning", use_state_fallback: F,
+  },
+  "dorchester,_sc": {
+    county_id: "035", name: "Dorchester, SC", lat: 33.0828, lng: -80.4042,
+    zoning_mapserver_url: "https://gisportal.dorchestercounty.net/hosting/rest/services/General_Data/Zoning_PUBLIC/MapServer",
+    zoning_field_mapping: "ZONECLASS", description_field: "ZONEDESC", zoning_layers: "show:0",
+    zoning_query_field: "ZONECLASS",
+    extra_zoning: [
+      { url: "https://gisportal.dorchestercounty.net/hosting/rest/services/General_Data/Town_Zoning_Public/MapServer", layers: "show:1", query_field: "STGO_ZONE" },
+      { url: "https://gisportal.dorchestercounty.net/hosting/rest/services/General_Data/Town_Zoning_Public/MapServer", layers: "show:2", query_field: "REEV_ZONE" },
+      { url: "https://gisportal.dorchestercounty.net/hosting/rest/services/General_Data/Town_Zoning_Public/MapServer", layers: "show:3", query_field: "RIDG_ZONE" },
+      { url: "https://gisportal.dorchestercounty.net/hosting/rest/services/General_Data/Town_Zoning_Public/MapServer", layers: "show:4", query_field: "HARL_ZONE" },
+    ],
+    use_state_fallback: F,
+  },
+  "darlington,_sc": {
+    county_id: "031", name: "Darlington, SC", lat: 34.3320, lng: -79.9628,
+    zoning_mapserver_url: "https://services5.arcgis.com/8FJikaProY6O3ncx/arcgis/rest/services/DARLINGTON_ZONING/FeatureServer",
+    zoning_field_mapping: "ZONE", description_field: null, zoning_layers: "show:0",
+    zoning_query_field: "ZONE", zoning_renderable: F,
+    extra_zoning: [{
+      url: "https://services5.arcgis.com/8FJikaProY6O3ncx/arcgis/rest/services/HARTSVILLE_ZONING/FeatureServer",
+      layers: "show:0", query_field: "ZONE", renderable: F,
+    }],
+    use_state_fallback: F,
+  },
+  "florence,_sc": {
+    county_id: "041", name: "Florence, SC", lat: 34.1954, lng: -79.7626,
+    zoning_mapserver_url: "https://services1.arcgis.com/40L6yX6OtdCifNez/arcgis/rest/services/UDOZoning/FeatureServer",
+    zoning_field_mapping: "CODE", description_field: "DESCRIPTION", zoning_layers: "show:0",
+    zoning_query_field: "CODE", zoning_renderable: F, use_state_fallback: F,
+  },
+  "lancaster,_sc": {
+    county_id: "057", name: "Lancaster, SC", lat: 34.7204, lng: -80.7709,
+    zoning_mapserver_url: "https://services.arcgis.com/TL5Ii4EYksDBPH1o/arcgis/rest/services/Zoning_City/FeatureServer",
+    zoning_field_mapping: "NEWZONE", description_field: null, zoning_layers: "show:0",
+    zoning_query_field: "NEWZONE", zoning_renderable: F, use_state_fallback: F,
+  },
+  "richland,_sc": {
+    county_id: "079", name: "Richland, SC", lat: 34.0260, lng: -80.8980,
+    // City of Columbia zoning. Unincorporated Richland continues through the
+    // researched official-county path when this city layer has no point hit.
+    zoning_mapserver_url: "https://services1.arcgis.com/Mnt8FoJcogKtoVBs/arcgis/rest/services/ZoningDistrict/FeatureServer",
+    zoning_field_mapping: "ZoningDistrict", description_field: null, zoning_layers: "show:0",
+    zoning_query_field: "ZoningDistrict", zoning_renderable: F, use_state_fallback: F,
+  },
+  "york,_sc": {
+    county_id: "091", name: "York, SC", lat: 34.9740, lng: -81.1848,
+    zoning_mapserver_url: "https://services1.arcgis.com/2AGLxyiJoNiVHKwq/arcgis/rest/services/York%20County%20Zoning%20(regions)/FeatureServer",
+    zoning_field_mapping: "zone", description_field: null, zoning_layers: "show:0",
+    zoning_query_field: "zone", zoning_renderable: F,
+    extra_zoning: [{
+      url: "https://services1.arcgis.com/2AGLxyiJoNiVHKwq/arcgis/rest/services/Rock%20Hill%20Zoning/FeatureServer",
+      layers: "show:0", query_field: "ZONE", renderable: F,
+    }],
+    use_state_fallback: F,
+  },
   "greenville,_sc": {
     county_id: "045", name: "Greenville, SC", lat: 34.8526, lng: -82.3940,
     // Greenville County GIS base map — layer 41 is the county zoning district
     // polygon (field ZONING, e.g. "MX-D", "R-1", "C-3"). Verified 2026.
     zoning_mapserver_url: "https://www.gcgis.org/arcgis/rest/services/GCGIA/Greenville_Base/MapServer",
     zoning_field_mapping: "ZONING", description_field: null, zoning_layers: "show:41",
+    zoning_query_field: "ZONING",
     use_state_fallback: F,
   },
   "charleston,_sc": {
@@ -242,7 +321,12 @@ const SC_ZONING_OVERRIDES: Record<string, CountyZoningConfig> = {
     use_state_fallback: F,
   },
 };
-Object.assign(ncZoningRegistry.counties, SC_ZONING_OVERRIDES);
+for (const [qualifiedKey, config] of Object.entries(SC_ZONING_OVERRIDES)) {
+  ncZoningRegistry.counties[qualifiedKey] = config;
+  const shortKey = qualifiedKey.replace(/,_sc$/, '');
+  // Unqualified names are safe aliases only when they do not collide with NC.
+  if (!NC_OVERLAP_COUNTIES.has(shortKey)) ncZoningRegistry.counties[shortKey] = config;
+}
 
 /** Normalize a county display name to its registry key (e.g. "New Hanover" -> "new_hanover"). */
 export function normalizeCountyKey(name: string): string {
@@ -257,14 +341,14 @@ export function getZoningConfig(name: string): CountyZoningConfig | undefined {
   return ncZoningRegistry.counties[normalizeCountyKey(name)];
 }
 
-/** True when the county publishes a usable zoning MapServer we can overlay/query. */
+/** True when the county publishes an official zoning service we can query. */
 export function hasCountyZoning(name: string): boolean {
   const c = getZoningConfig(name);
   return !!(c && !c.use_state_fallback && c.zoning_mapserver_url);
 }
 
 /**
- * Returns every zoning MapServer for a county (primary + any extras for
+ * Returns every zoning service for a county (primary + any extras for
  * multi-jurisdiction counties), in stacking order, each with its optional
  * `layers` sublayer restriction. Empty when the county has no published service.
  */
@@ -272,9 +356,19 @@ export function getZoningServices(name: string): ZoningService[] {
   const c = getZoningConfig(name);
   if (!c || c.use_state_fallback || !c.zoning_mapserver_url) return [];
   return [
-    { url: c.zoning_mapserver_url, layers: c.zoning_layers ?? null, query_field: c.zoning_query_field ?? null },
+    {
+      url: c.zoning_mapserver_url,
+      layers: c.zoning_layers ?? null,
+      query_field: c.zoning_query_field ?? null,
+      renderable: c.zoning_renderable !== false,
+    },
     ...(c.extra_zoning ?? []).filter((s) => !!s.url),
   ];
+}
+
+/** Services that implement ArcGIS MapServer export and can be drawn as tiles. */
+export function getRenderableZoningServices(name: string): ZoningService[] {
+  return getZoningServices(name).filter((service) => service.renderable !== false && /\/MapServer\/?$/i.test(service.url));
 }
 
 export interface ResolvedZoning {
@@ -457,11 +551,13 @@ export async function fetchCountyZoningCode(
   lng: number,
   lat: number,
 ): Promise<ResolvedZoning | null> {
-  for (const service of getZoningServices(countyName)) {
-    const hit = service.query_field
+  const services = getZoningServices(countyName);
+  // County and municipal layers are independent. Query them together so an
+  // address inside a town does not wait for every preceding county-layer miss.
+  const hits = await Promise.all(services.map(async (service) => {
+    return service.query_field
       ? await queryZoningAtPoint(service, lng, lat)
       : await identifyZoning(service, lng, lat);
-    if (hit) return hit;
-  }
-  return null;
+  }));
+  return hits.find((hit): hit is ResolvedZoning => !!hit) || null;
 }

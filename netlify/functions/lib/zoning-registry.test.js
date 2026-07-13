@@ -25,6 +25,36 @@ test('state-qualified NC and SC county names resolve to their zoning services', 
   assert.equal(zoning.normalizeCountyKey('Union, SC'), 'union,_sc');
   assert.match(zoning.getZoningServices('Mecklenburg, NC')[0].url, /CityofCharlotteZoning/);
   assert.match(zoning.getZoningServices('Greenville, SC')[0].url, /Greenville_Base/);
+  assert.match(zoning.getZoningServices('Greenville')[0].url, /Greenville_Base/);
+  assert.match(zoning.getZoningServices('Colleton, SC')[0].url, /Colleton_County_Zoning/);
+  assert.match(zoning.getZoningServices('Dorchester, SC')[0].url, /Zoning_PUBLIC/);
+  assert.match(zoning.getZoningServices('York, SC')[0].url, /York%20County%20Zoning/);
+  assert.equal(zoning.getRenderableZoningServices('York, SC').length, 0);
+  assert.equal(zoning.getRenderableZoningServices('Colleton, SC').length, 1);
+});
+
+test('official SC FeatureServers are queried at the exact property point', async () => {
+  const originalFetch = globalThis.fetch;
+  const requests = [];
+  globalThis.fetch = async (url, options) => {
+    requests.push({ url: String(url), options });
+    return new Response(JSON.stringify({ features: [{ attributes: { zone: 'RUD' } }] }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  };
+  try {
+    const result = await zoning.fetchCountyZoningCode('York, SC', -81.1848, 34.9740);
+    assert.equal(result.code, 'RUD');
+    assert.match(result.sourceUrl, /York%20County%20Zoning/);
+    const countyRequest = requests.find((request) => /York%20County%20Zoning/.test(request.url));
+    assert.ok(countyRequest);
+    assert.match(countyRequest.url, /FeatureServer\/0\/query\?/);
+    assert.match(countyRequest.url, /geometry=-81\.1848%2C34\.974/);
+    assert.ok(requests.every((request) => request.options.cache === 'no-store'));
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test('official NC and SC identify responses produce district codes', () => {
@@ -74,6 +104,8 @@ test('zoning uses official GIS first and grounded Gemini 3.5 Flash for research'
   );
 
   assert.match(stage, /if \(geminiZoning\)/);
+  assert.match(serviceSource, /countyName = `\$\{countyBaseName\(countyName\)\}, \$\{selectedState\}`/);
+  assert.match(serviceSource, /addressString\.match\(\/\(\?:,\|\\s\)/);
   assert.match(stage, /zoningSetbackNotes/);
   assert.match(stage, /zoningRestrictions/);
   assert.match(resolver, /fetchCountyZoningCode/);

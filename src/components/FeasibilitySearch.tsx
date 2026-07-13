@@ -56,7 +56,7 @@ const SourceLinks: FC<{ label: string; sources?: string[]; emptyText?: string }>
     </div>
   );
 };
-import { getZoningServices, hasCountyZoning } from '../data/ncZoning';
+import { getRenderableZoningServices, hasCountyZoning } from '../data/ncZoning';
 import { fetchOsmFeatures } from '../data/osmFeatures';
 import {
   Search,
@@ -2075,7 +2075,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
         if (map.getLayer(id)) map.removeLayer(id);
         if (map.getSource(`${id}-src`)) map.removeSource(`${id}-src`);
       }
-      const zoningServices = showZoning ? getZoningServices(data.countyName) : [];
+      const zoningServices = showZoning ? getRenderableZoningServices(data.countyName) : [];
       zoningServices.slice(0, 8).forEach((s: any, i: number) => {
         const id = `ov-zoning-${i}`;
         map.addSource(`${id}-src`, { type: 'raster', tiles: [arcgisTiles(s.url, s.layers || null)], tileSize: 256 });
@@ -2812,7 +2812,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
     // without a published service show no overlay (we don't fake it with parcels).
     const ZONING_BASE = 3;
     const ZONING_SLOTS = 8; // reserved overlay indices for stacked zoning layers
-    const zoningServices = showZoning ? getZoningServices(data.countyName) : [];
+    const zoningServices = showZoning ? getRenderableZoningServices(data.countyName) : [];
 
     // (Re)build layer objects, reusing cached ones keyed by url+layers clause.
     const existing: Record<string, any> = {};
@@ -5017,12 +5017,15 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                     <span>Wetlands (USFWS NWI)</span>
                   </button>
                   {(() => {
-                    const countyGis = hasCountyZoning(data.countyName);
+                    const officialGis = hasCountyZoning(data.countyName);
+                    const countyOverlay = getRenderableZoningServices(data.countyName).length > 0;
                     const webZoning = data.zoningSource === 'web';
-                    const canToggle = countyGis || webZoning; // tiles for GIS, label for web
-                    const label = countyGis ? "Zoning (County GIS)" : webZoning ? "Zoning (web lookup)" : "Zoning (official map review)";
-                    const title = countyGis
+                    const canToggle = officialGis || webZoning;
+                    const label = officialGis ? "Zoning (Official GIS)" : webZoning ? "Zoning (web lookup)" : "Zoning (official map review)";
+                    const title = countyOverlay
                       ? `Overlay zoning districts from ${data.countyName} County's own GIS server`
+                      : officialGis
+                        ? 'Show the exact-parcel result from the official GIS point-query service; this service does not publish raster map export'
                       : webZoning
                         ? `Zoning resolved via web search — verify against the local ordinance`
                         : `${data.countyName} County does not publish a zoning GIS service`;
