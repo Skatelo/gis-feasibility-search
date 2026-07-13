@@ -11,6 +11,7 @@
     "test:sc-gis": "node --test netlify/functions/lib/sc-parcel-parser.test.js",
     "test:zoning": "node --test netlify/functions/lib/zoning-registry.test.js",
     "test:estimates": "node --test netlify/functions/lib/sourced-estimate.test.js",
+    "typecheck:zoning-engine": "tsc -p tsconfig.zoning.json",
     "test:zoning-engine": "node scripts/test-zoning-engine.mjs",
     "discover:sc-gis": "node scripts/discover-sc-gis.mjs",
     "verify:sc-gis": "node scripts/verify-sc-portals.mjs",

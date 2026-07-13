@@ -1,0 +1,19 @@
+{
+  "//": "Strict typecheck for the universal zoning engine + its Node tests. The app build (tsconfig.app.json) excludes *.test.ts because those use Node built-ins; this config typechecks the whole engine including tests with Node types.",
+  "compilerOptions": {
+    "target": "es2023",
+    "lib": ["ES2023", "DOM"],
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "types": ["node"],
+    "skipLibCheck": true,
+    "noEmit": true,
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "erasableSyntaxOnly": true,
+    "verbatimModuleSyntax": true,
+    "noFallthroughCasesInSwitch": true
+  },
+  "include": ["src/services/zoning/**/*.ts"]
+}
