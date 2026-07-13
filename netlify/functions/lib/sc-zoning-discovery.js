@@ -7,7 +7,7 @@ const EXCLUDED_LAYER_RE = /\b(future|proposed|rezon(?:e|ing)|case|request|overla
 const CODE_KEY_RE = /^(?:zoning|zone|zone_?class|zone_?code|zoning_?district|zoning_?code|zclass|zcode|zdist|newzone|code)$/i;
 const LOOSE_CODE_KEY_RE = /zon|^zn|district|^class$|^code$/i;
 const EXCLUDED_KEY_RE = /desc|name|jur|muni|city|county|town|date|case|owner|area|shape|objectid|globalid|url|link|land.?use/i;
-const DESCRIPTION_KEY_RE = /desc|definition|decode|long.?name|^name$/i;
+const DESCRIPTION_KEY_RE = /desc|definition|decode|long.?name|^(?:code|giscode|zoning|zone|district)_?name$|^name$/i;
 const PLACEHOLDER_RE = /^(?:city|county|etj|none|n\/?a|mun\.?|muni|municipal|municipality|split|unknown|not applicable)$/i;
 
 const isBaseZoningName = (value) => BASE_ZONING_RE.test(String(value || '').replace(/[_-]+/g, ' '));
@@ -36,6 +36,7 @@ function sharingRootForUrl(value) {
     const url = new URL(value);
     const portalIndex = url.pathname.toLowerCase().indexOf('/portal/');
     if (portalIndex >= 0) return `${url.origin}${url.pathname.slice(0, portalIndex + 7)}/sharing/rest`.replace(/\/+/g, '/').replace('https:/', 'https://').replace('http:/', 'http://');
+    if (url.hostname === 'experience.arcgis.com') return 'https://www.arcgis.com/sharing/rest';
     if (url.hostname.endsWith('.arcgis.com') || url.hostname === 'arcgis.com') {
       return `${url.origin}/sharing/rest`;
     }
@@ -165,38 +166,57 @@ function compactName(value) {
   return String(value || '').toLowerCase().replace(/[^a-z0-9]/g, '');
 }
 
-export async function discoverOfficialMunicipalServices(municipality, county, fetcher = fetch) {
-  if (!municipality) return [];
-  const root = 'https://www.arcgis.com/sharing/rest';
-  const query = encodeURIComponent(`${municipality} zoning`);
-  const search = await request(`${root}/search?f=json&num=50&sortField=modified&sortOrder=desc&q=${query}`, fetcher);
-  const placeToken = compactName(municipality);
-  const countyToken = compactName(county);
+const PUBLIC_ARCGIS_ROOT = 'https://www.arcgis.com/sharing/rest';
+const PUBLIC_ITEM_TYPE_RE = /^(?:Feature Service|Map Service|Web Map|Web Mapping Application|Web Experience|Experience Builder|Hub Site Application)$/i;
+
+async function verifiedArcgisCatalogItemIds(jurisdiction, county, fetcher) {
+  if (!jurisdiction) return [];
+  const isCounty = compactName(jurisdiction) === compactName(county);
+  const subject = isCounty ? `"${county} County"` : `"${jurisdiction}"`;
+  const query = encodeURIComponent(`${subject} South Carolina zoning`);
+  const search = await request(`${PUBLIC_ARCGIS_ROOT}/search?f=json&num=50&sortField=modified&sortOrder=desc&q=${query}`, fetcher);
+  const jurisdictionToken = compactName(jurisdiction);
+  const publisherTokens = dedupe([jurisdictionToken, compactName(county)]).filter((token) => token.length >= 3);
   const candidates = (Array.isArray(search?.results) ? search.results : [])
+    .filter((item) => PUBLIC_ITEM_TYPE_RE.test(String(item?.type || '')))
     .filter((item) => !isExcludedLayerName(item?.title))
-    .filter((item) => /^(?:Feature Service|Map Service|Web Map|Web Mapping Application|Web Experience|Hub Site Application)$/i.test(String(item?.type || '')))
+    .filter((item) => isBaseZoningName(`${item?.title || ''} ${item?.tags || ''} ${item?.description || ''}`))
     .slice(0, 20);
 
-  const verified = await Promise.all(candidates.map(async (item) => {
-    const ownerLooksOfficial = compactName(item?.owner).includes(placeToken);
-    const portal = item?.orgId ? await request(`${root}/portals/${item.orgId}?f=json`, fetcher) : null;
-    const organization = compactName(`${portal?.name || ''} ${portal?.description || ''}`);
-    const officialOrganization = organization.includes(placeToken) || organization.includes(countyToken);
-    return ownerLooksOfficial || officialOrganization ? item : null;
+  const verified = await Promise.all(candidates.map(async (searchItem) => {
+    const item = await request(`${PUBLIC_ARCGIS_ROOT}/content/items/${searchItem.id}?f=json`, fetcher) || searchItem;
+    const orgId = item?.orgId || searchItem?.orgId;
+    const portal = orgId ? await request(`${PUBLIC_ARCGIS_ROOT}/portals/${orgId}?f=json`, fetcher) : null;
+    const context = compactName(`${item?.title || searchItem?.title || ''} ${item?.tags || searchItem?.tags || ''} ${item?.description || searchItem?.description || ''}`);
+    const publisher = compactName(`${item?.owner || searchItem?.owner || ''} ${portal?.name || ''} ${portal?.urlKey || ''} ${portal?.description || ''}`);
+    const contextMatches = jurisdictionToken.length >= 3 && context.includes(jurisdictionToken);
+    const publisherMatches = publisherTokens.some((token) => publisher.includes(token));
+    return contextMatches && publisherMatches && ITEM_ID_RE.test(String(searchItem?.id)) ? searchItem.id : null;
   }));
+  return dedupe(verified.filter(Boolean));
+}
 
-  const pending = verified.filter(Boolean).map((item) => item.id);
+async function servicesFromPublicItems(itemIds, fetcher) {
+  const pending = [...itemIds];
   const seen = new Set();
   const services = [];
   for (let depth = 0; depth < 3 && pending.length; depth++) {
     const batch = pending.splice(0, 20).filter((id) => !seen.has(id));
     batch.forEach((id) => seen.add(id));
-    const inspections = await Promise.all(batch.map((id) => inspectArcgisItem(root, id, fetcher)));
+    const inspections = await Promise.all(batch.map((id) => inspectArcgisItem(PUBLIC_ARCGIS_ROOT, id, fetcher)));
     for (const result of inspections) {
       services.push(...result.serviceUrls);
       result.itemIds.forEach((id) => { if (!seen.has(id)) pending.push(id); });
     }
   }
+  return services;
+}
+
+export async function discoverOfficialMunicipalServices(municipality, county, fetcher = fetch) {
+  if (!municipality) return [];
+  const itemIds = await verifiedArcgisCatalogItemIds(municipality, county, fetcher);
+  const services = await servicesFromPublicItems(itemIds, fetcher);
+  const placeToken = compactName(municipality);
   const serviceScore = (value) => {
     try {
       const url = new URL(value);
@@ -212,18 +232,28 @@ export async function discoverOfficialMunicipalServices(municipality, county, fe
 }
 
 export async function discoverOfficialZoningServices(entry, fetcher = fetch) {
+  const configuredServices = Array.isArray(entry?.zoningServices)
+    ? entry.zoningServices.map(cleanServiceUrl).filter(Boolean)
+    : [];
+  if (configuredServices.length) return dedupe(configuredServices);
+
   const seeds = dedupe([entry?.officialMapUrl, entry?.alternateMapUrl]);
   const pages = await Promise.all(seeds.map((url) => inspectOfficialPage(url, fetcher)));
   const roots = dedupe([
     ...seeds.map(sharingRootForUrl),
     ...pages.flatMap((page) => page.sharingRoots),
   ]);
-  if (roots.length === 0 && seeds.some((url) => /(?:arcgis\.com|experience\.arcgis\.com)/i.test(url))) {
+  if (seeds.some((url) => /(?:^|\.)arcgis\.com(?:\/|$)/i.test(String(url)))
+    && !roots.includes(PUBLIC_ARCGIS_ROOT)) {
     roots.push('https://www.arcgis.com/sharing/rest');
   }
 
-  const pending = dedupe([...seeds.flatMap(itemIdsInUrl), ...pages.flatMap((page) => page.itemIds)]);
-  const services = pages.flatMap((page) => page.serviceUrls);
+  const configuredItemIds = Array.isArray(entry?.arcgisItemIds) ? entry.arcgisItemIds.filter((id) => ITEM_ID_RE.test(String(id))) : [];
+  if (configuredItemIds.length && !roots.includes(PUBLIC_ARCGIS_ROOT)) roots.push(PUBLIC_ARCGIS_ROOT);
+  const pending = dedupe([...configuredItemIds, ...seeds.flatMap(itemIdsInUrl), ...pages.flatMap((page) => page.itemIds)]);
+  const services = [
+    ...pages.flatMap((page) => page.serviceUrls),
+  ];
   const seenItems = new Set();
   const orgIds = new Map();
 
@@ -249,6 +279,12 @@ export async function discoverOfficialZoningServices(entry, fetcher = fetch) {
     roots.slice(0, 4).map((root) => inspectArcgisItem(root, itemId, fetcher))));
   orgInspections.forEach((result) => services.push(...result.serviceUrls));
 
+  const hasNamedZoningService = services.some((url) => isBaseZoningName(decodeURIComponent(url)));
+  if (!hasNamedZoningService) {
+    const catalogItems = await verifiedArcgisCatalogItemIds(entry?.county, entry?.county, fetcher);
+    services.push(...await servicesFromPublicItems(catalogItems, fetcher));
+  }
+
   return dedupe(services.map(cleanServiceUrl)).filter(Boolean).sort((left, right) => {
     const score = (url) => (isBaseZoningName(decodeURIComponent(url)) ? 1 : 0);
     return score(right) - score(left);
@@ -262,7 +298,7 @@ function candidateField(fields) {
     .filter((field) => field.name)
     .map((field) => {
       const aliasCode = /zoning.*(?:abbrev|code|district|class)|(?:abbrev|code).*zoning/i.test(field.alias);
-      const score = CODE_KEY_RE.test(field.name) ? 5
+      const score = CODE_KEY_RE.test(field.name) || /^fbcode$/i.test(field.name) ? 5
         : aliasCode ? 4
           : CODE_KEY_RE.test(field.alias) ? 3
             : !EXCLUDED_KEY_RE.test(`${field.name} ${field.alias}`) && LOOSE_CODE_KEY_RE.test(`${field.name} ${field.alias}`) ? 2 : 0;
@@ -279,6 +315,13 @@ function cleanCode(value) {
   return code;
 }
 
+function combinedZoningLabel(value) {
+  const label = String(value ?? '').trim();
+  const match = label.match(/^([A-Z0-9]+(?:-[A-Z0-9]+)*?)-([A-Z][A-Za-z]+(?:\s.+)?)$/);
+  const code = cleanCode(match?.[1]);
+  return code ? { code, description: match[2].trim() } : null;
+}
+
 function zoningFromAttributes(attributes, preferredField) {
   if (!attributes || typeof attributes !== 'object') return null;
   const keys = Object.keys(attributes);
@@ -288,17 +331,24 @@ function zoningFromAttributes(attributes, preferredField) {
     ...keys.filter((key) => LOOSE_CODE_KEY_RE.test(key) && !EXCLUDED_KEY_RE.test(key)),
   ]);
   const code = codeKeys.map((key) => cleanCode(attributes[key])).find(Boolean);
-  if (!code) return null;
+  const combined = !code
+    ? keys.filter((key) => /^(?:zoning|zone|district)_?name$/i.test(key))
+      .map((key) => combinedZoningLabel(attributes[key]))
+      .find(Boolean)
+    : null;
+  const resolvedCode = code || combined?.code;
+  if (!resolvedCode) return null;
   const jurisdictionPlaceholder = keys
     .filter((key) => /name|desc/i.test(key))
     .map((key) => String(attributes[key] ?? '').trim())
     .some((value) => /^(?:town|city|county)\s+of\b|\b(?:town|city)\s+limits\b/i.test(value));
   if (jurisdictionPlaceholder) return null;
-  const description = keys
+  const publishedDescription = keys
     .filter((key) => DESCRIPTION_KEY_RE.test(key))
     .map((key) => String(attributes[key] ?? '').trim())
-    .find((value) => value && value !== code) || null;
-  return { code, description };
+    .find((value) => value && value !== resolvedCode) || null;
+  const description = combined?.description || publishedDescription;
+  return { code: resolvedCode, description };
 }
 
 async function serviceLayers(serviceUrl, fetcher) {
@@ -331,7 +381,6 @@ async function queryLayer(layer, lng, lat, fetcher) {
     where: '1=1',
     outFields: '*',
     returnGeometry: 'false',
-    resultRecordCount: '5',
     f: 'json',
   });
   const data = await request(`${layer.url}/query?${params}`, fetcher);

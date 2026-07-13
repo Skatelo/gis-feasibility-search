@@ -12,6 +12,12 @@ function number(value) {
   return Number.isFinite(n) ? n : undefined;
 }
 
+function zoningCode(value) {
+  const code = textValue(value);
+  if (!code || code.length > 50 || /^(?:n\/?a|none|unknown|null|not available|unavailable)$/i.test(code)) return undefined;
+  return code;
+}
+
 function firstMatch(text, patterns) {
   for (const pattern of patterns) {
     const match = text.match(pattern);
@@ -57,6 +63,10 @@ export function parseQpublicParcelText(content, sourceUrl) {
   const taxableValue = money(firstMatch(text, [/Taxable Value\s*\$?([0-9,.-]+)/i]));
   const assessedValue = money(firstMatch(text, [/Total Assessed Value\s*\$?([0-9,.-]+)/i, /Assessed Value\s*\$?([0-9,.-]+)/i]));
   const taxAmount = money(firstMatch(text, [/Tax Amount\s*\$?([0-9,.-]+)/i, /Property Tax\s*\$?([0-9,.-]+)/i]));
+  const zoning = zoningCode(firstMatch(text, [
+    /Zoning(?: District| Code| Classification)?\s*\n\s*([^\n]+)/i,
+    /Zoning(?: District| Code| Classification)?\s*:\s*([^\n]+)/i,
+  ]));
 
   const firstFloorSqft = number(firstMatch(text, [/First Floor Sq Ft\s*\n?\s*([0-9,]+)/i]));
   const secondFloorSqft = number(firstMatch(text, [/Second Floor Sq Ft\s*\n?\s*([0-9,]+)/i]));
@@ -91,6 +101,7 @@ export function parseQpublicParcelText(content, sourceUrl) {
     taxCodeArea: taxDistrict,
     taxAmount,
     taxYear: taxAmount != null ? year : undefined,
+    zoning,
     building: {
       livingSqft: buildingSqft,
       firstFloorSqft,

@@ -52,6 +52,26 @@ test('Union qPublic fixture parses official owner, parcel, values, and building'
   assert.equal(record.building.buildingCount, 1);
 });
 
+test('qPublic parcel reports retain an explicitly published zoning code', () => {
+  const record = parseQpublicParcelText(`
+    Parcel Number
+    123-00-00-456
+    Location Address
+    100 MAIN STREET
+    Owners
+    SAMPLE OWNER
+    100 MAIN STREET
+    AIKEN SC 29801
+    Zoning District
+    RC
+    2026 Value Information
+    Total Market Value $100,000
+    Building Information
+  `, 'https://qpublic.example/report');
+  assert.equal(record.status, 'verified');
+  assert.equal(record.zoning, 'RC');
+});
+
 test('blocked assessor pages are not treated as verified data', () => {
   assert.deepEqual(
     parseQpublicParcelText('Attention Required! Sorry, you have been blocked', 'https://qpublic.example'),
@@ -206,6 +226,7 @@ test('WTHGIS detail resolves official owner, land, values, and building data', (
       <tr><th>Mailing ZipCode</th><td>29741</td></tr>
       <tr><th>Legal Description</th><td>Lot 5 2.68 Ac</td></tr>
       <tr><th>District</th><td>09</td></tr>
+      <tr><th>Zoning</th><td>R-1</td></tr>
       <tr><th>MarketValueBuildings</th><td>1.00</td></tr>
       <tr><th>MarketValueBuildingsValue</th><td>72000.00</td></tr>
       <tr><th>MarketValueLandValue</th><td>25000.00</td></tr>
@@ -221,6 +242,7 @@ test('WTHGIS detail resolves official owner, land, values, and building data', (
   assert.equal(result.mailingAddress, '5804 Highway 265, Ruby, SC 29741');
   assert.equal(result.acres, 2.68);
   assert.equal(result.taxCodeArea, '09');
+  assert.equal(result.zoning, 'R-1');
   assert.equal(result.landValue, 25000);
   assert.equal(result.improvementValue, 72000);
   assert.equal(result.marketValue, 97000);

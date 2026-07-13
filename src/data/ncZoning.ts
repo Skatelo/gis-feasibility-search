@@ -209,6 +209,28 @@ Object.assign(
 // the district overlays on the map + seeds the AI). Each endpoint was tested
 // live against a real parcel point via the ArcGIS identify op.
 const SC_ZONING_OVERRIDES: Record<string, CountyZoningConfig> = {
+  "beaufort,_sc": {
+    county_id: "013", name: "Beaufort, SC", lat: 32.3582, lng: -80.6895,
+    zoning_mapserver_url: "https://gis.beaufortcountysc.gov/server/rest/services/Zoning/MapServer",
+    zoning_field_mapping: "FBCode", description_field: "CodeName", zoning_layers: "show:9",
+    zoning_query_field: "FBCode",
+    extra_zoning: [{
+      url: "https://services9.arcgis.com/NpTdr5u1ft9aY31O/ArcGIS/rest/services/City_of_Beaufort_Zoning/FeatureServer",
+      layers: "show:0", query_field: "ZONING", renderable: F,
+    }],
+    use_state_fallback: F,
+  },
+  "berkeley,_sc": {
+    county_id: "015", name: "Berkeley, SC", lat: 33.1261, lng: -80.0088,
+    zoning_mapserver_url: "https://gis.berkeleycountysc.gov/arcgis/rest/services/desktop/internet_map/MapServer",
+    zoning_field_mapping: "ZONE", description_field: null, zoning_layers: "show:33",
+    zoning_query_field: "ZONE",
+    extra_zoning: [37, 38, 45].map((layer) => ({
+      url: "https://gis.berkeleycountysc.gov/arcgis/rest/services/desktop/internet_map/MapServer",
+      layers: `show:${layer}`, query_field: "ZONE", renderable: F,
+    })),
+    use_state_fallback: F,
+  },
   "calhoun,_sc": {
     county_id: "017", name: "Calhoun, SC", lat: 33.6748, lng: -80.7801,
     // Official county ArcGIS organization. Layer 1 is adopted Sandy Run zoning;
@@ -258,11 +280,29 @@ const SC_ZONING_OVERRIDES: Record<string, CountyZoningConfig> = {
     zoning_field_mapping: "CODE", description_field: "DESCRIPTION", zoning_layers: "show:0",
     zoning_query_field: "CODE", zoning_renderable: F, use_state_fallback: F,
   },
+  "horry,_sc": {
+    county_id: "051", name: "Horry, SC", lat: 33.9197, lng: -78.9288,
+    zoning_mapserver_url: "https://www.horrycounty.org/gispublic/rest/services/Public/Zoning/MapServer",
+    zoning_field_mapping: "ZoningCode", description_field: null, zoning_layers: "show:0",
+    zoning_query_field: "ZoningCode", use_state_fallback: F,
+  },
   "lancaster,_sc": {
     county_id: "057", name: "Lancaster, SC", lat: 34.7204, lng: -80.7709,
     zoning_mapserver_url: "https://services.arcgis.com/TL5Ii4EYksDBPH1o/arcgis/rest/services/Zoning_City/FeatureServer",
     zoning_field_mapping: "NEWZONE", description_field: null, zoning_layers: "show:0",
     zoning_query_field: "NEWZONE", zoning_renderable: F, use_state_fallback: F,
+  },
+  "lexington,_sc": {
+    county_id: "063", name: "Lexington, SC", lat: 33.9815, lng: -81.2362,
+    zoning_mapserver_url: "https://maps.lex-co.com/agstserver/rest/services/PlanZoning/MapServer",
+    zoning_field_mapping: "NameAbbr", description_field: "Name", zoning_layers: "show:6",
+    zoning_query_field: "NameAbbr",
+    extra_zoning: [
+      { url: "https://maps.lex-co.com/agstserver/rest/services/PlanZoning/MapServer", layers: "show:8", query_field: "Zoning", renderable: F },
+      { url: "https://maps.lex-co.com/agstserver/rest/services/PlanZoning/MapServer", layers: "show:15", query_field: "ZoningCode", renderable: F },
+      { url: "https://maps.lex-co.com/agstserver/rest/services/PlanZoning/MapServer", layers: "show:12", query_field: "Zoning", renderable: F },
+    ],
+    use_state_fallback: F,
   },
   "richland,_sc": {
     county_id: "079", name: "Richland, SC", lat: 34.0260, lng: -80.8980,
@@ -327,7 +367,29 @@ const SC_ZONING_OVERRIDES: Record<string, CountyZoningConfig> = {
     zoning_mapserver_url: "https://propertyviewer.andersoncountysc.org/arcgis/rest/services/QueryMap/MapServer",
     zoning_field_mapping: "ZONE1", description_field: null, zoning_layers: "show:9",
     zoning_query_field: "ZONE1",
+    extra_zoning: [{
+      url: "https://gis.cityofandersonsc.com/arcgis/rest/services/Reference_Data/Zoning/FeatureServer",
+      layers: "show:0", query_field: "ZONECLASS", renderable: F,
+    }],
     use_state_fallback: F,
+  },
+  "oconee,_sc": {
+    county_id: "073", name: "Oconee, SC", lat: 34.7490, lng: -83.0615,
+    zoning_mapserver_url: "https://arcserver2.oconeesc.com/arcgis/rest/services/ZoningMap/MapServer",
+    zoning_field_mapping: "ZONING", description_field: "Descript", zoning_layers: "show:1,2",
+    zoning_query_field: "ZONING", use_state_fallback: F,
+  },
+  "sumter,_sc": {
+    county_id: "085", name: "Sumter, SC", lat: 33.9204, lng: -80.3415,
+    zoning_mapserver_url: "https://services.arcgis.com/4B9WU9185SohZnyi/arcgis/rest/services/UDO_Zoning_Service_Map_WFL1/FeatureServer",
+    zoning_field_mapping: "ZONECLASS", description_field: "ZONEDESC", zoning_layers: "show:6",
+    zoning_query_field: "ZONECLASS", zoning_renderable: F, use_state_fallback: F,
+  },
+  "orangeburg,_sc": {
+    county_id: "075", name: "Orangeburg, SC", lat: 33.4918, lng: -80.8556,
+    zoning_mapserver_url: "https://services2.arcgis.com/bUKn95BqgpYYTnx3/arcgis/rest/services/Main_Public_Tax_Parcel_Map_WFL1/FeatureServer",
+    zoning_field_mapping: "ZONINGNAME", description_field: null, zoning_layers: "show:33",
+    zoning_query_field: "ZONINGNAME", zoning_renderable: F, use_state_fallback: F,
   },
 };
 for (const [qualifiedKey, config] of Object.entries(SC_ZONING_OVERRIDES)) {
@@ -423,7 +485,7 @@ const byLengthAsc = (a: string, b: string) => a.length - b.length;
 // County-wide layers stamp these placeholders where a municipality does its own
 // zoning; the real code lives in that town's separate sublayer, so we ignore them.
 const isPlaceholderCode = (code: string, desc: string | null) =>
-  /^(city|county|etj|unzoned|none|n\/a|mun\.?|muni|municipal|municipality|split)$/i.test(code) ||
+  /^(city|county|etj|unzoned|none|n\/?a|mun\.?|muni|municipal|municipality|split)$/i.test(code) ||
   /\b(city|town|county|limits|municipal)\b/i.test(code) ||
   (!!desc && /\b(town|city)\s+limits\b/i.test(desc));
 
@@ -540,10 +602,19 @@ async function queryZoningAtPoint(service: ZoningService, lng: number, lat: numb
       const res = await fetch(`${service.url}/${layerId}/query?${params.toString()}`, { cache: 'no-store' });
       if (!res.ok) continue;
       const data = await res.json();
-      const values: string[] = (Array.isArray(data?.features) ? data.features : [])
+      const values: ResolvedZoning[] = (Array.isArray(data?.features) ? data.features : [])
         .map((f: { attributes?: Record<string, unknown> }) => cleanZoningValue(f?.attributes?.[field]))
-        .filter((v: string | null): v is string => !!v && !isPlaceholderCode(v, null));
-      if (values.length) return { code: values[0], description: null, sourceUrl: service.url };
+        .map((value: string | null) => {
+          if (!value) return null;
+          const combined = value.match(/^([A-Z0-9]+(?:-[A-Z0-9]+)*?)-([A-Z][A-Za-z]+(?:\s.+)?)$/);
+          return {
+            code: combined?.[1] || value,
+            description: combined?.[2]?.trim() || null,
+          };
+        })
+        .filter((value: ResolvedZoning | null): value is ResolvedZoning =>
+          !!value && !isPlaceholderCode(value.code, value.description));
+      if (values.length) return { ...values[0], sourceUrl: service.url };
     } catch (e) {
       console.warn(`Zoning query failed for ${service.url}:`, e);
     }

@@ -1962,6 +1962,7 @@ export async function executeLandAnalysis(
       taxcodearea: officialScRecord.taxCodeArea,
       taxamount: officialScRecord.taxAmount,
       taxyear: officialScRecord.taxYear,
+      zoning: officialScRecord.zoning || info.zoning,
       building: officialScRecord.building,
       recordsource: 'county-assessor',
     };
@@ -2330,11 +2331,12 @@ export async function executeLandAnalysis(
 
   // STAGE 3 - zoning. Official ArcGIS resolves first; Gemini 3.5 Flash uses
   // Google Search plus optional Perplexity/Crawlee evidence for gaps and rules.
-  const parcelZoning = String(info.zoning || '').trim();
+  const officialParcelZoning = String(officialScRecord?.zoning || '').trim();
+  const parcelZoning = officialParcelZoning || String(info.zoning || '').trim();
   {
     onStageChange?.("Resolving zoning (official GIS + Perplexity Search)...");
     const zoningHint = parcelZoning && !/^(n\/?a|unknown|null)$/i.test(parcelZoning) ? parcelZoning : null;
-    const zoningHintConfidence: ZoningLookupHints['codeConfidence'] = info.recordsource === 'county-gis'
+    const zoningHintConfidence: ZoningLookupHints['codeConfidence'] = officialParcelZoning || info.recordsource === 'county-gis'
       ? 'official'
       : info.recordsource === 'scdot' ? 'statewide' : undefined;
     const officialMapUrl = getZoningServices(countyName)[0]?.url

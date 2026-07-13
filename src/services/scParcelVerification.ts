@@ -24,6 +24,7 @@ export interface OfficialScParcelRecord {
   taxCodeArea?: string;
   taxAmount?: number;
   taxYear?: number;
+  zoning?: string;
   building?: {
     livingSqft?: number;
     firstFloorSqft?: number;
@@ -127,6 +128,7 @@ export function officialRecordFromCountyGis(
     taxCodeArea: cleanText(attributes.taxcodearea),
     taxAmount: cleanNumber(attributes.taxamount),
     taxYear: cleanNumber(attributes.taxyear),
+    zoning: cleanText(attributes.zoning),
     building: attributes.building as OfficialScParcelRecord['building'],
   };
 }
