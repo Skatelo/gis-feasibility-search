@@ -448,8 +448,12 @@ test('zoning uses official GIS first and grounded Gemini 3.5 Flash for research'
   assert.match(serviceSource, /tools: \[\{ google_search: \{\} \}\]/);
   assert.match(resolver, /return bestOfficialResult[\s\S]*officialGisFallback[\s\S]*bestListingResult[\s\S]*statewideHintFallback[\s\S]*planningFallback[\s\S]*noAdoptedDistrictFallback/);
   assert.match(resolver, /completeSetbacks[\s\S]*standards\?\.restrictions/);
-  assert.match(serviceSource, /ZONING_FAST_SEARCH_BUDGET[\s\S]*mode: 'perplexity'/);
-  assert.match(serviceSource, /ZONING_HARD_FALLBACK_BUDGET[\s\S]*mode: 'hard'/);
+  // Zoning web research uses Google Search discovery + Crawlee as the PRIMARY
+  // lookup (no Perplexity in the zoning path).
+  assert.match(serviceSource, /async function googleSearchDiscoverUrls[\s\S]*tools: \[\{ google_search: \{\} \}\]/);
+  assert.match(serviceSource, /async function zoningResearchViaGoogleCrawlee[\s\S]*crawleeScrapeBatch/);
+  assert.match(resolver, /zoningResearchViaGoogleCrawlee\(queries, geminiKey/);
+  assert.doesNotMatch(resolver, /perplexityResearchBlock/);
   assert.match(resolver, /const maxRounds = 3/);
   assert.match(resolver, /zoningResearchStartedAt[\s\S]*elapsed > 20000[\s\S]*elapsed > 32000/);
   assert.match(resolver, /state === 'NC' \? 18000 : 12000/);
