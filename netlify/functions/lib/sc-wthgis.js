@@ -85,6 +85,7 @@ export function parseWthgisParcelDetail(content, sourceUrl, county) {
     marketValue: numeric(value('marketvaluetotalvalue')),
     taxableValue: numeric(value('taxvaluetotalvalue')),
     taxCodeArea: value('district'),
+    zoning: value('zoning', 'zoningdistrict', 'zoningcode', 'zone', 'zonecode', 'zoningclassification'),
     building: {
       buildingCount: numeric(value('marketvaluebuildings', 'taxvaluebuildings')),
     },

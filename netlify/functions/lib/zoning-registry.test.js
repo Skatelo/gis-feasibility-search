@@ -31,6 +31,14 @@ test('state-qualified NC and SC county names resolve to their zoning services', 
   assert.match(zoning.getZoningServices('Colleton, SC')[0].url, /Colleton_County_Zoning/);
   assert.match(zoning.getZoningServices('Dorchester, SC')[0].url, /Zoning_PUBLIC/);
   assert.match(zoning.getZoningServices('York, SC')[0].url, /York%20County%20Zoning/);
+  assert.match(zoning.getZoningServices('Oconee, SC')[0].url, /ZoningMap/);
+  assert.match(zoning.getZoningServices('Sumter, SC')[0].url, /UDO_Zoning/);
+  assert.match(zoning.getZoningServices('Anderson, SC')[1].url, /cityofandersonsc\.com/);
+  assert.equal(zoning.getZoningServices('Berkeley, SC').length, 4);
+  assert.match(zoning.getZoningServices('Orangeburg, SC')[0].url, /Main_Public_Tax_Parcel_Map/);
+  assert.equal(zoning.getZoningServices('Beaufort, SC').length, 2);
+  assert.match(zoning.getZoningServices('Horry, SC')[0].url, /Public\/Zoning/);
+  assert.equal(zoning.getZoningServices('Lexington, SC').length, 4);
   assert.equal(zoning.getRenderableZoningServices('York, SC').length, 0);
   assert.equal(zoning.getRenderableZoningServices('Colleton, SC').length, 1);
 });
@@ -55,16 +63,17 @@ test('South Carolina zoning routing manifest covers all 46 counties', () => {
 
 test('official ArcGIS app discovery resolves a base zoning district at the parcel point', async () => {
   const requests = [];
+  const itemId = 'bf76cad67d1a48449fb7f9a316c4185e';
   const service = 'https://services.example.gov/arcgis/rest/services/Planning/Official_Zoning/FeatureServer';
   const json = (body) => new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
   const fetcher = async (value, options = {}) => {
     const url = String(value);
     requests.push({ url, options });
-    if (url.includes('/content/items/dcd2d7443dc9448ea910b9788a2c6b05/data')) {
+    if (url.includes(`/content/items/${itemId}/data`)) {
       return json({ operationalLayers: [{ title: 'Adopted zoning', url: service }] });
     }
-    if (url.includes('/content/items/dcd2d7443dc9448ea910b9788a2c6b05?')) {
-      return json({ id: 'dcd2d7443dc9448ea910b9788a2c6b05', orgId: 'official-org' });
+    if (url.includes(`/content/items/${itemId}?`)) {
+      return json({ id: itemId, orgId: 'official-org' });
     }
     if (url.includes('/search?')) return json({ results: [] });
     if (url === `${service}?f=json`) {
@@ -83,13 +92,13 @@ test('official ArcGIS app discovery resolves a base zoning district at the parce
     if (url.startsWith(`${service}/1/query?`)) {
       return json({ features: [{ attributes: { ZONE: 'R-2', ZONE_DESC: 'Single-family residential' } }] });
     }
-    if (/^https:\/\/colletoncounty\.maps\.arcgis\.com\/apps\//.test(url)) {
+    if (/^https:\/\/hamptoncountysc\.maps\.arcgis\.com\/apps\//.test(url)) {
       return new Response('<html><body>Official county map</body></html>', { status: 200, headers: { 'content-type': 'text/html' } });
     }
     return json({});
   };
 
-  const result = await resolveOfficialScZoning({ county: 'Colleton', lng: -80.6692, lat: 32.835, fetcher });
+  const result = await resolveOfficialScZoning({ county: 'Hampton', lng: -80.6692, lat: 32.835, fetcher });
   assert.equal(result.code, 'R-2');
   assert.equal(result.description, 'Single-family residential');
   assert.equal(result.discovery, 'official-arcgis-portal');
@@ -97,6 +106,7 @@ test('official ArcGIS app discovery resolves a base zoning district at the parce
   const query = requests.find((request) => request.url.includes('/1/query?'));
   assert.ok(query);
   assert.match(query.url, /geometry=-80\.6692%2C32\.835/);
+  assert.doesNotMatch(query.url, /resultRecordCount=/, 'legacy county ArcGIS servers reject pagination parameters');
   assert.ok(requests.every((request) => request.options.cache === 'no-store'));
   assert.ok(!requests.some((request) => request.url.includes('/0/query?')), 'future land use must not be queried as zoning');
 });
@@ -114,7 +124,7 @@ test('incorporated SC parcels discover zoning only from a matching official muni
     }
     if (url.includes('/sharing/rest/search?')) {
       return json({ results: [
-        { id: itemId, title: 'Town of Fairfax Zoning', type: 'Web Map', owner: 'TownOfFairfaxSC', orgId: 'fairfax-org', tags: ['zoning'] },
+        { id: itemId, title: 'Town of Fairfax Zoning', type: 'Web Map', owner: 'TownOfFairfaxSC', tags: ['zoning'] },
         { id: '22222222222222222222222222222222', title: 'Fairfax Future Land Use', type: 'Web Map', owner: 'random', orgId: 'random-org', tags: ['zoning'] },
       ] });
     }
@@ -132,6 +142,40 @@ test('incorporated SC parcels discover zoning only from a matching official muni
   assert.equal(result.code, 'R-10');
   assert.equal(result.jurisdiction, 'Fairfax');
   assert.ok(!requests.some((request) => request.url.includes('22222222222222222222222222222222')));
+  assert.ok(requests.some((request) => request.url.includes(`/content/items/${itemId}?`)), 'item metadata supplies the missing organization id');
+  assert.ok(requests.every((request) => request.options.cache === 'no-store'));
+});
+
+test('non-ArcGIS county portals fall back to a publisher-verified ArcGIS catalog item', async () => {
+  const requests = [];
+  const itemId = '33333333333333333333333333333333';
+  const thirdPartyId = '44444444444444444444444444444444';
+  const service = 'https://services.arcgis.com/official/arcgis/rest/services/Allendale_County_Zoning/FeatureServer';
+  const json = (body) => new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
+  const fetcher = async (value, options = {}) => {
+    const url = String(value);
+    requests.push({ url, options });
+    if (url === 'https://www.allendalecounty.com/') return new Response('<html><body>County GIS</body></html>', { status: 200 });
+    if (url.includes('Places_CouSub_ConCity_SubMCD')) return json({ features: [] });
+    if (url.includes('/sharing/rest/search?')) return json({ results: [
+      { id: itemId, title: 'Allendale County Zoning', type: 'Web Map', owner: 'AllendaleCountyGIS', tags: ['South Carolina', 'zoning'] },
+      { id: thirdPartyId, title: 'Allendale County Zoning', type: 'Web Map', owner: 'UniversityLab', tags: ['South Carolina', 'zoning'] },
+    ] });
+    if (url.includes(`/content/items/${itemId}/data`)) return json({ operationalLayers: [{ title: 'Adopted zoning', url: service }] });
+    if (url.includes(`/content/items/${itemId}?`)) return json({ id: itemId, owner: 'AllendaleCountyGIS', orgId: 'allendale-org', tags: ['South Carolina', 'zoning'] });
+    if (url.includes(`/content/items/${thirdPartyId}?`)) return json({ id: thirdPartyId, owner: 'UniversityLab', orgId: 'university-org', tags: ['South Carolina', 'zoning'] });
+    if (url.includes('/portals/allendale-org?')) return json({ name: 'Allendale County GIS', urlKey: 'allendalecountysc' });
+    if (url.includes('/portals/university-org?')) return json({ name: 'University Lab', urlKey: 'university' });
+    if (url === `${service}?f=json`) return json({ layers: [{ id: 0, name: 'Zoning Districts' }] });
+    if (url === `${service}/0?f=json`) return json({ fields: [{ name: 'ZONE_CODE', alias: 'Zoning code' }] });
+    if (url.startsWith(`${service}/0/query?`)) return json({ features: [{ attributes: { ZONE_CODE: 'C-1' } }] });
+    return json({});
+  };
+
+  const result = await resolveOfficialScZoning({ county: 'Allendale', lng: -81.308, lat: 33.007, fetcher });
+  assert.equal(result.code, 'C-1');
+  assert.equal(result.discovery, 'official-arcgis-portal');
+  assert.ok(!requests.some((request) => request.url.includes(`/content/items/${thirdPartyId}/data`)));
   assert.ok(requests.every((request) => request.options.cache === 'no-store'));
 });
 
@@ -215,6 +259,51 @@ test('official SC FeatureServers are queried at the exact property point', async
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test('combined official zoning labels are split into a code and description', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, options) => {
+    const value = String(url);
+    if (value.includes('/FeatureServer/33/query?')) {
+      return new Response(JSON.stringify({ features: [
+        { attributes: { ZONINGNAME: 'NA-Area inside City Limits' } },
+        { attributes: { ZONINGNAME: 'CG-Commercial General' } },
+      ] }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    return new Response('{}', { status: 404, headers: { 'content-type': 'application/json' } });
+  };
+  try {
+    const result = await zoning.fetchCountyZoningCode('Orangeburg, SC', -80.5600, 33.4760);
+    assert.equal(result.code, 'CG');
+    assert.equal(result.description, 'Commercial General');
+    assert.match(result.sourceUrl, /Main_Public_Tax_Parcel_Map/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('server resolver parses combined labels from an official county layer', async () => {
+  const service = 'https://services2.arcgis.com/bUKn95BqgpYYTnx3/arcgis/rest/services/Main_Public_Tax_Parcel_Map_WFL1/FeatureServer';
+  const json = (body) => new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
+  const fetcher = async (value) => {
+    const url = String(value);
+    if (url.includes('Places_CouSub_ConCity_SubMCD')) return json({ features: [] });
+    if (url === `${service}?f=json`) return json({ layers: [{ id: 33, name: 'Zoning' }] });
+    if (url === `${service}/33?f=json`) return json({ fields: [
+      { name: 'ZONING', alias: 'ZONING' },
+      { name: 'ZONINGNAME', alias: 'ZONINGNAME' },
+    ] });
+    if (url.startsWith(`${service}/33/query?`)) return json({ features: [
+      { attributes: { ZONING: null, ZONINGNAME: 'CG-Commercial General' } },
+    ] });
+    return json({});
+  };
+
+  const result = await resolveOfficialScZoning({ county: 'Orangeburg', lng: -80.5600, lat: 33.4760, fetcher });
+  assert.equal(result.code, 'CG');
+  assert.equal(result.description, 'Commercial General');
+  assert.match(result.sourceUrl, /FeatureServer\/33$/);
 });
 
 test('official NC and SC identify responses produce district codes', () => {
