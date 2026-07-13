@@ -3,7 +3,7 @@ import { scZoningCoverage } from './sc-zoning-manifest.js';
 const ITEM_ID_RE = /^[a-f0-9]{32}$/i;
 const SERVICE_URL_RE = /https?:\\?\/\\?\/[^"'<>\s]+?(?:MapServer|FeatureServer)(?:\/\d+)?/gi;
 const BASE_ZONING_RE = /\b(zoning|zone class|zoning district|base district)\b/i;
-const EXCLUDED_LAYER_RE = /\b(future|proposed|draft|original|rezon(?:e|ing)|case|request|overlay|historic|flood|school|tax|assessment|land use|comprehensive plan|enterprise|opportunity|evacuation|wind|summar(?:y|ize)|comparison|footprint|construction|enforcement|subdistrict|canvass|lowest|cool down)\b/i;
+const EXCLUDED_LAYER_RE = /\b(future|proposed|draft|original|rezon(?:e|ing)|case|request|overlay|historic|flood|school|tax|assessment|land use|comprehensive plan|enterprise|opportunity|evacuation|wind|heat|analysis|summar(?:y|ize)|comparison|footprint|construction|enforcement|subdistrict|canvass|lowest|cool down)\b/i;
 const CODE_KEY_RE = /^(?:zoning|zone|zone_?class|zone_?code|zoning_?district|zoning_?code|zclass|zcode|zdist|newzone|udo(?:_?label)?|code)$/i;
 const LOOSE_CODE_KEY_RE = /zon|^zn|district|^class$|^code$/i;
 const EXCLUDED_KEY_RE = /desc|name|jur|muni|city|county|town|date|case|owner|area|shape|objectid|globalid|url|link|land.?use/i;
