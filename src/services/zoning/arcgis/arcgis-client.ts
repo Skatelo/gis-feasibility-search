@@ -3,7 +3,7 @@
 // through the guarded fetchJson. Nothing here knows about zoning — it just talks
 // ArcGIS REST.
 
-import { buildUrl, fetchJson } from '../utils/http';
+import { buildUrl, fetchJson, HttpError } from '../utils/http';
 import {
   ArcgisErrorSchema,
   CatalogSchema,
@@ -81,6 +81,43 @@ export interface PointQueryOptions extends ArcgisClientOptions {
   /** Requested output geometry SR. */
   outSR?: number;
   where?: string;
+  /** Force form-encoded POST for legacy or URL-length-sensitive services. */
+  forcePost?: boolean;
+  /** Optional bounded nearest-feature search distance. */
+  distance?: number;
+  units?: 'esriSRUnit_Meter' | 'esriSRUnit_Foot';
+}
+
+const MAX_GET_URL_LENGTH = 1_800;
+
+async function executeQuery(
+  endpoint: string,
+  params: Record<string, string | number | boolean | undefined>,
+  opts: PointQueryOptions,
+): Promise<ArcgisQueryResponse> {
+  const getUrl = buildUrl(endpoint, params);
+  const shouldPost = opts.forcePost === true || getUrl.length > MAX_GET_URL_LENGTH;
+  const request = async (usePost: boolean): Promise<unknown> => {
+    if (!usePost) return fetchJson(getUrl, opts);
+    const body = new URLSearchParams();
+    for (const [key, value] of Object.entries(params)) if (value !== undefined) body.set(key, String(value));
+    return fetchJson(endpoint, {
+      ...opts,
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: body.toString(),
+    });
+  };
+
+  let raw: unknown;
+  try {
+    raw = await request(shouldPost);
+  } catch (error) {
+    if (shouldPost || !(error instanceof HttpError) || ![405, 414, 431].includes(error.status)) throw error;
+    raw = await request(true);
+  }
+  assertNotArcgisError(raw, endpoint);
+  return QueryResponseSchema.parse(raw);
 }
 
 /** Point-in-polygon query against a specific layer. Longitude precedes latitude,
@@ -92,7 +129,8 @@ export async function queryLayerAtPoint(
   latitude: number,
   opts: PointQueryOptions = {},
 ): Promise<ArcgisQueryResponse> {
-  const url = buildUrl(`${serviceRoot(serviceUrl)}/${layerId}/query`, {
+  const endpoint = `${serviceRoot(serviceUrl)}/${layerId}/query`;
+  return executeQuery(endpoint, {
     f: 'json',
     where: opts.where ?? '1=1',
     geometry: `${longitude},${latitude}`,
@@ -102,10 +140,9 @@ export async function queryLayerAtPoint(
     outFields: opts.outFields ?? '*',
     returnGeometry: opts.returnGeometry ?? false,
     outSR: opts.outSR ?? 4326,
-  });
-  const raw = await fetchJson(url, opts);
-  assertNotArcgisError(raw, url);
-  return QueryResponseSchema.parse(raw);
+    distance: opts.distance,
+    units: opts.distance !== undefined ? opts.units ?? 'esriSRUnit_Meter' : undefined,
+  }, opts);
 }
 
 /** Envelope query — a tiny bbox around the point. Some older servers (HARN
@@ -119,7 +156,8 @@ export async function queryLayerAtEnvelope(
   delta = 0.00012,
   opts: PointQueryOptions = {},
 ): Promise<ArcgisQueryResponse> {
-  const url = buildUrl(`${serviceRoot(serviceUrl)}/${layerId}/query`, {
+  const endpoint = `${serviceRoot(serviceUrl)}/${layerId}/query`;
+  return executeQuery(endpoint, {
     f: 'json',
     where: opts.where ?? '1=1',
     geometry: `${longitude - delta},${latitude - delta},${longitude + delta},${latitude + delta}`,
@@ -129,10 +167,55 @@ export async function queryLayerAtEnvelope(
     outFields: opts.outFields ?? '*',
     returnGeometry: opts.returnGeometry ?? false,
     outSR: opts.outSR ?? 4326,
-  });
-  const raw = await fetchJson(url, opts);
-  assertNotArcgisError(raw, url);
-  return QueryResponseSchema.parse(raw);
+  }, opts);
+}
+
+export interface GeometryQueryOptions extends PointQueryOptions {
+  geometryType: 'esriGeometryPolygon' | 'esriGeometryEnvelope';
+  geometry: Record<string, unknown> | string;
+}
+
+export interface WhereQueryOptions extends PointQueryOptions {
+  resultRecordCount?: number;
+  orderByFields?: string;
+}
+
+/** Retrieve a bounded sample or attribute-filtered set from a numbered layer. */
+export async function queryLayerWhere(
+  serviceUrl: string,
+  layerId: number | string,
+  opts: WhereQueryOptions = {},
+): Promise<ArcgisQueryResponse> {
+  const endpoint = `${serviceRoot(serviceUrl)}/${layerId}/query`;
+  return executeQuery(endpoint, {
+    f: 'json',
+    where: opts.where ?? '1=1',
+    outFields: opts.outFields ?? '*',
+    returnGeometry: opts.returnGeometry ?? false,
+    outSR: opts.outSR ?? 4326,
+    resultRecordCount: opts.resultRecordCount ?? 1,
+    orderByFields: opts.orderByFields,
+  }, opts);
+}
+
+/** Query a numbered layer with a polygon/envelope. Complex geometry is sent by POST. */
+export async function queryLayerByGeometry(
+  serviceUrl: string,
+  layerId: number | string,
+  opts: GeometryQueryOptions,
+): Promise<ArcgisQueryResponse> {
+  const endpoint = `${serviceRoot(serviceUrl)}/${layerId}/query`;
+  return executeQuery(endpoint, {
+    f: 'json',
+    where: opts.where ?? '1=1',
+    geometry: typeof opts.geometry === 'string' ? opts.geometry : JSON.stringify(opts.geometry),
+    geometryType: opts.geometryType,
+    inSR: opts.inSR ?? 4326,
+    spatialRel: 'esriSpatialRelIntersects',
+    outFields: opts.outFields ?? '*',
+    returnGeometry: opts.returnGeometry ?? false,
+    outSR: opts.outSR ?? 4326,
+  }, { ...opts, forcePost: opts.forcePost ?? true });
 }
 
 /** True when the layer's capabilities advertise Query support. */

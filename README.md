@@ -40,3 +40,21 @@ Crawlee runs inside the Netlify backend and does not require a separate API key.
 The crawler uses HTTP + Cheerio rather than a browser for speed. Each run is limited by page count, crawl depth, concurrency, request timeout, and a 12 MB response cap. It follows only relevant same-site links, respects `robots.txt`, blocks private-network targets, and is rate-limited per visitor in production.
 
 For local testing of the crawler endpoint, use `npx netlify dev`. Plain `npm run dev` still supports Perplexity search, but it does not execute Netlify functions.
+
+## Official NC/SC Zoning Service
+
+The repository also contains a registry-only Fastify zoning service backed by
+PostGIS, Redis, and BullMQ. Normal address lookups query previously reviewed
+official ArcGIS layers only; Perplexity, Crawlee, Playwright, and AI are limited
+to administrative source onboarding and maintenance.
+
+```bash
+npm run typecheck:zoning-server
+npm run build:zoning-server
+docker compose --env-file .env.zoning -f docker-compose.zoning.yml up --build
+```
+
+The first rollout covers reviewed sources in Mecklenburg, Gaston, Cabarrus,
+Union (NC), York, and Lancaster (SC). It does not claim all 100 NC and 46 SC
+counties are validated. See `docs/zoning-coverage.md` and open
+`/#/zoning-admin` for source health and review.

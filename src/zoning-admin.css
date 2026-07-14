@@ -1,0 +1,92 @@
+.za-shell { display: flex; flex-direction: column; gap: 16px; width: 100%; color: #172033; }
+.za-shell button, .za-shell input, .za-shell select { font: inherit; }
+.za-toolbar { display: grid; grid-template-columns: minmax(220px, 1fr) minmax(190px, 280px) minmax(150px, 220px) 38px auto; gap: 10px; align-items: end; padding: 14px 0; border-bottom: 1px solid #d8dee8; }
+.za-toolbar h2 { margin: 0; font-size: 1.2rem; letter-spacing: 0; }
+.za-toolbar div > span { display: block; margin-top: 2px; color: #667085; font-size: 0.76rem; }
+.za-toolbar label, .za-modal label, .za-test label { display: flex; flex-direction: column; gap: 4px; color: #475467; font-size: 0.7rem; font-weight: 700; }
+.za-toolbar input, .za-modal input, .za-modal select, .za-test input, .za-discovery input, .za-discovery select { min-width: 0; height: 38px; padding: 0 10px; color: #172033; background: #fff; border: 1px solid #cfd6e1; border-radius: 6px; outline: none; }
+.za-toolbar input:focus, .za-modal input:focus, .za-modal select:focus, .za-test input:focus, .za-discovery input:focus, .za-discovery select:focus { border-color: #2563eb; box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12); }
+.za-icon-button, .za-row-actions button, .za-alert button, .za-modal header button { width: 38px; height: 38px; display: inline-flex; align-items: center; justify-content: center; color: #475467; background: #fff; border: 1px solid #cfd6e1; border-radius: 6px; cursor: pointer; }
+.za-command { min-height: 38px; display: inline-flex; align-items: center; justify-content: center; gap: 7px; padding: 0 13px; color: #fff; background: #173b57; border: 1px solid #173b57; border-radius: 6px; font-weight: 700; cursor: pointer; white-space: nowrap; }
+.za-command:hover, .za-command:focus-visible { background: #0e2d43; }
+.za-command:disabled, .za-icon-button:disabled { opacity: 0.55; cursor: default; }
+.za-alert { min-height: 40px; display: flex; align-items: center; gap: 8px; padding: 9px 12px; border: 1px solid; border-radius: 6px; font-size: 0.8rem; }
+.za-alert.error { color: #991b1b; background: #fff7f7; border-color: #fecaca; }
+.za-alert.success { color: #166534; background: #f4fbf6; border-color: #bbf7d0; }
+.za-alert button { width: 28px; height: 28px; margin-left: auto; border: 0; background: transparent; color: currentColor; }
+.za-stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); background: #fff; border: 1px solid #d8dee8; border-radius: 8px; overflow: hidden; }
+.za-stats div { min-height: 74px; display: flex; flex-direction: column; justify-content: center; gap: 4px; padding: 12px 16px; border-right: 1px solid #e5e9f0; }
+.za-stats div:last-child { border-right: 0; }
+.za-stats span { color: #667085; font-size: 0.7rem; font-weight: 700; text-transform: uppercase; }
+.za-stats strong { color: #172033; font: 700 1.45rem/1 var(--font-heading); }
+.za-tabs { width: max-content; max-width: 100%; display: flex; padding: 3px; overflow-x: auto; background: #e9edf2; border-radius: 7px; }
+.za-tabs button { min-height: 34px; display: inline-flex; align-items: center; gap: 6px; padding: 0 12px; color: #526071; background: transparent; border: 0; border-radius: 5px; font-size: 0.78rem; font-weight: 700; cursor: pointer; white-space: nowrap; }
+.za-tabs button.active { color: #172033; background: #fff; box-shadow: 0 1px 3px rgba(16, 24, 40, 0.1); }
+.za-panel { background: #fff; border: 1px solid #d8dee8; border-radius: 8px; overflow: hidden; }
+.za-panel-head { min-height: 58px; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; border-bottom: 1px solid #e5e9f0; }
+.za-filters { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.za-search, .za-select { height: 36px; display: flex; align-items: center; gap: 7px; padding: 0 9px; color: #667085; background: #f8fafc; border: 1px solid #d8dee8; border-radius: 6px; }
+.za-search { width: min(320px, 42vw); }
+.za-search input, .za-select select { min-width: 0; width: 100%; color: #172033; background: transparent; border: 0; outline: 0; font-size: 0.78rem; }
+.za-select select { width: auto; }
+.za-table-wrap { width: 100%; overflow-x: auto; }
+.za-table { width: 100%; min-width: 940px; border-collapse: collapse; font-size: 0.75rem; text-align: left; }
+.za-table th { padding: 9px 12px; color: #667085; background: #f8fafc; border-bottom: 1px solid #e5e9f0; font-size: 0.65rem; text-transform: uppercase; }
+.za-table td { padding: 10px 12px; border-bottom: 1px solid #edf0f4; vertical-align: middle; }
+.za-table tbody tr:hover { background: #fafbfd; }
+.za-table strong, .za-table small { display: block; }
+.za-table strong { color: #172033; font-size: 0.78rem; }
+.za-table small { max-width: 230px; margin-top: 3px; color: #7b8494; font-size: 0.65rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.za-table a { display: block; max-width: 240px; color: #175cd3; font-weight: 700; text-decoration: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.za-table code { display: inline-block; max-width: 190px; color: #344054; background: #eef1f5; padding: 3px 5px; border-radius: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.za-status { display: inline-block; padding: 3px 7px; color: #475467; background: #f2f4f7; border-radius: 999px; font-size: 0.63rem; font-weight: 800; text-transform: uppercase; white-space: nowrap; }
+.za-status.verified, .za-status.high_confidence { color: #166534; background: #dcfce7; }
+.za-status.candidate, .za-status.manual_review { color: #92400e; background: #fef3c7; }
+.za-status.degraded, .za-status.rejected, .za-status.disabled { color: #991b1b; background: #fee2e2; }
+.za-row-actions { display: grid; grid-template-columns: repeat(5, 30px); gap: 4px; justify-content: end; }
+.za-row-actions button { width: 30px; height: 30px; border-color: transparent; background: transparent; }
+.za-row-actions button:hover { color: #175cd3; background: #eef4ff; }
+.za-empty { padding: 32px; color: #667085; text-align: center; font-size: 0.8rem; }
+.za-discovery { display: grid; grid-template-columns: auto 90px minmax(140px, 1fr) minmax(140px, 1fr) minmax(220px, 1.4fr) auto; gap: 8px; align-items: center; padding: 12px; background: #fbfcfd; border-top: 1px solid #e5e9f0; }
+.za-discovery h3 { margin: 0; font-size: 0.82rem; letter-spacing: 0; }
+.za-meter { width: 130px; height: 6px; display: inline-block; margin-right: 7px; overflow: hidden; vertical-align: middle; background: #e5e9f0; border-radius: 999px; }
+.za-meter span { display: block; height: 100%; background: #15803d; }
+.za-test { display: grid; grid-template-columns: minmax(280px, 420px) minmax(0, 1fr); gap: 16px; align-items: start; }
+.za-test form { display: flex; align-items: end; gap: 8px; padding: 14px; background: #fff; border: 1px solid #d8dee8; border-radius: 8px; }
+.za-test label { flex: 1; }
+.za-test pre, .za-detail pre { max-height: 600px; margin: 0; padding: 14px; overflow: auto; color: #d1e7dd; background: #14212b; border-radius: 8px; font-size: 0.72rem; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
+.za-modal-backdrop { position: fixed; inset: 0; z-index: 10000; display: grid; place-items: center; padding: 18px; background: rgba(10, 20, 30, 0.48); }
+.za-modal { width: min(760px, 100%); max-height: calc(100vh - 36px); overflow: auto; background: #fff; border: 1px solid #cfd6e1; border-radius: 8px; box-shadow: 0 20px 50px rgba(10, 20, 30, 0.22); }
+.za-modal header { position: sticky; top: 0; z-index: 1; min-height: 52px; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 14px; background: #fff; border-bottom: 1px solid #e5e9f0; }
+.za-modal h3 { margin: 0; font-size: 1rem; letter-spacing: 0; }
+.za-modal header button { border: 0; }
+.za-modal form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; padding: 14px; }
+.za-modal .wide, .za-modal footer { grid-column: 1 / -1; }
+.za-modal footer { display: flex; justify-content: flex-end; gap: 8px; padding-top: 10px; border-top: 1px solid #e5e9f0; }
+.za-modal footer > button:not(.za-command) { min-height: 38px; padding: 0 13px; color: #344054; background: #fff; border: 1px solid #cfd6e1; border-radius: 6px; cursor: pointer; }
+.za-detail { width: min(900px, 100%); }
+.za-detail pre { max-height: calc(100vh - 110px); border-radius: 0; }
+
+@media (max-width: 1050px) {
+  .za-toolbar { grid-template-columns: 1fr 1fr 42px auto; }
+  .za-toolbar > div { grid-column: 1 / -1; }
+  .za-discovery { grid-template-columns: 90px 1fr 1fr; }
+  .za-discovery h3, .za-discovery .za-command { grid-column: 1 / -1; justify-self: start; }
+}
+
+@media (max-width: 720px) {
+  .za-toolbar { grid-template-columns: 1fr 42px; }
+  .za-toolbar label { grid-column: 1 / -1; }
+  .za-toolbar .za-command { grid-column: 1 / -1; }
+  .za-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .za-stats div:nth-child(2) { border-right: 0; }
+  .za-stats div:nth-child(-n+2) { border-bottom: 1px solid #e5e9f0; }
+  .za-panel-head, .za-filters { align-items: stretch; flex-direction: column; }
+  .za-search { width: 100%; }
+  .za-discovery { grid-template-columns: 1fr; }
+  .za-discovery h3, .za-discovery .za-command { grid-column: auto; }
+  .za-test { grid-template-columns: 1fr; }
+  .za-test form { align-items: stretch; flex-direction: column; }
+  .za-modal form { grid-template-columns: 1fr; }
+  .za-modal .wide, .za-modal footer { grid-column: auto; }
+}

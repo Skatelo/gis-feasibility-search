@@ -8,10 +8,14 @@ export {
   getLayerMetadata,
   queryLayerAtPoint,
   queryLayerAtEnvelope,
+  queryLayerByGeometry,
+  queryLayerWhere,
   layerSupportsQuery,
   isPolygonLayer,
   type ArcgisClientOptions,
   type PointQueryOptions,
+  type GeometryQueryOptions,
+  type WhereQueryOptions,
 } from './arcgis-client';
 export { detectFieldMapping } from './field-detector';
 export { classifyLayer, type LayerClassification } from './layer-classifier';

@@ -1,14 +1,23 @@
-import { test } from 'node:test';
+import { afterEach, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { detectFieldMapping } from './field-detector';
 import { classifyLayer } from './layer-classifier';
 import { inspectArcgisService, layerForRole } from './service-inspector';
 import { queryZoning } from './spatial-query';
-import { serviceRoot, isLayerUrl, layerIdFromUrl } from './arcgis-client';
+import { serviceRoot, isLayerUrl, layerIdFromUrl, layerSupportsQuery, queryLayerAtPoint } from './arcgis-client';
 import type { ArcgisLayerMetadata } from './arcgis.types';
 import type { DiscoveredSource } from '../types';
 
 const LIVE = process.env.ZONING_LIVE === '1';
+const originalFetch = globalThis.fetch;
+
+afterEach(() => {
+  globalThis.fetch = originalFetch;
+});
+
+function jsonResponse(value: unknown, status = 200): Response {
+  return new Response(JSON.stringify(value), { status, headers: { 'content-type': 'application/json' } });
+}
 
 function layer(over: Partial<ArcgisLayerMetadata>): ArcgisLayerMetadata {
   return {
@@ -92,6 +101,60 @@ test('classifier does not call a Future Land Use layer zoning even with a code f
     }),
   );
   assert.equal(c.role, 'future-land-use');
+});
+
+test('point query retries as form-encoded POST when a server rejects GET length', async () => {
+  const calls: Array<{ method: string; body: string }> = [];
+  globalThis.fetch = async (_input, init) => {
+    calls.push({ method: init?.method ?? 'GET', body: String(init?.body ?? '') });
+    if (calls.length === 1) return jsonResponse({ error: 'URI too long' }, 414);
+    return jsonResponse({ features: [{ attributes: { ZONE: 'R-1' } }] });
+  };
+  const response = await queryLayerAtPoint(
+    'https://gis.example.gov/arcgis/rest/services/Zoning/MapServer/0',
+    0,
+    -80.8,
+    35.2,
+    { outFields: 'ZONE' },
+  );
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0]?.method, 'GET');
+  assert.equal(calls[1]?.method, 'POST');
+  assert.match(calls[1]?.body ?? '', /geometry=-80\.8%2C35\.2/);
+  assert.equal(response.features?.[0]?.attributes?.ZONE, 'R-1');
+});
+
+test('point query keeps WGS84 input and requests a configured output projection', async () => {
+  let requestedUrl = '';
+  globalThis.fetch = async (input) => {
+    requestedUrl = String(input);
+    return jsonResponse({ features: [] });
+  };
+  await queryLayerAtPoint('https://gis.example.gov/rest/services/Z/FeatureServer/4', 4, -81, 34.9, { outSR: 2264 });
+  const requested = new URL(requestedUrl);
+  assert.equal(requested.searchParams.get('inSR'), '4326');
+  assert.equal(requested.searchParams.get('outSR'), '2264');
+  assert.equal(requested.pathname.endsWith('/FeatureServer/4/query'), true);
+});
+
+test('ArcGIS token errors and query-disabled metadata are explicit', async () => {
+  globalThis.fetch = async () => jsonResponse({ error: { code: 499, message: 'Token Required' } });
+  await assert.rejects(
+    queryLayerAtPoint('https://gis.example.gov/rest/services/Z/MapServer/0', 0, -81, 35),
+    /Token Required/,
+  );
+  assert.equal(layerSupportsQuery(layer({ capabilities: 'Map' })), false);
+  assert.equal(layerSupportsQuery(layer({ capabilities: 'Map,Query,Data' })), true);
+});
+
+test('ArcGIS timeout aborts a slow government request', async () => {
+  globalThis.fetch = async (_input, init) => new Promise<Response>((_resolve, reject) => {
+    init?.signal?.addEventListener('abort', () => reject(init.signal?.reason ?? new Error('aborted')), { once: true });
+  });
+  await assert.rejects(
+    queryLayerAtPoint('https://gis.example.gov/rest/services/Z/MapServer/0', 0, -81, 35, { timeoutMs: 15 }),
+    /timed out|timeout/i,
+  );
 });
 
 // --- Live: inspect a real service and query a point ------------------------

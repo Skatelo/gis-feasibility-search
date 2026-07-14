@@ -1,13 +1,6 @@
-// The universal zoning lookup engine — orchestrates the discover-once / verify /
-// cache / reuse runtime loop.
-//
-//   address -> geocode -> jurisdiction -> registry.get(key)
-//     HIT  -> query the recorded ArcGIS layers directly (fast path)
-//     MISS -> discover -> inspect -> save record -> query (then all later
-//             lookups in this jurisdiction reuse the record)
-//
-// Deterministic GIS queries decide the zoning code; search/AI only locate the
-// source. One failed stage never fails the whole lookup — errors are collected.
+// Registry-only live zoning orchestration.
+// address -> geocode -> jurisdiction -> verified source -> parcel -> zoning.
+// Discovery, crawling, browser automation, and AI are maintenance-only paths.
 
 import {
   ZoningLookupInputSchema,
@@ -23,6 +16,8 @@ import {
   type SourceRegistry,
   type Logger,
   type AdapterContext,
+  type JurisdictionSourceRecord,
+  type ParcelResult,
 } from '../types';
 import { resolveJurisdiction } from '../jurisdiction';
 import { layerForRole } from '../arcgis';
@@ -31,15 +26,17 @@ import { fetchJson } from '../utils/http';
 import { normalizeZoning } from '../normalization/zoning-normalizer';
 import { computeConfidence } from '../confidence/confidence-calculator';
 import { jurisdictionKey, CACHE_TTL } from '../registry';
-import type { SourceDiscoveryService } from '../discovery';
-import { recordFromInspected, inspectedFromRecord } from './record-mapper';
+import { inspectedFromRecord } from './record-mapper';
+import { lookupParcel } from '../parcel';
+import { queryZoningForParcel } from '../geometry';
+import type { MultiPolygon, Polygon } from 'geojson';
 
 export type LookupMode = 'fast' | 'verified' | 'deep';
 
 export interface ZoningEngineDeps {
   geocoder: Geocoder;
   registry: SourceRegistry;
-  discovery: SourceDiscoveryService;
+  jurisdictionResolver?: (address: GeocodedAddress, mode: LookupMode) => Promise<JurisdictionResult>;
   log?: Logger;
 }
 
@@ -48,13 +45,13 @@ const noopLog: Logger = { debug() {}, info() {}, warn() {}, error() {} };
 export class ZoningLookupEngine {
   private readonly geocoder: Geocoder;
   private readonly registry: SourceRegistry;
-  private readonly discovery: SourceDiscoveryService;
+  private readonly jurisdictionResolver?: ZoningEngineDeps['jurisdictionResolver'];
   private readonly log: Logger;
 
   constructor(deps: ZoningEngineDeps) {
     this.geocoder = deps.geocoder;
     this.registry = deps.registry;
-    this.discovery = deps.discovery;
+    this.jurisdictionResolver = deps.jurisdictionResolver;
     this.log = deps.log ?? noopLog;
   }
 
@@ -82,90 +79,159 @@ export class ZoningLookupEngine {
       };
     }
 
+    if (address.stateCode && !['NC', 'SC'].includes(address.stateCode.toUpperCase())) {
+      return {
+        ...baseResult(input),
+        address,
+        status: 'error',
+        errors: [{ stage: 'input-validation', message: 'Address must be in North Carolina or South Carolina', recoverable: false }],
+      };
+    }
+
     // 2) Resolve jurisdiction (geometry-confirmed unless fast mode).
     const jurisdiction = await this.resolveJurisdictionCached(address, mode).catch((err) => {
       errors.push({ stage: 'jurisdiction-resolution', message: String(err), recoverable: true });
       return fallbackJurisdiction(address);
     });
 
-    // 3) Resolve the GIS source: registry first, discovery on miss.
+    // 3) Resolve a previously verified GIS source. A miss remains a miss; live
+    // requests never search, crawl, inspect viewers, or invoke AI.
     const ctx: AdapterContext = {
       fetchJson: (url, signal) => fetchJson(url, { signal }),
       log: this.log,
     };
     let inspected: InspectedZoningSource | null = null;
     let discoveredSource: DiscoveredSource | null = null;
-    let fromRegistry = false;
+    let sourceRecord: JurisdictionSourceRecord | null = null;
     try {
-      const resolved = await this.resolveSource(jurisdiction, input, errors, ctx);
+      const resolved = await this.resolveSource(jurisdiction);
       inspected = resolved.inspected;
       discoveredSource = resolved.discoveredSource;
-      fromRegistry = resolved.fromRegistry;
+      sourceRecord = resolved.record;
     } catch (err) {
-      errors.push({ stage: 'source-discovery', message: String(err instanceof Error ? err.message : err), recoverable: true });
+      errors.push({ stage: 'registry', message: String(err instanceof Error ? err.message : err), recoverable: true });
     }
 
-    // 4) Query zoning + overlays deterministically, via the source's adapter.
+    // 4) Locate an official parcel and move the zoning query to an interior
+    // point. Deep/verified lookups also intersect the full parcel polygon.
+    let parcel: ParcelResult | null = null;
+    if (sourceRecord?.parcelLayers[0] && input.includeParcel !== false) {
+      try {
+        parcel = await lookupParcel(
+          sourceRecord.parcelLayers[0],
+          {
+            longitude: address.longitude,
+            latitude: address.latitude,
+            address: address.formattedAddress || input.address,
+            parcelId: input.parcelId,
+          },
+          { timeoutMs: mode === 'fast' ? 3_500 : 5_000 },
+        );
+      } catch (err) {
+        errors.push({ stage: 'parcel-query', message: String(err instanceof Error ? err.message : err), recoverable: true });
+      }
+    }
+
+    // 5) Query zoning + overlays deterministically from the saved layer IDs.
     const wantOverlays = input.includeOverlays !== false;
     let normalized = normalizeZoning([], []);
+    let zoningMatchQuality: 'parcel-polygon-intersect' | 'interior-point' | 'geocode-point' | 'none' = 'none';
+    let coverageByCode = new Map<string, number>();
     if (inspected) {
       const adapter = adapterForSourceType(inspected.sourceType) ?? selectAdapter(inspected.source);
       if (!adapter) {
         errors.push({ stage: 'zoning-query', message: `no adapter for source type ${inspected.sourceType}`, recoverable: true });
       } else {
         try {
-          const matches = await adapter.query(
-            inspected,
-            {
-              longitude: address.longitude,
-              latitude: address.latitude,
-              includeGeometry: input.includeGeometry,
-              jurisdictionHint: jurisdiction.municipality ?? jurisdiction.county ?? undefined,
-              roles: wantOverlays ? ['zoning', 'overlay'] : ['zoning'],
-            },
-            ctx,
-          );
-          normalized = normalizeZoning(matches, inspected.layers);
+          const parcelGeometry = parcel?.geometry;
+          if (parcelGeometry && (parcelGeometry.type === 'Polygon' || parcelGeometry.type === 'MultiPolygon')) {
+            const parcelQuery = await queryZoningForParcel(
+              inspected,
+              parcelGeometry as Polygon | MultiPolygon,
+              wantOverlays,
+            );
+            for (const message of parcelQuery.errors) {
+              errors.push({ stage: 'geometry-processing', message, recoverable: true });
+            }
+            if (parcelQuery.matches.length > 0) {
+              normalized = normalizeZoning(parcelQuery.matches, inspected.layers);
+              coverageByCode = parcelQuery.coverageByCode;
+              if (normalized.zoning.found) zoningMatchQuality = 'parcel-polygon-intersect';
+            }
+          }
+
+          if (!normalized.zoning.found) {
+            const queryPoint = parcel?.interiorPoint ?? { longitude: address.longitude, latitude: address.latitude };
+            const matches = await adapter.query(
+              inspected,
+              {
+                longitude: queryPoint.longitude,
+                latitude: queryPoint.latitude,
+                includeGeometry: input.includeGeometry,
+                jurisdictionHint: jurisdiction.municipality ?? jurisdiction.county ?? undefined,
+                roles: wantOverlays ? ['zoning', 'overlay'] : ['zoning'],
+              },
+              ctx,
+            );
+            normalized = normalizeZoning(matches, inspected.layers);
+            if (normalized.zoning.found) zoningMatchQuality = parcel?.interiorPoint ? 'interior-point' : 'geocode-point';
+          }
         } catch (err) {
           errors.push({ stage: 'zoning-query', message: String(err instanceof Error ? err.message : err), recoverable: true });
         }
       }
     }
 
-    // 5) Confidence + status.
+    // 6) Confidence + status.
     const confidence = computeConfidence({
       address,
       jurisdiction,
-      parcel: null,
+      parcel,
       zoningFound: normalized.zoning.found,
-      zoningMatchQuality: normalized.zoning.found ? 'geocode-point' : 'none',
+      zoningMatchQuality,
       source: discoveredSource,
-      sourceFromRegistry: fromRegistry,
+      sourceFromRegistry: !!sourceRecord,
     });
-    const status = deriveStatus(normalized.zoning.found, !!inspected, confidence.overall, confidence.warnings.length);
+    const status = deriveStatus(
+      normalized.zoning.found,
+      confidence.overall,
+      confidence.warnings.length,
+      jurisdiction.jurisdictionType,
+    );
+    const primaryCoverage = normalized.zoning.code
+      ? roundedCoverage(coverageByCode.get(normalized.zoning.code.toUpperCase()))
+      : null;
+    const additionalDistricts = normalized.zoning.additionalDistricts.map((district) => ({
+      ...district,
+      coveragePercent: district.code ? roundedCoverage(coverageByCode.get(district.code.toUpperCase())) : null,
+    }));
+    const resultParcel = parcel ? sanitizeParcel(parcel, input.includeGeometry === true) : null;
 
     return {
       input,
       address,
       jurisdiction,
-      parcel: null,
+      parcel: resultParcel,
       zoning: {
         ...normalized.zoning,
         jurisdiction: jurisdiction.zoningAuthority,
         jurisdictionType: jurisdiction.jurisdictionType,
-        coveragePercent: normalized.zoning.found && !normalized.zoning.splitZoned ? 100 : null,
+        splitZoned: additionalDistricts.length > 0,
+        coveragePercent: primaryCoverage,
+        additionalDistricts,
       },
       overlays: normalized.overlays,
       source: inspected
         ? {
             sourceType: inspected.sourceType,
             official: discoveredSource?.official ?? true,
-            agency: jurisdiction.zoningAuthority,
+            agency: discoveredSource?.agency ?? sourceRecord?.agencyName ?? jurisdiction.zoningAuthority,
             serviceUrl: inspected.serviceUrl,
             layerUrl: layerForRole(inspected, 'zoning')?.layerUrl ?? null,
             metadataUrl: inspected.metadataUrl,
             discoveredFrom: discoveredSource?.discoveredFrom ?? ['registry'],
-            accessedAt: inspected.accessedAt,
+            accessedAt: new Date().toISOString(),
+            lastValidatedAt: sourceRecord?.lastVerifiedAt ?? null,
           }
         : null,
       confidence,
@@ -207,17 +273,20 @@ export class ZoningLookupEngine {
     const key = `${address.latitude.toFixed(5)},${address.longitude.toFixed(5)}`;
     const cached = await this.registry.cacheGet<JurisdictionResult>('jurisdiction', key);
     if (cached) return cached;
-    const result = await resolveJurisdiction(address, { boundaryLookup: mode !== 'fast' });
+    const result = this.jurisdictionResolver
+      ? await this.jurisdictionResolver(address, mode)
+      : await resolveJurisdiction(address, { boundaryLookup: mode !== 'fast' });
     await this.registry.cacheSet('jurisdiction', key, result, CACHE_TTL.jurisdiction);
     return result;
   }
 
   private async resolveSource(
     jurisdiction: JurisdictionResult,
-    input: ZoningLookupInput,
-    errors: StageError[],
-    ctx: AdapterContext,
-  ): Promise<{ inspected: InspectedZoningSource | null; discoveredSource: DiscoveredSource | null; fromRegistry: boolean }> {
+  ): Promise<{
+    inspected: InspectedZoningSource | null;
+    discoveredSource: DiscoveredSource | null;
+    record: JurisdictionSourceRecord | null;
+  }> {
     const key = jurisdictionKey({
       country: 'US',
       stateCode: jurisdiction.stateCode,
@@ -226,48 +295,31 @@ export class ZoningLookupEngine {
       jurisdictionType: jurisdiction.jurisdictionType,
     });
 
-    // Registry-first (fast path).
-    if (!input.forceRefresh) {
-      const record = await this.registry.get(key).catch(() => null);
-      if (record && record.zoningLayers.length > 0) {
-        this.log.debug('registry hit', { key });
-        return { inspected: inspectedFromRecord(record), discoveredSource: recordSource(record.serviceUrl), fromRegistry: true };
-      }
+    const record = await this.registry.get(key);
+    if (!record) {
+      this.log.info('verified source registry miss', { key });
+      return { inspected: null, discoveredSource: null, record: null };
     }
-
-    // Discovery (slow path) — only on miss / forced refresh. Each candidate is
-    // inspected via the adapter that handles its source family (ArcGIS, GeoJSON,
-    // …); the first that yields a base-zoning layer is saved and reused.
-    if (input.discoverSources === false) {
-      return { inspected: null, discoveredSource: null, fromRegistry: false };
-    }
-    const candidates = await this.discovery.discover(jurisdiction, {
-      allowThirdParty: input.allowThirdParty,
-      log: this.log,
-    });
-    for (const candidate of candidates.slice(0, 5)) {
-      const adapter = selectAdapter(candidate);
-      if (!adapter) continue;
-      try {
-        const inspected = await adapter.inspect(candidate, ctx);
-        if (layerForRole(inspected, 'zoning')) {
-          const record = recordFromInspected(jurisdiction, inspected);
-          await this.registry.put(record).catch((err) => errors.push({ stage: 'registry', message: String(err), recoverable: true }));
-          this.log.info('discovered + saved source', { key, service: inspected.serviceUrl });
-          return { inspected, discoveredSource: candidate, fromRegistry: false };
-        }
-      } catch (err) {
-        errors.push({ stage: 'source-inspection', message: `${candidate.url}: ${String(err instanceof Error ? err.message : err)}`, recoverable: true });
-      }
-    }
-    return { inspected: null, discoveredSource: candidates[0] ?? null, fromRegistry: false };
+    this.log.debug('verified source registry hit', { key, health: record.healthStatus });
+    const queryable = record.zoningLayers.length > 0 && record.healthStatus !== 'broken';
+    return {
+      inspected: queryable ? inspectedFromRecord(record) : null,
+      discoveredSource: queryable ? recordSource(record) : null,
+      record,
+    };
   }
 }
 
 // --- helpers ---------------------------------------------------------------
 
-function recordSource(serviceUrl: string): DiscoveredSource {
-  return { url: serviceUrl, sourceType: /\/FeatureServer\b/i.test(serviceUrl) ? 'arcgis-featureserver' : 'arcgis-mapserver', official: true, agency: null, discoveredFrom: ['registry'] };
+function recordSource(record: JurisdictionSourceRecord): DiscoveredSource {
+  return {
+    url: record.serviceUrl,
+    sourceType: record.sourceType as DiscoveredSource['sourceType'],
+    official: true,
+    agency: record.agencyName,
+    discoveredFrom: ['verified PostgreSQL source registry'],
+  };
 }
 
 function fallbackJurisdiction(address: GeocodedAddress): JurisdictionResult {
@@ -284,11 +336,28 @@ function fallbackJurisdiction(address: GeocodedAddress): JurisdictionResult {
   };
 }
 
-function deriveStatus(zoningFound: boolean, hasSource: boolean, overall: number, warningCount: number): ZoningResultStatus {
-  if (!zoningFound) return hasSource ? 'manual-review-required' : 'not-found';
+function deriveStatus(
+  zoningFound: boolean,
+  overall: number,
+  warningCount: number,
+  jurisdictionType: JurisdictionResult['jurisdictionType'],
+): ZoningResultStatus {
+  if (jurisdictionType === 'no-zoning') return 'no-zoning';
+  if (!zoningFound) return 'manual-review-required';
   if (overall >= 85 && warningCount === 0) return 'verified';
   if (overall >= 65) return 'verified-with-warnings';
   return 'possible-match';
+}
+
+function roundedCoverage(value: number | undefined): number | null {
+  return value === undefined ? null : Math.round(value * 10) / 10;
+}
+
+function sanitizeParcel(parcel: ParcelResult, includeGeometry: boolean): ParcelResult {
+  const sanitized = { ...parcel };
+  delete sanitized.rawAttributes;
+  if (!includeGeometry) delete sanitized.geometry;
+  return sanitized;
 }
 
 function baseResult(input: ZoningLookupInput): UniversalZoningResult {

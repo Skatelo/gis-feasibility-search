@@ -1080,7 +1080,7 @@ export const FeasibilitySearch: FC = () => {
     if (!d || !d.coordinates) return;
     const seq = searchSeqRef.current;
     const zoningCanDriveComps = !['review-required', 'planning-designation', 'unavailable'].includes(String(d.zoningVerificationStatus))
-      && !/^(official map review|zoning code unresolved|land use:|no adopted district)/i.test(String(d.zoningCode || ''));
+      && !/^(manual review|official map review|zoning code unresolved|land use:|no adopted district)/i.test(String(d.zoningCode || ''));
     setCompsRefetching(true);
     try {
       const run = await fetchGoogleDistanceMatrixComps(
@@ -5021,7 +5021,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                     const countyOverlay = getRenderableZoningServices(data.countyName).length > 0;
                     const webZoning = data.zoningSource === 'web';
                     const canToggle = officialGis || webZoning;
-                    const label = officialGis ? "Zoning (Official GIS)" : webZoning ? "Zoning (web lookup)" : "Zoning (official map review)";
+                    const label = officialGis ? "Zoning (Official GIS)" : webZoning ? "Zoning (web lookup)" : "Zoning (Manual review)";
                     const title = countyOverlay
                       ? `Overlay zoning districts from ${data.countyName} County's own GIS server`
                       : officialGis

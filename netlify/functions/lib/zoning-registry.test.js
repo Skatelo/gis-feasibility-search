@@ -428,57 +428,26 @@ test('listing zoning evidence distinguishes one-provider reports from corroborat
   assert.equal(evidence.listingZoningEvidenceTier(['https://example.com/a']), null);
 });
 
-test('zoning uses official GIS first and grounded Gemini 3.5 Flash for research', () => {
+test('normal zoning uses only reviewed official GIS and never invokes discovery or AI', () => {
   const stage = serviceSource.slice(
     serviceSource.indexOf('// STAGE 3 - zoning.'),
     serviceSource.indexOf('// STAGE 4'),
   );
-  const resolver = serviceSource.slice(
-    serviceSource.indexOf('export async function fetchZoningViaWebSearch'),
-    serviceSource.indexOf('async function fetchDrivingDistancesViaSDK'),
-  );
 
-  assert.match(stage, /if \(geminiZoning\)/);
   assert.match(serviceSource, /countyName = `\$\{countyBaseName\(countyName\)\}, \$\{selectedState\}`/);
   assert.match(serviceSource, /addressString\.match\(\/\(\?:,\|\\s\)/);
+  assert.match(stage, /lookupOfficialZoning\(/);
+  assert.match(stage, /fetchCountyZoningCode\(/);
+  assert.match(stage, /allowServerDiscovery: false/);
+  assert.match(stage, /registryZoning\?\.status === 'verified'/);
+  assert.match(stage, /matchMethod: 'parcel-gis'/);
+  assert.match(stage, /zoningCode = 'MANUAL REVIEW'/);
   assert.match(stage, /zoningSetbackNotes/);
   assert.match(stage, /zoningRestrictions/);
-  assert.match(resolver, /fetchCountyZoningCode/);
-  assert.match(serviceSource, /const GEMINI_ZONING_MODEL = 'gemini-3\.5-flash'/);
-  assert.match(serviceSource, /tools: \[\{ google_search: \{\} \}\]/);
-  assert.match(resolver, /return bestOfficialResult[\s\S]*officialGisFallback[\s\S]*bestListingResult[\s\S]*statewideHintFallback[\s\S]*planningFallback[\s\S]*noAdoptedDistrictFallback/);
-  assert.match(resolver, /completeSetbacks[\s\S]*standards\?\.restrictions/);
-  // Zoning web research uses Google Search discovery + Crawlee as the PRIMARY
-  // lookup (no Perplexity in the zoning path).
-  assert.match(serviceSource, /async function googleSearchDiscoverUrls[\s\S]*tools: \[\{ google_search: \{\} \}\]/);
-  assert.match(serviceSource, /async function zoningResearchViaGoogleCrawlee[\s\S]*crawleeScrapeBatch/);
-  assert.match(resolver, /zoningResearchViaGoogleCrawlee\(queries, geminiKey/);
-  assert.doesNotMatch(resolver, /perplexityResearchBlock/);
-  assert.match(resolver, /const maxRounds = 3/);
-  assert.match(resolver, /zoningResearchStartedAt[\s\S]*elapsed > 20000[\s\S]*elapsed > 32000/);
-  assert.match(resolver, /state === 'NC' \? 18000 : 12000/);
-  assert.match(resolver, /onQuickResult/);
-  assert.match(resolver, /zoningQueriesForRound/);
-  assert.match(resolver, /municipality: incorporatedPlace/);
-  assert.match(resolver, /seedUrls: hints\.officialMapUrl/);
-  assert.match(resolver, /bestListingResult/);
-  assert.match(resolver, /statewideHintFallback/);
-  assert.match(resolver, /planningFallback/);
-  assert.match(resolver, /noAdoptedDistrictFallback/);
-  assert.match(serviceSource, /SC_NO_COUNTYWIDE_ZONING_SOURCES[\s\S]*Union:[\s\S]*library\.municode\.com\/sc\/union_county/);
-  assert.match(resolver, /incorporatedPlaceAtPoint[\s\S]*code: 'NO ADOPTED DISTRICT'/);
-  // NC has no statewide zoning layer, so it keeps a guaranteed review fallback:
-  // the section always routes to the official jurisdiction map rather than
-  // showing an unresolved/unavailable state.
-  assert.match(resolver, /reviewFallback[\s\S]*code: 'OFFICIAL MAP REVIEW'/);
-  assert.match(resolver, /noAdoptedDistrictFallback\s*\|\|\s*reviewFallback/);
-  assert.match(stage, /zoningCode = 'ZONING CODE UNRESOLVED'/);
-  assert.match(serviceSource, /site:zillow\.com[\s\S]*site:realtor\.com[\s\S]*site:redfin\.com/);
-  assert.doesNotMatch(resolver, /zoningExpertViaDeepSeek|deepSeekKey|model: 'sonar'/);
-  assert.doesNotMatch(serviceSource, /NOT PUBLISHED|"UNZONED"/);
-  assert.match(serviceSource, /method: 'POST',\s+cache: 'no-store',/);
-  assert.match(componentSource, /CORROBORATED: PROPERTY LISTINGS/);
-  assert.match(componentSource, /REPORTED: PROPERTY LISTING/);
+  assert.doesNotMatch(stage, /fetchZoningViaWebSearch\(/);
+  assert.doesNotMatch(stage, /gemini|perplexity|crawlee|google_search/i);
+  assert.doesNotMatch(stage, /OFFICIAL MAP REVIEW|ZONING CODE UNRESOLVED/);
+  assert.doesNotMatch(serviceSource, /code: 'OFFICIAL MAP REVIEW'/);
   assert.match(componentSource, /Setback rules and exceptions/);
   assert.match(componentSource, /Published zoning restrictions/);
   assert.match(componentSource, /STANDARDS:[\s\S]*REVIEW REQUIRED/);

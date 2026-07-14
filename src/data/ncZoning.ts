@@ -679,7 +679,7 @@ export async function fetchCountyZoningCode(
   countyName: string,
   lng: number,
   lat: number,
-  context: { address?: string; parcelId?: string } = {},
+  context: { address?: string; parcelId?: string; allowServerDiscovery?: boolean } = {},
 ): Promise<ResolvedZoning | null> {
   const services = getZoningServices(countyName);
   // County, municipal, and dynamically discovered official layers are
@@ -692,9 +692,12 @@ export async function fetchCountyZoningCode(
   });
   const config = getZoningConfig(countyName);
   const isSouthCarolina = /,\s*sc\s*$/i.test(countyName) || /,\s*SC$/i.test(config?.name || '');
-  candidates.push(isSouthCarolina
-    ? discoverScZoningAtPoint(countyName, lng, lat, context)
-    : discoverNcZoningAtPoint(countyName, lng, lat, context));
+  if (context.allowServerDiscovery !== false) {
+    const discoveryContext = { address: context.address, parcelId: context.parcelId };
+    candidates.push(isSouthCarolina
+      ? discoverScZoningAtPoint(countyName, lng, lat, discoveryContext)
+      : discoverNcZoningAtPoint(countyName, lng, lat, discoveryContext));
+  }
   if (!candidates.length) return null;
   try {
     return await Promise.any(candidates.map(async (candidate) => {

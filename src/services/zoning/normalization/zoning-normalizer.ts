@@ -3,7 +3,7 @@
 // zoning), and the overlays kept strictly separate. Uses each layer's detected
 // field mapping to read the code/description; never invents values.
 
-import type { InspectedLayer, RawZoningMatch } from '../types';
+import type { FieldMapping, InspectedLayer, RawZoningMatch } from '../types';
 import {
   cleanCode,
   cleanText,
@@ -38,11 +38,12 @@ function layerById(layers: InspectedLayer[]): Map<string, InspectedLayer> {
   return new Map(layers.map((l) => [String(l.id), l]));
 }
 
-function readCode(match: RawZoningMatch, layer: InspectedLayer | undefined): { code: string | null; description: string | null } {
-  const mapping = layer?.fieldMapping;
+export function normalizeZoningAttributes(
+  attrs: Record<string, unknown>,
+  mapping?: FieldMapping,
+): { code: string | null; description: string | null } {
   const codeField = mapping?.zoningCodeField;
   const descField = mapping?.zoningDescriptionField;
-  const attrs = match.attributes;
 
   // The mapped code field is trusted only when its VALUE is actually code-shaped.
   // If it holds description-like prose (misleading column name) or is empty, fall
@@ -59,6 +60,10 @@ function readCode(match: RawZoningMatch, layer: InspectedLayer | undefined): { c
       : scanForDescription(attrs, code) ?? (mappedDesc !== code ? mappedDesc : null);
 
   return { code, description };
+}
+
+function readCode(match: RawZoningMatch, layer: InspectedLayer | undefined): { code: string | null; description: string | null } {
+  return normalizeZoningAttributes(match.attributes, layer?.fieldMapping);
 }
 
 export function normalizeZoning(

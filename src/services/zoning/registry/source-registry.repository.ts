@@ -1,7 +1,5 @@
-// Jurisdiction source registry — the heart of the discover-once/verify/cache/
-// reuse runtime loop. The first lookup in a jurisdiction discovers + verifies
-// its GIS source and saves the record here; every later lookup in the same
-// jurisdiction reads the record and queries ArcGIS directly, skipping discovery.
+// Jurisdiction source registry. Live lookups read only previously reviewed
+// records; onboarding and replacement happen in maintenance workers.
 //
 // Persistence is pluggable (KVStore). Records validate through Zod on read, and
 // a record written by an older engine schema is treated as a miss so a stale

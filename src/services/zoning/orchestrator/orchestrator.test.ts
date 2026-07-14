@@ -4,7 +4,6 @@ import { recordFromInspected, inspectedFromRecord } from './record-mapper';
 import { ZoningLookupEngine } from './zoning-engine';
 import { CensusGeocoder } from '../geocoding';
 import { createInMemoryRegistry } from '../registry';
-import { SourceDiscoveryService, type SearchResult } from '../discovery';
 import type { InspectedZoningSource, JurisdictionResult } from '../types';
 
 const LIVE = process.env.ZONING_LIVE === '1';
@@ -50,26 +49,19 @@ test('invalid input yields an error result, not a throw', async () => {
   const engine = new ZoningLookupEngine({
     geocoder: new CensusGeocoder(),
     registry: createInMemoryRegistry(),
-    discovery: new SourceDiscoveryService(async () => [], async () => ''),
   });
   const r = await engine.lookup({ address: '' });
   assert.equal(r.status, 'error');
   assert.equal(r.errors[0].stage, 'input-validation');
 });
 
-test('live: full discover-once -> save -> reuse loop resolves a real district', { skip: !LIVE }, async () => {
-  let searchCalls = 0;
-  // Deterministic "search" standing in for Perplexity: returns the real Wake
-  // service so the whole discover -> inspect -> save -> query loop runs live.
-  const search = async (): Promise<SearchResult[]> => {
-    searchCalls++;
-    return [{ url: 'https://maps.wake.gov/arcgis/rest/services/Planning/Zoning/MapServer' }];
-  };
+test('live: verified registry source resolves directly and is reused', { skip: !LIVE }, async () => {
   const registry = createInMemoryRegistry();
+  await registry.put(recordFromInspected(jur, inspected));
   const engine = new ZoningLookupEngine({
     geocoder: new CensusGeocoder(),
     registry,
-    discovery: new SourceDiscoveryService(search, async () => ''),
+    jurisdictionResolver: async () => jur,
   });
 
   const r1 = await engine.lookup({ address: '227 Fayetteville St, Raleigh, NC', includeOverlays: false });
@@ -77,12 +69,10 @@ test('live: full discover-once -> save -> reuse loop resolves a real district', 
   assert.ok(['verified', 'verified-with-warnings'].includes(r1.status), `status ${r1.status}`);
   assert.match(r1.jurisdiction.zoningAuthority ?? '', /Raleigh/i);
   assert.ok(r1.source?.official);
-  assert.equal(searchCalls, 1, 'first lookup performs discovery');
 
-  // Second lookup in the same jurisdiction must reuse the registry — no new
-  // discovery, same deterministic result.
+  // The second request uses the same saved source; discovery does not exist in
+  // the live engine dependency graph.
   const r2 = await engine.lookup({ address: '227 Fayetteville St, Raleigh, NC', includeOverlays: false });
   assert.equal(r2.zoning.code, 'DX-40-SH');
-  assert.equal(searchCalls, 1, 'second lookup reuses the cached source (no rediscovery)');
   assert.ok(r2.confidence.reasons.some((x) => /registry/i.test(x)), 'second lookup should be registry-sourced');
 });

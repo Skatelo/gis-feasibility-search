@@ -1,0 +1,87 @@
+name: nc-sc-zoning
+
+x-zoning-environment: &zoning-environment
+  NODE_ENV: production
+  HOST: 0.0.0.0
+  PORT: 8787
+  DATABASE_URL: postgresql://zoning:${POSTGRES_PASSWORD:-zoning_dev_only}@postgis:5432/zoning
+  DATABASE_SSL: "false"
+  REDIS_URL: redis://redis:6379/0
+  GOOGLE_MAPS_API_KEY: ${GOOGLE_MAPS_API_KEY:-}
+  PERPLEXITY_API_KEY: ${PERPLEXITY_API_KEY:-}
+  PERPLEXITY_SEARCH_ENDPOINT: ${PERPLEXITY_SEARCH_ENDPOINT:-https://api.perplexity.ai/search}
+  ZONING_ADMIN_API_KEY: ${ZONING_ADMIN_API_KEY:-replace-with-at-least-16-characters}
+  ZONING_CORS_ORIGINS: ${ZONING_CORS_ORIGINS:-http://localhost:5173,http://localhost:4173}
+
+services:
+  postgis:
+    image: postgis/postgis:16-3.4
+    environment:
+      POSTGRES_DB: zoning
+      POSTGRES_USER: zoning
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-zoning_dev_only}
+    ports:
+      - "5432:5432"
+    volumes:
+      - zoning-postgis:/var/lib/postgresql/data
+      - ./supabase/migrations/202607140001_nc_sc_zoning_engine.sql:/docker-entrypoint-initdb.d/001-zoning.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U zoning -d zoning"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - zoning-redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  bootstrap:
+    build:
+      context: .
+      dockerfile: Dockerfile.zoning
+    environment: *zoning-environment
+    command: ["node", "dist-server/import.js"]
+    depends_on:
+      postgis:
+        condition: service_healthy
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.zoning
+    environment: *zoning-environment
+    ports:
+      - "8787:8787"
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8787/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.zoning
+    environment: *zoning-environment
+    command: ["node", "dist-server/worker.js"]
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+
+volumes:
+  zoning-postgis:
+  zoning-redis:

@@ -22,7 +22,9 @@ export const ZoningLookupInputSchema = z.object({
   countyHint: z.string().trim().max(120).optional(),
   municipalityHint: z.string().trim().max(120).optional(),
   includeGeometry: z.boolean().optional(),
+  includeParcel: z.boolean().optional(),
   includeOverlays: z.boolean().optional(),
+  /** Deprecated and ignored by the live engine. Discovery is maintenance-only. */
   discoverSources: z.boolean().optional(),
   forceRefresh: z.boolean().optional(),
   // Lookup mode drives the deadline + how much verification runs.
@@ -254,6 +256,9 @@ export interface ParcelResult {
   sourceUrl: string;
   matchMethod: 'contains-geocode-point' | 'nearest-parcel' | 'parcel-id' | 'unavailable';
   distanceFromGeocodePointMeters?: number;
+  addressMatched?: boolean | null;
+  interiorPoint?: { longitude: number; latitude: number };
+  rawAttributes?: Record<string, unknown>;
 }
 
 // ---------------------------------------------------------------------------
@@ -339,6 +344,7 @@ export interface UniversalZoningResult {
     metadataUrl: string | null;
     discoveredFrom: string[];
     accessedAt: string;
+    lastValidatedAt?: string | null;
   } | null;
   confidence: ConfidenceBreakdown;
   status: ZoningResultStatus;
@@ -364,6 +370,10 @@ export interface ParcelLayerConfig {
   layerId: number | string;
   parcelIdField: string | null;
   addressField: string | null;
+  acreageField?: string | null;
+  sourceType?: 'arcgis-mapserver' | 'arcgis-featureserver';
+  /** Maximum bounded nearest-parcel search when the address point misses. */
+  maxNearestMeters?: number;
 }
 
 export interface BoundaryLayerConfig {

@@ -5,18 +5,21 @@ import { SkipTrace } from './components/SkipTrace';
 import { NewsTicker } from './components/NewsTicker';
 import { AuthPortal } from './components/AuthPortal';
 import { SettingsDrawer } from './components/SettingsDrawer';
-import { Database, FileJson, FolderOpen, Globe, Settings, Map as MapIcon, Sparkles, Fingerprint } from 'lucide-react';
+import { ZoningAdmin } from './components/ZoningAdmin';
+import { Database, FileJson, FolderOpen, Globe, Settings, Map as MapIcon, Sparkles, Fingerprint, ShieldCheck } from 'lucide-react';
 import { getSupabase, isSupabaseConfigured } from './services/supabaseClient';
 import { buildSessionUser, signOutEverywhere, writeSessionMirror, deriveFirstName } from './services/authService';
 
+
+type AppView = 'feasibility' | 'finder' | 'skiptrace' | 'zoning-admin';
 
 function App() {
   const [activeUser, setActiveUser] = useState<any>(null);
   const [sessionLoaded, setSessionLoaded] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
-  const hashToView = (h: string): 'feasibility' | 'finder' | 'skiptrace' =>
-    h === '#/finder' ? 'finder' : h === '#/skiptrace' ? 'skiptrace' : 'feasibility';
-  const [view, setView] = useState<'feasibility' | 'finder' | 'skiptrace'>(() => hashToView(window.location.hash));
+  const hashToView = (h: string): AppView =>
+    h === '#/finder' ? 'finder' : h === '#/skiptrace' ? 'skiptrace' : h === '#/zoning-admin' ? 'zoning-admin' : 'feasibility';
+  const [view, setView] = useState<AppView>(() => hashToView(window.location.hash));
   const lastUserIdRef = useRef<string | null>(null);
 
   // Keep the active view in sync with the URL hash so each page is linkable
@@ -27,8 +30,8 @@ function App() {
     return () => window.removeEventListener('hashchange', onHash);
   }, []);
 
-  const goTo = (next: 'feasibility' | 'finder' | 'skiptrace') => {
-    window.location.hash = next === 'finder' ? '#/finder' : next === 'skiptrace' ? '#/skiptrace' : '#/';
+  const goTo = (next: AppView) => {
+    window.location.hash = next === 'finder' ? '#/finder' : next === 'skiptrace' ? '#/skiptrace' : next === 'zoning-admin' ? '#/zoning-admin' : '#/';
     setView(next);
   };
 
@@ -163,6 +166,14 @@ function App() {
             <Fingerprint size={16} />
             <span>Skip Trace</span>
           </button>
+          <button
+            type="button"
+            className={`app-nav-btn ${view === 'zoning-admin' ? 'active' : ''}`}
+            onClick={() => goTo('zoning-admin')}
+          >
+            <ShieldCheck size={16} />
+            <span>Zoning Sources</span>
+          </button>
         </nav>
 
         <div className="header-actions">
@@ -200,11 +211,17 @@ function App() {
       </header>
 
       {/* Auto-scrolling real estate / housing news strip (NC-tailored) */}
-      <NewsTicker />
+      {view !== 'zoning-admin' && <NewsTicker />}
 
       {/* Main Content — feasibility search, AI finder, or LLC skip trace */}
       <main className="main-content">
-        {view === 'finder' ? <DistressedFinder /> : view === 'skiptrace' ? <SkipTrace /> : <FeasibilitySearch />}
+        {view === 'finder'
+          ? <DistressedFinder />
+          : view === 'skiptrace'
+            ? <SkipTrace />
+            : view === 'zoning-admin'
+              ? <ZoningAdmin />
+              : <FeasibilitySearch />}
       </main>
 
       {/* Dashboard Footer */}
