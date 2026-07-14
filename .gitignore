@@ -28,3 +28,4 @@ scratch/
 
 # Local Netlify folder
 .netlify
+.zoning-test-build/
