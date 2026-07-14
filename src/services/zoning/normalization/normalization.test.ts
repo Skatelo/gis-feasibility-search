@@ -66,6 +66,32 @@ test('overlays are kept separate from base zoning', () => {
   assert.equal(overlays[0].code, 'H-1');
 });
 
+test('value-shape recovers the code when column names are misleading (Charlotte)', () => {
+  // Real Charlotte layer: "zoneclass" holds the DESCRIPTION and "zonedes" holds
+  // the CODE — the opposite of what the names suggest. The mapping (name-based)
+  // points the code slot at zoneclass; value shape must correct it.
+  const charlotte = layer(0, {
+    fieldMapping: { zoningCodeField: 'zoneclass', zoningDescriptionField: 'zonedes', jurisdictionField: null, overlayField: null, detectionConfidence: 0.6, reasons: [] },
+  });
+  const { zoning } = normalizeZoning(
+    // rezonedate (an epoch number under a "…zone…"-matching key) must NOT be
+    // mistaken for the code.
+    [match(0, { zoneclass: 'UPTOWN MIXED USE', zonedes: 'UC', spa: 'no', overlay: 'none', rezonedate: 1685592000000, objectid: 1 })],
+    [charlotte],
+  );
+  assert.equal(zoning.code, 'UC', 'the code-shaped value must win over the prose and the date');
+  assert.equal(zoning.description, 'UPTOWN MIXED USE');
+});
+
+test('a correctly-named code field is used as-is (no false swap)', () => {
+  const { zoning } = normalizeZoning(
+    [match(23, { ZONING: 'DX-40-SH', ZONE_TYPE: 'DX-', ZONE_TYPE_DECODE: 'Downtown Mixed Use', OBJECTID: 1 }, 'zoning')],
+    [layer(23, { fieldMapping: { zoningCodeField: 'ZONING', zoningDescriptionField: 'ZONE_TYPE_DECODE', jurisdictionField: null, overlayField: null, detectionConfidence: 0.9, reasons: [] } })],
+  );
+  assert.equal(zoning.code, 'DX-40-SH');
+  assert.equal(zoning.description, 'Downtown Mixed Use');
+});
+
 test('normalizeZoning reports not-found when no clean code is present', () => {
   const { zoning } = normalizeZoning([match(23, { ZONING: 'CITY' })], [layer(23)]);
   assert.equal(zoning.found, false);
