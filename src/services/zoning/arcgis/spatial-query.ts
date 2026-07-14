@@ -32,24 +32,16 @@ function toMatches(layer: InspectedLayer, res: ArcgisQueryResponse): RawZoningMa
     }));
 }
 
-function buildOutFields(layer: InspectedLayer): string {
-  if (layer.role !== 'zoning' && layer.role !== 'overlay') return '*';
-  const wanted = new Set<string>();
-  if (layer.objectIdField) wanted.add(layer.objectIdField);
-  const m = layer.fieldMapping;
-  for (const f of [m.zoningCodeField, m.zoningDescriptionField, m.overlayField, m.jurisdictionField]) {
-    if (f) wanted.add(f);
-  }
-  return wanted.size > 0 ? [...wanted].join(',') : '*';
-}
-
 async function queryOneLayer(
   layer: InspectedLayer,
   location: QueryLocation,
   opts: ArcgisClientOptions,
 ): Promise<RawZoningMatch[]> {
   if (!layer.supportsQuery) return [];
-  const common = { ...opts, outFields: buildOutFields(layer), returnGeometry: !!location.includeGeometry };
+  // Request all fields: a single matched polygon's attributes are tiny, and the
+  // full set enables value-shape disambiguation of misleadingly-named columns
+  // and preserves the raw attributes for auditability.
+  const common = { ...opts, outFields: '*', returnGeometry: !!location.includeGeometry };
   const point = await queryLayerAtPoint(layer.layerUrl, layer.id, location.longitude, location.latitude, common).catch(
     () => null,
   );

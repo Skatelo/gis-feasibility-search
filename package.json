@@ -13,6 +13,7 @@
     "test:estimates": "node --test netlify/functions/lib/sourced-estimate.test.js",
     "typecheck:zoning-engine": "tsc -p tsconfig.zoning.json",
     "test:zoning-engine": "node scripts/test-zoning-engine.mjs",
+    "zoning:lookup": "node scripts/zoning-lookup.mjs",
     "discover:sc-gis": "node scripts/discover-sc-gis.mjs",
     "verify:sc-gis": "node scripts/verify-sc-portals.mjs",
     "preview": "vite preview"
