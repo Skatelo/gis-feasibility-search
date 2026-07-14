@@ -193,6 +193,10 @@ export interface QueryLocation {
   latitude: number;
   parcelId?: string;
   includeGeometry?: boolean;
+  /** Governing municipality/authority — lets an adapter target its layer. */
+  jurisdictionHint?: string;
+  /** Which layer roles to query (defaults to base zoning + overlay). */
+  roles?: LayerRole[];
 }
 
 // A minimal GeoJSON geometry shape (avoids a hard dependency on @types/geojson

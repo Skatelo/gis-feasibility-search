@@ -22,9 +22,12 @@ import {
   type Geocoder,
   type SourceRegistry,
   type Logger,
+  type AdapterContext,
 } from '../types';
 import { resolveJurisdiction } from '../jurisdiction';
-import { inspectArcgisService, queryZoning, layerForRole } from '../arcgis';
+import { layerForRole } from '../arcgis';
+import { selectAdapter, adapterForSourceType } from '../adapters';
+import { fetchJson } from '../utils/http';
 import { normalizeZoning } from '../normalization/zoning-normalizer';
 import { computeConfidence } from '../confidence/confidence-calculator';
 import { jurisdictionKey, CACHE_TTL } from '../registry';
@@ -86,11 +89,15 @@ export class ZoningLookupEngine {
     });
 
     // 3) Resolve the GIS source: registry first, discovery on miss.
+    const ctx: AdapterContext = {
+      fetchJson: (url, signal) => fetchJson(url, { signal }),
+      log: this.log,
+    };
     let inspected: InspectedZoningSource | null = null;
     let discoveredSource: DiscoveredSource | null = null;
     let fromRegistry = false;
     try {
-      const resolved = await this.resolveSource(jurisdiction, input, errors);
+      const resolved = await this.resolveSource(jurisdiction, input, errors, ctx);
       inspected = resolved.inspected;
       discoveredSource = resolved.discoveredSource;
       fromRegistry = resolved.fromRegistry;
@@ -98,23 +105,30 @@ export class ZoningLookupEngine {
       errors.push({ stage: 'source-discovery', message: String(err instanceof Error ? err.message : err), recoverable: true });
     }
 
-    // 4) Query zoning + overlays deterministically.
+    // 4) Query zoning + overlays deterministically, via the source's adapter.
     const wantOverlays = input.includeOverlays !== false;
     let normalized = normalizeZoning([], []);
     if (inspected) {
-      try {
-        const matches = await queryZoning(
-          inspected,
-          { longitude: address.longitude, latitude: address.latitude, includeGeometry: input.includeGeometry },
-          {
-            jurisdiction: jurisdiction.municipality ?? jurisdiction.county ?? undefined,
-            roles: wantOverlays ? ['zoning', 'overlay'] : ['zoning'],
-            timeoutMs: mode === 'fast' ? 4000 : 6000,
-          },
-        );
-        normalized = normalizeZoning(matches, inspected.layers);
-      } catch (err) {
-        errors.push({ stage: 'zoning-query', message: String(err instanceof Error ? err.message : err), recoverable: true });
+      const adapter = adapterForSourceType(inspected.sourceType) ?? selectAdapter(inspected.source);
+      if (!adapter) {
+        errors.push({ stage: 'zoning-query', message: `no adapter for source type ${inspected.sourceType}`, recoverable: true });
+      } else {
+        try {
+          const matches = await adapter.query(
+            inspected,
+            {
+              longitude: address.longitude,
+              latitude: address.latitude,
+              includeGeometry: input.includeGeometry,
+              jurisdictionHint: jurisdiction.municipality ?? jurisdiction.county ?? undefined,
+              roles: wantOverlays ? ['zoning', 'overlay'] : ['zoning'],
+            },
+            ctx,
+          );
+          normalized = normalizeZoning(matches, inspected.layers);
+        } catch (err) {
+          errors.push({ stage: 'zoning-query', message: String(err instanceof Error ? err.message : err), recoverable: true });
+        }
       }
     }
 
@@ -202,6 +216,7 @@ export class ZoningLookupEngine {
     jurisdiction: JurisdictionResult,
     input: ZoningLookupInput,
     errors: StageError[],
+    ctx: AdapterContext,
   ): Promise<{ inspected: InspectedZoningSource | null; discoveredSource: DiscoveredSource | null; fromRegistry: boolean }> {
     const key = jurisdictionKey({
       country: 'US',
@@ -216,11 +231,13 @@ export class ZoningLookupEngine {
       const record = await this.registry.get(key).catch(() => null);
       if (record && record.zoningLayers.length > 0) {
         this.log.debug('registry hit', { key });
-        return { inspected: inspectedFromRecord(record), discoveredSource: record ? recordSource(record.serviceUrl) : null, fromRegistry: true };
+        return { inspected: inspectedFromRecord(record), discoveredSource: recordSource(record.serviceUrl), fromRegistry: true };
       }
     }
 
-    // Discovery (slow path) — only on miss / forced refresh.
+    // Discovery (slow path) — only on miss / forced refresh. Each candidate is
+    // inspected via the adapter that handles its source family (ArcGIS, GeoJSON,
+    // …); the first that yields a base-zoning layer is saved and reused.
     if (input.discoverSources === false) {
       return { inspected: null, discoveredSource: null, fromRegistry: false };
     }
@@ -228,10 +245,11 @@ export class ZoningLookupEngine {
       allowThirdParty: input.allowThirdParty,
       log: this.log,
     });
-    for (const candidate of candidates.slice(0, 4)) {
-      if (!/\/(MapServer|FeatureServer)\b/i.test(candidate.url)) continue;
+    for (const candidate of candidates.slice(0, 5)) {
+      const adapter = selectAdapter(candidate);
+      if (!adapter) continue;
       try {
-        const inspected = await inspectArcgisService(candidate, { timeoutMs: 12000 });
+        const inspected = await adapter.inspect(candidate, ctx);
         if (layerForRole(inspected, 'zoning')) {
           const record = recordFromInspected(jurisdiction, inspected);
           await this.registry.put(record).catch((err) => errors.push({ stage: 'registry', message: String(err), recoverable: true }));

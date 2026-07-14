@@ -4,75 +4,16 @@
 // field mapping to read the code/description; never invents values.
 
 import type { InspectedLayer, RawZoningMatch } from '../types';
+import {
+  cleanCode,
+  cleanText,
+  isCodeShaped,
+  isDescriptionShaped,
+  scanForCode,
+  scanForDescription,
+} from './value-shape';
 
-// Values that are not real district codes (jurisdiction placeholders, blanks).
-const PLACEHOLDER_RE = /^(city|county|etj|none|n\/?a|null|mun\.?|muni|municipal|municipality|split|unknown|not applicable|unzoned|tbd)$/i;
-
-export function cleanCode(value: unknown): string | null {
-  const s = String(value ?? '').trim();
-  if (!s || s.length > 40 || !/[a-z0-9]/i.test(s) || PLACEHOLDER_RE.test(s)) return null;
-  return s;
-}
-
-function cleanText(value: unknown): string | null {
-  const s = String(value ?? '').replace(/\s+/g, ' ').trim();
-  return s && s.toLowerCase() !== 'null' ? s : null;
-}
-
-const BOOLEANISH_RE = /^(yes|no|true|false|y|n)$/i;
-const ZONING_KEYISH_RE = /zon|zone|district|dist|class|type|code|category/i;
-// Zoning-ish columns that are actually dates/ids/geometry, not the code.
-const NON_CODE_KEY_RE = /date|year|objectid|globalid|_id$|shape|hyperlink|petition|url|link|_len|area|acre/i;
-
-/** A short, single/double-token, code-like value ("R-1", "DX-40-SH", "UC") —
- *  not multi-word prose and not a pure number (US zoning codes have a letter). */
-function isCodeShaped(value: string): boolean {
-  const s = value.trim();
-  if (!s || s.length > 16 || BOOLEANISH_RE.test(s)) return false;
-  if (s.split(/\s+/).length > 2) return false; // multi-word => description
-  if (!/[a-z]/i.test(s)) return false; // pure-numeric (e.g. an epoch date) is never a code
-  return !/^[a-z]+(?:\s[a-z]+)+$/.test(s);
-}
-
-function isDescriptionShaped(value: string): boolean {
-  const s = value.trim();
-  return /\s/.test(s) && s.length > 4;
-}
-
-function codeScore(code: string): number {
-  return (/-/.test(code) ? 1 : 0) + (/\d/.test(code) ? 1 : 0) + (code === code.toUpperCase() ? 1 : 0) - (/[-_/]$/.test(code) ? 2 : 0);
-}
-
-/** Scan a feature's attributes for the best code-shaped value under a
- *  zoning-ish column, ignoring the mapped field. Recovers the real code when
- *  column names are misleading (e.g. a "class" column holding the description
- *  and a "desc" column holding the code). */
-function scanForCode(attributes: Record<string, unknown>, excludeKey?: string): string | null {
-  let best: string | null = null;
-  let bestScore = -Infinity;
-  for (const [key, raw] of Object.entries(attributes)) {
-    if (key === excludeKey || !ZONING_KEYISH_RE.test(key) || NON_CODE_KEY_RE.test(key)) continue;
-    const code = cleanCode(raw);
-    if (!code || !isCodeShaped(code)) continue;
-    const s = codeScore(code);
-    if (s > bestScore) {
-      bestScore = s;
-      best = code;
-    }
-  }
-  return best;
-}
-
-function scanForDescription(attributes: Record<string, unknown>, code: string | null): string | null {
-  let best: string | null = null;
-  for (const [key, raw] of Object.entries(attributes)) {
-    if (!ZONING_KEYISH_RE.test(key)) continue;
-    const text = cleanText(raw);
-    if (!text || text === code || !isDescriptionShaped(text)) continue;
-    if (!best || text.length > best.length) best = text;
-  }
-  return best;
-}
+export { cleanCode } from './value-shape';
 
 export interface NormalizedZoning {
   found: boolean;
