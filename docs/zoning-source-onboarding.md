@@ -11,7 +11,7 @@
 ## Layer review
 
 1. Add the exact numbered `MapServer/{id}` or `FeatureServer/{id}` URL as a
-   candidate in `/#/zoning-admin`.
+   candidate through the authenticated zoning registry API.
 2. Inspect layer metadata and sample records.
 3. Confirm polygon geometry and query capability.
 4. Reject future land use, comprehensive plans, tax-use classes, voting,

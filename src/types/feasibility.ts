@@ -272,11 +272,11 @@ export interface SiteFeasibilityData {
   zoningSource?: 'county-gis' | 'statewide-gis' | 'official-map' | 'web';
   zoningSourceUrl?: string;
   zoningSources?: string[];
-  zoningVerificationStatus?: 'official-gis' | 'official-research' | 'corroborated-research' | 'listing-research' | 'statewide-reported' | 'planning-designation' | 'review-required' | 'conflict' | 'unavailable';
+  zoningVerificationStatus?: 'resolving' | 'official-gis' | 'official-research' | 'corroborated-research' | 'listing-research' | 'statewide-reported' | 'planning-designation' | 'review-required' | 'conflict' | 'unavailable';
   zoningJurisdiction?: string;
-  zoningStandardsStatus?: 'official' | 'mixed' | 'estimated' | 'unavailable';
+  zoningStandardsStatus?: 'resolving' | 'official' | 'mixed' | 'estimated' | 'unavailable';
   zoningStandardsSourceUrl?: string;
-  zoningSetbacksStatus?: 'official' | 'mixed' | 'estimated' | 'unavailable';
+  zoningSetbacksStatus?: 'resolving' | 'official' | 'mixed' | 'estimated' | 'unavailable';
   zoningSetbackNotes?: string[];
   zoningRestrictions?: string[];
   zoningMinimumLotAreaSqft?: number;

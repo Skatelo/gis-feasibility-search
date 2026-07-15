@@ -136,7 +136,7 @@ async function apiLookup(input: OfficialZoningLookupInput): Promise<OfficialZoni
     cache: 'no-store',
     body: JSON.stringify({
       address: input.address,
-      fresh: false,
+      fresh: true,
       include_third_party_comparison: false,
     }),
   });

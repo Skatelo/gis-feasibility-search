@@ -12,8 +12,8 @@
 
 3. Check `http://localhost:8787/health` and
    `http://localhost:8787/documentation/openapi.json`.
-4. Open the React application at `/#/zoning-admin` and use the same
-   `ZONING_ADMIN_API_KEY` for administrative requests.
+4. Use the documented administrative API with `ZONING_ADMIN_API_KEY` for source
+   review and validation. The property-search UI has no separate admin page.
 5. Set the web app's `VITE_ZONING_API_URL` to the externally reachable API base
    URL. The property workflow calls `/api/zoning/lookup` and falls back to the
    legacy `/v1` route only during a rolling deployment.
