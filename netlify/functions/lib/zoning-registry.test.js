@@ -492,7 +492,7 @@ test('Gemini zoning search uses the complete address and a fresh grounded Intera
   assert.equal(call.init.method, 'POST');
   assert.equal(call.init.cache, 'no-store');
   assert.equal(call.init.headers['x-goog-api-key'], 'test-gemini-key');
-  assert.equal(call.body.model, 'gemini-3.5-flash');
+  assert.equal(call.body.model, 'gemini-3-flash-preview');
   assert.equal(call.body.store, false);
   assert.deepEqual(call.body.tools, [{ type: 'google_search' }]);
   assert.ok(call.body.input.includes(fullAddress));
@@ -514,7 +514,8 @@ test('property zoning uses only Gemini 3.5 Flash Google Search in the allowances
 
   assert.match(serviceSource, /countyName = `\$\{countyBaseName\(countyName\)\}, \$\{selectedState\}`/);
   assert.match(serviceSource, /addressString\.match\(\/\(\?:,\|\\s\)/);
-  assert.match(stage, /normalizeFullAddressForZoning\(addressString\)/);
+  assert.match(stage, /resolveFullPostalAddress\(/);
+  assert.match(stage, /normalizeFullAddressForZoning\(zoningQueryAddress \|\| addressString\)/);
   assert.match(stage, /fetchZoningWithGeminiSearch\(fullZoningAddress, countyName\)/);
   assert.match(stage, /emitZoning\(\)/);
   assert.match(stage, /zoningStandardsStatus = 'resolving'/);

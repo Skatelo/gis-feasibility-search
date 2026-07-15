@@ -8,7 +8,12 @@ export interface GeminiZoningSearchEvidence {
 
 type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 
-export const GEMINI_ZONING_MODEL = 'gemini-3.5-flash';
+// Zoning search models in priority order. gemini-3-flash-preview grounds as
+// accurately as the flagship (same district across repeated tests) but answers
+// ~2x faster; gemini-3.5-flash is the stable fallback if the preview model is
+// ever retired (a retired model answers HTTP 404, which triggers the fallback).
+export const GEMINI_ZONING_MODELS = ['gemini-3-flash-preview', 'gemini-3.5-flash'] as const;
+export const GEMINI_ZONING_MODEL = GEMINI_ZONING_MODELS[0];
 export const GEMINI_INTERACTIONS_ENDPOINT = 'https://generativelanguage.googleapis.com/v1beta/interactions';
 
 const ZONING_RESPONSE_SCHEMA = {
@@ -194,38 +199,52 @@ export async function fetchGeminiZoningSearchEvidence(
   if (!key) throw new Error('A Gemini API key is required for zoning search.');
 
   const requestedQuery = `What is ${fullAddress} zoning code`;
-  const body = JSON.stringify({
-    model: GEMINI_ZONING_MODEL,
-    input: buildGeminiZoningSearchPrompt(fullAddress, countyName),
-    system_instruction: ZONING_SYSTEM,
-    store: false,
-    tools: [{ type: 'google_search' }],
-  });
+  const input = buildGeminiZoningSearchPrompt(fullAddress, countyName);
 
-  for (let attempt = 0; attempt < 2; attempt++) {
-    const response = await fetcher(GEMINI_INTERACTIONS_ENDPOINT, {
-      method: 'POST',
-      cache: 'no-store',
-      headers: {
-        'Content-Type': 'application/json',
-        Accept: 'application/json',
-        'x-goog-api-key': key,
-      },
-      body,
+  // Try each model in priority order. A retired/unknown model answers HTTP 404,
+  // so we transparently fall back to the next one instead of failing the lookup.
+  let lastError: Error | null = null;
+  for (let modelIndex = 0; modelIndex < GEMINI_ZONING_MODELS.length; modelIndex++) {
+    const body = JSON.stringify({
+      model: GEMINI_ZONING_MODELS[modelIndex],
+      input,
+      system_instruction: ZONING_SYSTEM,
+      store: false,
+      tools: [{ type: 'google_search' }],
     });
 
-    if (response.ok) {
-      const parsed = parseGeminiZoningInteraction(await response.json());
-      if (!parsed.raw) throw new Error('Gemini zoning search returned no structured answer.');
-      return { fullAddress, requestedQuery, ...parsed };
-    }
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const response = await fetcher(GEMINI_INTERACTIONS_ENDPOINT, {
+        method: 'POST',
+        cache: 'no-store',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+          'x-goog-api-key': key,
+        },
+        body,
+      });
 
-    const retryable = response.status === 429 || response.status >= 500;
-    if (!retryable || attempt === 1) {
-      throw new Error(`Gemini zoning search returned HTTP ${response.status}.`);
+      if (response.ok) {
+        const parsed = parseGeminiZoningInteraction(await response.json());
+        if (!parsed.raw) throw new Error('Gemini zoning search returned no structured answer.');
+        return { fullAddress, requestedQuery, ...parsed };
+      }
+
+      // Model unavailable (e.g. a preview model was retired) — stop retrying it
+      // and fall through to the next model in the list.
+      if (response.status === 404 && modelIndex < GEMINI_ZONING_MODELS.length - 1) {
+        lastError = new Error(`Gemini zoning model ${GEMINI_ZONING_MODELS[modelIndex]} is unavailable (HTTP 404).`);
+        break;
+      }
+
+      const retryable = response.status === 429 || response.status >= 500;
+      if (!retryable || attempt === 1) {
+        throw new Error(`Gemini zoning search returned HTTP ${response.status}.`);
+      }
+      await new Promise((resolve) => setTimeout(resolve, retryDelayMs(response, attempt)));
     }
-    await new Promise((resolve) => setTimeout(resolve, retryDelayMs(response, attempt)));
   }
 
-  throw new Error('Gemini zoning search did not return a response.');
+  throw lastError ?? new Error('Gemini zoning search did not return a response.');
 }
