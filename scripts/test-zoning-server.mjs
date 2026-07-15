@@ -1,16 +1,20 @@
 import { rm } from 'node:fs/promises';
-import { resolve } from 'node:path';
+import { readdirSync } from 'node:fs';
+import { resolve, basename, relative } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { build } from 'esbuild';
 
 const root = process.cwd();
 const outdir = resolve(root, '.zoning-server-test-build');
-const outfile = resolve(outdir, 'api.test.mjs');
+const testDir = resolve(root, 'server/zoning');
+const testFiles = readdirSync(testDir).filter((name) => name.endsWith('.test.ts')).map((name) => resolve(testDir, name));
 
 await rm(outdir, { recursive: true, force: true });
 await build({
-  entryPoints: [resolve(root, 'server/zoning/api.test.ts')],
-  outfile,
+  entryPoints: testFiles.map((file) => `./${relative(root, file).replaceAll('\\', '/')}`),
+  absWorkingDir: root,
+  outdir,
+  outbase: 'server/zoning',
   bundle: true,
   platform: 'node',
   format: 'esm',
@@ -20,7 +24,7 @@ await build({
   logLevel: 'info',
 });
 
-const result = spawnSync(process.execPath, ['--test', outfile], {
+const result = spawnSync(process.execPath, ['--test', ...testFiles.map((file) => resolve(outdir, `${basename(file, '.ts')}.js`))], {
   cwd: root,
   env: process.env,
   stdio: 'inherit',

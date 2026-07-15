@@ -1,6 +1,7 @@
 export { CensusGeocoder } from './census-geocoder';
 export { GoogleGeocoder } from './google-geocoder';
 export { ChainGeocoder } from './chain-geocoder';
+export { normalizeAddressInput, addressCacheKey } from './address-normalizer';
 
 import type { Geocoder } from '../types';
 import { CensusGeocoder } from './census-geocoder';

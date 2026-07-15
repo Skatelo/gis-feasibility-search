@@ -21,6 +21,7 @@
     "zoning:import": "node dist-server/import.js",
     "zoning:probe": "node dist-server/probe.js",
     "zoning:coverage": "node dist-server/coverage.js",
+    "zoning:benchmark": "node dist-server/benchmark.js",
     "zoning:lookup": "node scripts/zoning-lookup.mjs",
     "discover:sc-gis": "node scripts/discover-sc-gis.mjs",
     "verify:sc-gis": "node scripts/verify-sc-portals.mjs",

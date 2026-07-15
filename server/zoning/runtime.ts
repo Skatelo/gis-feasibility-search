@@ -2,6 +2,8 @@ import { Queue, type ConnectionOptions } from 'bullmq';
 import type Redis from 'ioredis';
 import {
   PostgresSourceRegistry,
+  KvSourceRegistry,
+  INITIAL_NC_SC_SOURCE_RECORDS,
   createInMemoryRegistry,
   seedInitialSourceRecords,
   type RegistryCache,
@@ -11,10 +13,13 @@ import {
 import { createGeocoder } from '../../src/services/zoning/geocoding';
 import { resolveJurisdiction, resolveJurisdictionFromPostgis } from '../../src/services/zoning/jurisdiction';
 import { ZoningLookupEngine } from '../../src/services/zoning/orchestrator';
-import type { GeocodedAddress, Geocoder, JurisdictionResult, Logger } from '../../src/services/zoning/types';
+import type { GeocodedAddress, Geocoder, JurisdictionResult, Logger, ZoningLookupInput } from '../../src/services/zoning/types';
 import { MemoryJsonCache, RedisJsonCache, SingleFlightResultCache, connectRedis } from './cache';
 import { createZoningDatabase, type ZoningDatabase } from './database';
 import type { ZoningServerConfig } from './config';
+import { SqliteKVStore } from './sqlite-kv-store';
+import { AdaptiveZoningLookupService, type AdaptiveLookupOutcome } from './adaptive-lookup';
+import { ZoningMetrics } from './metrics';
 
 export const MAINTENANCE_QUEUE = 'zoning-maintenance';
 
@@ -30,6 +35,8 @@ export interface ZoningRuntime {
   redis?: Redis;
   bullConnection?: ConnectionOptions;
   maintenanceQueue?: Queue;
+  adaptiveLookup(input: ZoningLookupInput): Promise<AdaptiveLookupOutcome>;
+  metrics: ZoningMetrics;
   resolveJurisdiction(address: GeocodedAddress): Promise<JurisdictionResult>;
   close(): Promise<void>;
 }
@@ -70,15 +77,23 @@ export async function createZoningRuntime(config: ZoningServerConfig): Promise<Z
   let database: ZoningDatabase | undefined;
   let sql: SqlExecutor | undefined;
   let registry: SourceRegistry;
+  let sqliteStore: SqliteKVStore | undefined;
   if (config.databaseUrl) {
     database = createZoningDatabase(config.databaseUrl, config.databaseSsl);
     sql = database.sql;
     await sql.query('select 1');
     registry = new PostgresSourceRegistry(sql, registryCache);
+  } else if (config.sqlitePath) {
+    sqliteStore = new SqliteKVStore(config.sqlitePath);
+    registry = new KvSourceRegistry(sqliteStore);
+    for (const sourceRecord of INITIAL_NC_SC_SOURCE_RECORDS) {
+      if (!(await registry.get(sourceRecord.id))) await registry.put(sourceRecord);
+    }
+    structuredLogger.info('Using durable local SQLite zoning registry', { path: config.sqlitePath });
   } else {
     registry = createInMemoryRegistry();
     await seedInitialSourceRecords(registry);
-    structuredLogger.warn('DATABASE_URL is unset; using reviewed bootstrap sources without PostGIS persistence');
+    structuredLogger.warn('DATABASE_URL and ZONING_SQLITE_PATH are unset; using a process-local zoning registry');
   }
 
   const geocoder = createGeocoder({ googleMapsApiKey: config.googleMapsApiKey });
@@ -95,6 +110,13 @@ export async function createZoningRuntime(config: ZoningServerConfig): Promise<Z
     jurisdictionResolver: jurisdictionResolver,
     log: structuredLogger,
   });
+  const adaptiveLookup = new AdaptiveZoningLookupService({
+    engine,
+    registry,
+    config,
+    log: structuredLogger,
+  });
+  const metrics = new ZoningMetrics();
   const bullConnection = redis && config.redisUrl ? createBullConnection(config.redisUrl) : undefined;
   const maintenanceQueue = bullConnection
     ? new Queue(MAINTENANCE_QUEUE, { connection: bullConnection, defaultJobOptions: { attempts: 2, removeOnComplete: 250, removeOnFail: 500 } })
@@ -112,11 +134,14 @@ export async function createZoningRuntime(config: ZoningServerConfig): Promise<Z
     redis,
     bullConnection,
     maintenanceQueue,
+    adaptiveLookup: (input) => adaptiveLookup.lookup(input),
+    metrics,
     resolveJurisdiction: jurisdictionResolver,
     async close() {
       await maintenanceQueue?.close();
       await redis?.quit();
       await database?.close();
+      sqliteStore?.close();
     },
   };
 }

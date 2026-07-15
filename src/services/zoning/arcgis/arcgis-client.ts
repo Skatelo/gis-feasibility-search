@@ -40,6 +40,12 @@ function assertNotArcgisError(raw: unknown, url: string): void {
   if (err.success) throw new Error(`ArcGIS error at ${url}: ${err.data.error.message}`);
 }
 
+function shouldRetryArcgisErrorAsPost(raw: unknown): boolean {
+  const parsed = ArcgisErrorSchema.safeParse(raw);
+  if (!parsed.success || parsed.data.error.code !== 400) return false;
+  return /failed to execute query|unable to complete operation|invalid input/i.test(parsed.data.error.message);
+}
+
 export interface ArcgisClientOptions {
   signal?: AbortSignal;
   timeoutMs?: number;
@@ -116,6 +122,7 @@ async function executeQuery(
     if (shouldPost || !(error instanceof HttpError) || ![405, 414, 431].includes(error.status)) throw error;
     raw = await request(true);
   }
+  if (!shouldPost && shouldRetryArcgisErrorAsPost(raw)) raw = await request(true);
   assertNotArcgisError(raw, endpoint);
   return QueryResponseSchema.parse(raw);
 }

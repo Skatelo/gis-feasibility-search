@@ -2,7 +2,7 @@ import { existsSync } from 'node:fs';
 import { PlaywrightCrawler } from '@crawlee/playwright';
 import { Configuration } from '@crawlee/core';
 import chromiumBinary from '@sparticuz/chromium';
-import { chromium as playwrightChromium } from 'playwright-core';
+import { chromium as playwrightChromium, type Route } from 'playwright-core';
 import { assertSafeUrl } from '../../src/services/zoning/utils/url-security';
 
 const BLOCKED_PAGE = /captcha|turnstile|verify you are human|payment required|sign in to continue/i;
@@ -32,8 +32,8 @@ export async function inspectDynamicViewer(url: string): Promise<string> {
     minConcurrency: 1,
     maxConcurrency: 1,
     maxRequestRetries: 0,
-    navigationTimeoutSecs: 15,
-    requestHandlerTimeoutSecs: 25,
+    navigationTimeoutSecs: 10,
+    requestHandlerTimeoutSecs: 20,
     useSessionPool: false,
     launchContext: {
       launcher: playwrightChromium,
@@ -44,8 +44,17 @@ export async function inspectDynamicViewer(url: string): Promise<string> {
         headless: true,
       },
     },
-    preNavigationHooks: [async (_context, gotoOptions) => {
-      gotoOptions.waitUntil = 'networkidle';
+    preNavigationHooks: [async ({ page }, gotoOptions) => {
+      await page.route('**/*', async (route: Route) => {
+        const request = route.request();
+        const resourceType = request.resourceType();
+        if (['image', 'font', 'media'].includes(resourceType) || /google-analytics|googletagmanager|doubleclick|facebook\.net/i.test(request.url())) {
+          await route.abort();
+          return;
+        }
+        await route.continue();
+      });
+      gotoOptions.waitUntil = 'domcontentloaded';
     }],
     async requestHandler({ page }) {
       const visibleText = String(await page.locator('body').innerText().catch(() => '')).slice(0, 30_000);

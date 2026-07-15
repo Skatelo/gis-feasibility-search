@@ -32,6 +32,9 @@ test('cleanCode rejects placeholders and blanks', () => {
   assert.equal(cleanCode('  DX-40-SH '), 'DX-40-SH');
   assert.equal(cleanCode('CITY'), null);
   assert.equal(cleanCode('UNZONED'), null);
+  assert.equal(cleanCode('OFFICIAL MAP REVIEW'), null);
+  assert.equal(cleanCode('Not published'), null);
+  assert.equal(cleanCode('Unavailable'), null);
   assert.equal(cleanCode(''), null);
   assert.equal(cleanCode(null), null);
 });
@@ -83,6 +86,18 @@ test('value-shape recovers the code when column names are misleading (Charlotte)
   assert.equal(zoning.description, 'UPTOWN MIXED USE');
 });
 
+test('value-shape prefers Charlotte N1-B over the mapped Neighborhood 1 district name', () => {
+  const charlotte = layer(0, {
+    fieldMapping: { zoningCodeField: 'zoneclass', zoningDescriptionField: 'zonedes', jurisdictionField: null, overlayField: null, detectionConfidence: 0.6, reasons: [] },
+  });
+  const { zoning } = normalizeZoning(
+    [match(0, { zoneclass: 'NEIGHBORHOOD 1', zonedes: 'N1-B', overlay: 'none', rezonedate: 1685592000000 })],
+    [charlotte],
+  );
+  assert.equal(zoning.code, 'N1-B');
+  assert.equal(zoning.description, 'NEIGHBORHOOD 1');
+});
+
 test('a correctly-named code field is used as-is (no false swap)', () => {
   const { zoning } = normalizeZoning(
     [match(23, { ZONING: 'DX-40-SH', ZONE_TYPE: 'DX-', ZONE_TYPE_DECODE: 'Downtown Mixed Use', OBJECTID: 1 }, 'zoning')],
@@ -96,4 +111,12 @@ test('normalizeZoning reports not-found when no clean code is present', () => {
   const { zoning } = normalizeZoning([match(23, { ZONING: 'CITY' })], [layer(23)]);
   assert.equal(zoning.found, false);
   assert.equal(zoning.code, null);
+});
+
+test('normalizeZoning never promotes UI fallback text to a zoning district', () => {
+  for (const value of ['OFFICIAL MAP REVIEW', 'ZONING CODE UNRESOLVED', 'Not published', 'Unavailable']) {
+    const { zoning } = normalizeZoning([match(23, { ZONING: value })], [layer(23)]);
+    assert.equal(zoning.found, false, value);
+    assert.equal(zoning.code, null, value);
+  }
 });

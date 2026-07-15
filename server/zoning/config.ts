@@ -8,6 +8,7 @@ const EnvironmentSchema = z.object({
   HOST: z.string().default('0.0.0.0'),
   DATABASE_URL: OptionalUrl,
   DATABASE_SSL: z.enum(['true', 'false']).default('false'),
+  ZONING_SQLITE_PATH: z.string().trim().min(1).optional(),
   REDIS_URL: OptionalUrl,
   GOOGLE_MAPS_API_KEY: z.string().optional(),
   VITE_GOOGLE_MAPS_API_KEY: z.string().optional(),
@@ -23,6 +24,7 @@ export interface ZoningServerConfig {
   port: number;
   databaseUrl?: string;
   databaseSsl: boolean;
+  sqlitePath?: string;
   redisUrl?: string;
   googleMapsApiKey?: string;
   perplexityApiKey?: string;
@@ -39,6 +41,7 @@ export function readZoningServerConfig(env: NodeJS.ProcessEnv = process.env): Zo
     port: parsed.PORT,
     databaseUrl: parsed.DATABASE_URL,
     databaseSsl: parsed.DATABASE_SSL === 'true',
+    sqlitePath: parsed.ZONING_SQLITE_PATH ?? (parsed.NODE_ENV === 'development' ? '.data/zoning.sqlite' : undefined),
     redisUrl: parsed.REDIS_URL,
     googleMapsApiKey: parsed.GOOGLE_MAPS_API_KEY ?? parsed.VITE_GOOGLE_MAPS_API_KEY,
     perplexityApiKey: parsed.PERPLEXITY_API_KEY,

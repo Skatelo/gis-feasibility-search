@@ -14,6 +14,7 @@ await build({
     import: resolve(root, 'server/zoning/import.ts'),
     probe: resolve(root, 'server/zoning/live-probe.ts'),
     coverage: resolve(root, 'server/zoning/coverage-report.ts'),
+    benchmark: resolve(root, 'server/zoning/benchmark.ts'),
   },
   absWorkingDir: root,
   outdir,

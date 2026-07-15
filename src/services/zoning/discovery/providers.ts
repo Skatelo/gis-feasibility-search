@@ -42,7 +42,7 @@ function flattenPplx(data: PplxRaw): SearchResult[] {
 }
 
 export function perplexitySearchProvider(config: PerplexityProviderConfig): SearchProvider {
-  const endpoint = config.endpoint ?? '/.netlify/functions/perplexity';
+  const endpoint = config.endpoint ?? 'https://api.perplexity.ai/search';
   const fetchImpl = config.fetchImpl ?? fetch;
   const maxResults = config.maxResultsPerQuery ?? 6;
   return async (queries, signal) => {
@@ -50,11 +50,13 @@ export function perplexitySearchProvider(config: PerplexityProviderConfig): Sear
     for (let i = 0; i < queries.length; i += 5) chunks.push(queries.slice(i, i + 5));
     const responses = await Promise.allSettled(
       chunks.map(async (chunk) => {
+        const timeout = AbortSignal.timeout(config.timeoutMs ?? 8_000);
+        const requestSignal = signal ? AbortSignal.any([signal, timeout]) : timeout;
         const res = await fetchImpl(endpoint, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${config.apiKey}` },
           body: JSON.stringify({ query: chunk.length === 1 ? chunk[0] : chunk, max_results: maxResults, country: 'US' }),
-          signal,
+          signal: requestSignal,
         });
         if (!res.ok) throw new Error(`Perplexity HTTP ${res.status}`);
         return flattenPplx((await res.json()) as PplxRaw);

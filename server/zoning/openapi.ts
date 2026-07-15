@@ -22,7 +22,7 @@ export const OPENAPI_DOCUMENT = {
   info: {
     title: 'NC/SC Official Zoning API',
     version: '1.0.0',
-    description: 'Registry-only parcel and zoning lookup backed by verified public government GIS layers.',
+    description: 'Adaptive NC/SC zoning lookup backed by verified public government GIS layers. Registry misses use bounded official-source discovery and persist proven services.',
   },
   servers: [{ url: 'http://localhost:8787', description: 'Local zoning service' }],
   tags: [
@@ -33,11 +33,30 @@ export const OPENAPI_DOCUMENT = {
     '/health': {
       get: { operationId: 'health', responses: { '200': { description: 'Service health' } } },
     },
+    '/metrics': {
+      get: { operationId: 'metrics', responses: { '200': { description: 'Prometheus-format zoning metrics' } } },
+    },
     '/v1/geocode': {
       post: {
         tags: ['Lookup'], operationId: 'geocodeAddress', summary: 'Geocode a high-quality NC or SC address',
         requestBody: addressBody,
         responses: { '200': { description: 'Normalized geocode', content: { 'application/json': { schema: { $ref: '#/components/schemas/Geocode' } } } }, ...standardResponses },
+      },
+    },
+    '/api/zoning/lookup': {
+      post: {
+        tags: ['Lookup'],
+        operationId: 'adaptiveZoningLookup',
+        summary: 'Resolve current zoning and discover a verified official source on registry misses',
+        requestBody: {
+          required: true,
+          content: { 'application/json': { schema: { $ref: '#/components/schemas/AdaptiveZoningLookupRequest' } } },
+        },
+        responses: {
+          '200': { description: 'Verified official result or explicit unresolved response', content: { 'application/json': { schema: { $ref: '#/components/schemas/AdaptiveZoningResult' } } } },
+          '429': { description: 'Public lookup rate limit exceeded' },
+          ...standardResponses,
+        },
       },
     },
     '/v1/jurisdictions/resolve': {
@@ -130,6 +149,29 @@ export const OPENAPI_DOCUMENT = {
           includeParcel: { type: 'boolean', default: true }, includeOverlays: { type: 'boolean', default: true },
           includeGeometry: { type: 'boolean', default: false }, includeSourceEvidence: { type: 'boolean', default: true },
           forceRefresh: { type: 'boolean', default: false }, mode: { type: 'string', enum: ['fast', 'verified', 'deep'], default: 'verified' },
+        },
+      },
+      AdaptiveZoningLookupRequest: {
+        type: 'object', required: ['address'], additionalProperties: false,
+        properties: {
+          address: { type: 'string', minLength: 5, maxLength: 400 },
+          fresh: { type: 'boolean', default: false },
+          include_third_party_comparison: { type: 'boolean', default: false },
+        },
+      },
+      AdaptiveZoningResult: {
+        type: 'object', required: ['success', 'address', 'zoning', 'verification', 'performance', 'retrieved_at'],
+        properties: {
+          success: { type: 'boolean' },
+          address: { type: 'object' },
+          jurisdiction: { type: 'object' },
+          zoning: { type: ['object', 'null'] },
+          source: { type: 'object' },
+          verification: { type: 'object' },
+          sources_checked: { type: 'array', items: { type: 'object' } },
+          candidate_matches: { type: 'array', items: { type: 'object' } },
+          performance: { type: 'object' },
+          retrieved_at: { type: 'string', format: 'date-time' },
         },
       },
       ZoningResult: {

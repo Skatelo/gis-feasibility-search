@@ -1,6 +1,7 @@
 export { buildDiscoveryQueries } from './search-query-builder';
 export { assessOfficialDomain, type OfficialDomainAssessment } from './official-domain-detector';
 export { extractEndpoints, endpointSourceType, toServiceRoot, type ExtractedEndpoints } from './arcgis-url-extractor';
+export { searchOfficialArcgisPortal, type ArcgisPortalSearchOptions } from './arcgis-portal-search';
 export {
   SourceDiscoveryService,
   type SearchProvider,

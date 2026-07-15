@@ -6,6 +6,7 @@ import type {
   SourceRegistry,
   ZoningLayerConfig,
 } from '../types';
+import { ENGINE_SCHEMA_VERSION } from '../types';
 
 export interface SqlResult<Row> {
   rows: Row[];
@@ -154,7 +155,7 @@ function recordFromRows(rows: SourceRow[]): JurisdictionSourceRecord | null {
     lastVerifiedAt: latestIso(sourceRows, 'last_checked_at') ?? new Date(0).toISOString(),
     lastSuccessfulQueryAt: latestIso(sourceRows, 'last_success_at'),
     healthStatus: hasBroken ? 'degraded' : verified ? 'healthy' : 'unverified',
-    schemaVersion: 1,
+    schemaVersion: ENGINE_SCHEMA_VERSION,
   };
 }
 

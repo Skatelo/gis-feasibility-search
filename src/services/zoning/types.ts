@@ -57,6 +57,25 @@ export const GeocodedAddressSchema = z.object({
 });
 export type GeocodedAddress = z.infer<typeof GeocodedAddressSchema>;
 
+export interface AddressCandidate {
+  formattedAddress: string;
+  latitude: number;
+  longitude: number;
+  provider: string;
+}
+
+/** Raised when a geocoder returns more than one materially different match.
+ * Callers must present the candidates instead of silently choosing the first. */
+export class AmbiguousAddressError extends Error {
+  readonly candidates: AddressCandidate[];
+
+  constructor(candidates: AddressCandidate[]) {
+    super('Multiple strong address matches were returned');
+    this.name = 'AmbiguousAddressError';
+    this.candidates = candidates;
+  }
+}
+
 export interface Geocoder {
   readonly name: string;
   /** True when this provider has the credentials/config it needs to run. */
@@ -120,6 +139,11 @@ export interface DiscoveredSource {
   agency: string | null;
   /** The pages/queries this candidate was discovered from (audit trail). */
   discoveredFrom: string[];
+  officialPageUrl?: string | null;
+  publisher?: string | null;
+  officialReason?: string;
+  discoveryConfidence?: number;
+  browserFallback?: boolean;
 }
 
 export type LayerRole =
@@ -306,6 +330,20 @@ export interface StageError {
   recoverable: boolean;
 }
 
+export interface PipelineTimings {
+  normalizeMs: number;
+  geocodeMs: number;
+  jurisdictionMs: number;
+  registryMs: number;
+  discoveryMs: number;
+  arcgisInspectionMs: number;
+  parcelQueryMs: number;
+  zoningQueryMs: number;
+  normalizationMs: number;
+  validationMs: number;
+  totalMs: number;
+}
+
 export interface UniversalZoningResult {
   input: ZoningLookupInput;
   address: GeocodedAddress | null;
@@ -350,6 +388,13 @@ export interface UniversalZoningResult {
   status: ZoningResultStatus;
   errors: StageError[];
   rawSources: unknown[];
+  candidateMatches?: AddressCandidate[];
+  diagnostics: {
+    timings: PipelineTimings;
+    geocodeCacheHit: boolean;
+    jurisdictionCacheHit: boolean;
+    registryHit: boolean;
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -424,4 +469,4 @@ export interface SourceRegistry {
   cacheSet<T>(namespace: string, key: string, value: T, ttlMs: number): Promise<void>;
 }
 
-export const ENGINE_SCHEMA_VERSION = 1;
+export const ENGINE_SCHEMA_VERSION = 2;

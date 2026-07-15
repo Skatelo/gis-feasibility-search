@@ -124,6 +124,23 @@ test('point query retries as form-encoded POST when a server rejects GET length'
   assert.equal(response.features?.[0]?.attributes?.ZONE, 'R-1');
 });
 
+test('point query retries POST when ArcGIS returns HTTP 200 with a query error body', async () => {
+  const methods: string[] = [];
+  globalThis.fetch = async (_input, init) => {
+    methods.push(init?.method ?? 'GET');
+    if (methods.length === 1) return jsonResponse({ error: { code: 400, message: 'Failed to execute query.', details: [] } });
+    return jsonResponse({ features: [{ attributes: { ZONING: 'N1-B' } }] });
+  };
+  const response = await queryLayerAtPoint(
+    'https://gis.example.gov/arcgis/rest/services/Zoning/MapServer/0',
+    0,
+    -80.7853,
+    35.2648,
+  );
+  assert.deepEqual(methods, ['GET', 'POST']);
+  assert.equal(response.features?.[0]?.attributes?.ZONING, 'N1-B');
+});
+
 test('point query keeps WGS84 input and requests a configured output projection', async () => {
   let requestedUrl = '';
   globalThis.fetch = async (input) => {

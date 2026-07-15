@@ -27,6 +27,11 @@ const ZoningRequestSchema = z.object({
   forceRefresh: z.boolean().default(false),
   mode: z.enum(['fast', 'verified', 'deep']).default('verified'),
 });
+const AdaptiveZoningRequestSchema = z.object({
+  address: z.string().trim().min(5).max(400),
+  fresh: z.boolean().default(false),
+  include_third_party_comparison: z.boolean().default(false),
+});
 const ParcelRequestSchema = z.object({
   address: z.string().trim().min(5).max(400),
   parcelId: z.string().trim().max(120).optional(),
@@ -199,6 +204,152 @@ function publicZoningResult(
   };
 }
 
+function adaptiveVerificationStatus(result: UniversalZoningResult): string {
+  if (result.zoning.found && result.source?.official) {
+    return result.status === 'verified' ? 'verified_official' : 'official_but_ambiguous';
+  }
+  return result.status === 'not-found' ? 'not_found' : 'manual_review_required';
+}
+
+function lookupMethod(result: UniversalZoningResult): string {
+  if (result.zoning.splitZoned || result.zoning.coveragePercent !== null) return 'arcgis_parcel_intersection';
+  if (result.parcel?.interiorPoint) return 'arcgis_parcel_point_query';
+  return 'arcgis_point_query';
+}
+
+function snakeCaseTimings(result: UniversalZoningResult) {
+  const timings = result.diagnostics.timings;
+  return {
+    normalize_ms: timings.normalizeMs,
+    geocode_ms: timings.geocodeMs,
+    jurisdiction_ms: timings.jurisdictionMs,
+    registry_ms: timings.registryMs,
+    discovery_ms: timings.discoveryMs,
+    arcgis_inspection_ms: timings.arcgisInspectionMs,
+    parcel_query_ms: timings.parcelQueryMs,
+    zoning_query_ms: timings.zoningQueryMs,
+    normalization_ms: timings.normalizationMs,
+    validation_ms: timings.validationMs,
+    total_ms: timings.totalMs,
+  };
+}
+
+function adaptivePublicResult(
+  outcome: Awaited<ReturnType<ZoningRuntime['adaptiveLookup']>>,
+  includeThirdPartyComparison: boolean,
+) {
+  const result = outcome.result;
+  const success = result.zoning.found && result.source?.official === true;
+  const comparisonWarning = includeThirdPartyComparison
+    ? ['No third-party zoning comparison provider is configured; the official result was not replaced.']
+    : [];
+  const warnings = [
+    ...result.confidence.warnings,
+    ...comparisonWarning,
+    ...result.errors.map((error) => `${error.stage}: ${error.message}`),
+  ];
+  const address = result.address ? {
+    input: result.input.address,
+    formatted: result.address.formattedAddress,
+    latitude: result.address.latitude,
+    longitude: result.address.longitude,
+    county: result.jurisdiction.county ?? result.address.county ?? '',
+    municipality: result.jurisdiction.municipality ?? result.address.municipality ?? '',
+    state: result.address.stateCode ?? '',
+    zip_code: result.address.postalCode ?? '',
+  } : { input: result.input.address };
+
+  if (!success) {
+    return {
+      success: false,
+      address,
+      zoning: null,
+      jurisdiction: {
+        authority: result.jurisdiction.zoningAuthority ?? '',
+        type: result.jurisdiction.jurisdictionType,
+        confidence: result.jurisdiction.confidence,
+      },
+      verification: {
+        status: adaptiveVerificationStatus(result),
+        confidence: result.confidence.overall,
+        warnings: warnings.length > 0 ? warnings : ['No current official zoning layer could be verified.'],
+      },
+      candidate_matches: result.candidateMatches ?? [],
+      sources_checked: outcome.sourcesChecked,
+      performance: {
+        lookup_ms: result.diagnostics.timings.totalMs,
+        cache_hit: false,
+        registry_hit: result.diagnostics.registryHit,
+        stages: snakeCaseTimings(result),
+      },
+      retrieved_at: new Date().toISOString(),
+    };
+  }
+
+  return {
+    success: true,
+    address,
+    jurisdiction: {
+      authority: result.source?.agency ?? result.jurisdiction.zoningAuthority ?? '',
+      type: result.jurisdiction.jurisdictionType,
+      confidence: result.jurisdiction.confidence,
+    },
+    zoning: {
+      code: result.zoning.code,
+      name: result.zoning.description ?? result.zoning.code,
+      description: result.zoning.description,
+      base_district: result.zoning.code,
+      overlay_districts: result.overlays.map((overlay) => ({ code: overlay.code, name: overlay.name, description: overlay.description })),
+      split_zoned: result.zoning.splitZoned,
+      additional_districts: result.zoning.additionalDistricts,
+    },
+    source: {
+      authority: result.source?.agency ?? result.jurisdiction.zoningAuthority ?? '',
+      official: true,
+      page_url: outcome.officialPageUrl ?? result.source?.metadataUrl ?? result.source?.serviceUrl ?? '',
+      service_url: result.source?.serviceUrl ?? '',
+      layer_id: result.zoning.layerId,
+      layer_url: result.source?.layerUrl ?? '',
+      method: lookupMethod(result),
+    },
+    verification: {
+      status: adaptiveVerificationStatus(result),
+      confidence: result.confidence.overall,
+      warnings,
+    },
+    third_party_comparison: null,
+    performance: {
+      lookup_ms: result.diagnostics.timings.totalMs,
+      cache_hit: false,
+      registry_hit: result.diagnostics.registryHit,
+      geocode_cache_hit: result.diagnostics.geocodeCacheHit,
+      stages: snakeCaseTimings(result),
+    },
+    retrieved_at: result.source?.accessedAt ?? new Date().toISOString(),
+  };
+}
+
+function createPublicRateLimiter(limit = 60, windowMs = 60_000) {
+  const clients = new Map<string, { count: number; resetAt: number }>();
+  return async (request: FastifyRequest, reply: FastifyReply): Promise<void> => {
+    const now = Date.now();
+    const key = request.ip;
+    const current = clients.get(key);
+    const entry = !current || current.resetAt <= now ? { count: 0, resetAt: now + windowMs } : current;
+    entry.count += 1;
+    clients.set(key, entry);
+    reply.header('X-RateLimit-Limit', String(limit));
+    reply.header('X-RateLimit-Remaining', String(Math.max(0, limit - entry.count)));
+    if (entry.count > limit) {
+      reply.header('Retry-After', String(Math.ceil((entry.resetAt - now) / 1000)));
+      await reply.code(429).send({ error: 'Zoning lookup rate limit exceeded' });
+    }
+    if (clients.size > 5_000) {
+      for (const [client, value] of clients) if (value.resetAt <= now) clients.delete(client);
+    }
+  };
+}
+
 async function logLookup(runtime: ZoningRuntime, result: UniversalZoningResult, elapsedMs: number, cached: boolean): Promise<void> {
   if (!runtime.sql) return;
   const sourceId = result.source?.layerUrl
@@ -252,7 +403,8 @@ async function requireAdmin(runtime: ZoningRuntime, request: FastifyRequest, rep
 }
 
 export async function buildZoningApi(runtime: ZoningRuntime): Promise<FastifyInstance> {
-  const app = Fastify({ logger: true, trustProxy: true, bodyLimit: 256 * 1024, requestTimeout: 10_000 });
+  const app = Fastify({ logger: true, trustProxy: true, bodyLimit: 256 * 1024, requestTimeout: 35_000 });
+  const publicRateLimit = createPublicRateLimiter();
   await app.register(cors, {
     origin: runtime.config.nodeEnv === 'production' ? runtime.config.corsOrigins : true,
     methods: ['GET', 'POST', 'PATCH', 'OPTIONS'],
@@ -271,8 +423,25 @@ export async function buildZoningApi(runtime: ZoningRuntime): Promise<FastifyIns
     return reply.code(502).send({ error: 'Official GIS lookup failed', detail: detail.slice(0, 300) });
   });
 
-  app.get('/health', async () => ({ status: 'ok', database: !!runtime.sql, redis: !!runtime.redis }));
+  app.get('/health', async () => ({ status: 'ok', database: !!runtime.sql, redis: !!runtime.redis, zoning: runtime.metrics.snapshot() }));
+  app.get('/metrics', async (_request, reply) => reply.type('text/plain; version=0.0.4').send(runtime.metrics.prometheus()));
   app.get('/documentation/openapi.json', async () => OPENAPI_DOCUMENT);
+
+  app.post('/api/zoning/lookup', { preHandler: publicRateLimit }, async (request) => {
+    const body = AdaptiveZoningRequestSchema.parse(request.body);
+    const outcome = await runtime.adaptiveLookup({
+      address: body.address,
+      includeParcel: true,
+      includeOverlays: true,
+      includeGeometry: false,
+      forceRefresh: body.fresh,
+      discoverSources: true,
+      allowThirdParty: false,
+      mode: 'deep',
+    });
+    runtime.metrics.record(outcome);
+    return adaptivePublicResult(outcome, body.include_third_party_comparison);
+  });
 
   app.post('/v1/geocode', async (request) => {
     const body = AddressSchema.parse(request.body);

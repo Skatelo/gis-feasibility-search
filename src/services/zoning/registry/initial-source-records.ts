@@ -185,7 +185,7 @@ const mecklenburgRecords: JurisdictionSourceRecord[] = [
     municipalityName: 'Charlotte',
     agencyName: 'City of Charlotte',
     serviceUrl: CHARLOTTE_SERVICE,
-    zoningLayers: [layer(CHARLOTTE_SERVICE, 0, 'City of Charlotte Zoning', 'zoneclass', 'zonedes', 2264)],
+    zoningLayers: [layer(CHARLOTTE_SERVICE, 0, 'City of Charlotte Zoning', 'zonedes', 'zoneclass', 2264)],
   }),
   ...municipalRecords(
     { ...mecklenburgBase, serviceUrl: MECK_TOWNS_SERVICE },
