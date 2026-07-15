@@ -1,26 +1,29 @@
 import type { SiteFeasibilityData, SlopeProfile, CompProperty, FloodZoneInfo, WetlandsInfo, ConstructionCostEstimate, CostLineItem, MaterialTakeoff, MaterialTakeoffItem, LandClearingEstimate, TreeRemovalLine, ClearingMethod, UtilitiesEstimate, UtilityLine, PermitFeeLine } from '../types/feasibility';
-import { fetchCountyZoningCode, getZoningServices, normalizeCountyKey } from '../data/ncZoning';
-import type { ResolvedZoning } from '../data/ncZoning';
+import { getZoningServices, normalizeCountyKey } from '../data/ncZoning';
 import { getSupabase, isSupabaseConfigured } from './supabaseClient';
 import { fetchOfficialScParcel, mergeOfficialScParcelRecords, officialRecordFromCountyGis, scOwnerNamesMatch, shouldHideStatewideGeometry } from './scParcelVerification';
 import { scCountySource } from '../data/scCountySources';
 import { normalizeSourcedRange } from '../data/sourcedEstimate';
 import { listingZoningEvidenceTier, zoningListingProvider } from '../data/zoningEvidence';
-import { lookupOfficialZoning } from './officialZoningLookup';
 import { cleanCode } from './zoning/normalization/zoning-normalizer';
+import { fetchGoogleCustomSearchZoningEvidence, normalizeFullAddressForZoning } from './googleCustomSearchZoning';
 
 export interface UserKeys {
   googleMaps?: string;
+  /** Google Custom Search JSON API credential for zoning evidence discovery.
+   *  When omitted, zoning may reuse googleMaps if that key has the Custom
+   *  Search API enabled. */
+  googleCustomSearch?: string;
+  /** Programmable Search Engine identifier passed as the Custom Search `cx`. */
+  googleCustomSearchCx?: string;
   gemini?: string;
   /** OPTIONAL second Gemini key. When set, background lookups (cost estimate,
    *  takeoff, tree count/rates, utilities, comp photos) run on THIS key in
    *  their own parallel lane while the report/chat stay on the primary
    *  key — doubling the per-minute quota so sections finish faster. */
   gemini2?: string;
-  /** Perplexity API key — when set, EVERY live web lookup (utilities, tree
-   *  rates, cost estimate, takeoff, zoning, LLC trace, the report's research)
-   *  runs on the Perplexity Search API (parallel batched queries with ranked
-   *  sources) instead of Gemini's Google-Search grounding. */
+  /** Perplexity API key for utilities, tree rates, cost estimates, takeoff,
+   *  LLC trace, and report research. Zoning never uses this credential. */
   perplexity?: string;
   /** Mapbox public access token (pk.…) — satellite base map for the parcel aerial view. */
   mapbox?: string;
@@ -101,11 +104,6 @@ const NC_PARCEL_ENGINE = "https://services.gis.nc.gov/secure/rest/services/NC1Ma
 // down (they fail independently more often than together).
 const NC_PARCEL_ENGINE_MIRROR = "https://services.nconemap.gov/secure/rest/services/NC1Map_Parcels/MapServer/1/query";
 const SC_STATEWIDE_PARCEL_LAYER = "https://smpesri.scdot.org/arcgis/rest/services/GISMapping/SC_Parcels/MapServer/0";
-const SC_NO_COUNTYWIDE_ZONING_SOURCES: Partial<Record<(typeof SC_COUNTY_NAMES)[number], string>> = {
-  // Municipalities retain their own zoning. This source-backed fallback applies
-  // only after the Census place query confirms the parcel is unincorporated.
-  Union: 'https://library.municode.com/sc/union_county',
-};
 
 // Only the fields the app actually uses — requesting these instead of `*` keeps
 // the response small so the (sometimes overloaded) statewide server is far less
@@ -495,35 +493,6 @@ export interface ZoningStandards {
   floorAreaRatio: number;
   setbacks: { frontFt: number; rearFt: number; sideFt: number };
 }
-
-/**
- * Typical dimensional standards for a zoning district, inferred from the district
- * code / use category. These are ESTIMATES for early feasibility screening only —
- * actual setbacks, height, and FAR must be confirmed against the jurisdiction's
- * zoning ordinance. There is no free authoritative API publishing per-district
- * standards across NC's 100 counties, so we approximate by use category and label
- * the values as estimates throughout the UI.
- */
-export function estimateZoningStandards(code: string, desc: string): ZoningStandards {
-  const c = (code || "").toUpperCase();
-  const d = (desc || "").toLowerCase();
-
-  if (c.includes("UMUD") || /mixed.?use|uptown/.test(d)) {
-    return { lotType: "interior", maxHeightFt: 80, floorAreaRatio: 2.5, setbacks: { frontFt: 10, rearFt: 10, sideFt: 0 } };
-  }
-  if (c.startsWith("TOD") || /transit/.test(d)) {
-    return { lotType: "interior", maxHeightFt: 65, floorAreaRatio: 1.8, setbacks: { frontFt: 10, rearFt: 10, sideFt: 5 } };
-  }
-  if (/^(B-|CG|CB|C-|O-|M-|I-|HC|GB|LB)/.test(c) || /commercial|business|industrial|office|retail/.test(d)) {
-    return { lotType: "interior", maxHeightFt: 50, floorAreaRatio: 0.8, setbacks: { frontFt: 20, rearFt: 15, sideFt: 8 } };
-  }
-  if (/^(MF|UR-|RM|RMX|MX)/.test(c) || /multi.?family|apartment|townhome|townhouse|condo/.test(d)) {
-    return { lotType: "interior", maxHeightFt: 45, floorAreaRatio: 1.0, setbacks: { frontFt: 20, rearFt: 20, sideFt: 10 } };
-  }
-  // Default: low-density / single-family residential
-  return { lotType: "interior", maxHeightFt: 35, floorAreaRatio: 0.35, setbacks: { frontFt: 30, rearFt: 25, sideFt: 12 } };
-}
-
 
 // All 100 NC counties share the same statewide geocoder + parcel engine, so the
 // config is generated from the county list instead of 100 hand-written entries.
@@ -2040,6 +2009,9 @@ export async function executeLandAnalysis(
   let zoningStandardsStatus: SiteFeasibilityData['zoningStandardsStatus'] = 'resolving';
   let zoningStandardsSourceUrl: string | undefined;
   let zoningSetbacksStatus: SiteFeasibilityData['zoningSetbacksStatus'] = 'resolving';
+  let zoningSetbacks: SiteFeasibilityData['zoningSetbacks'];
+  let zoningMaxHeightFt: number | undefined;
+  let zoningFloorAreaRatio: number | undefined;
   let zoningSetbackNotes: string[] | undefined;
   let zoningRestrictions: string[] | undefined;
   let zoningMinimumLotAreaSqft: number | undefined;
@@ -2098,22 +2070,28 @@ export async function executeLandAnalysis(
     }
   }
 
-  // B. Typical dimensional standards for this district. These are ESTIMATES by
-  // use category for early feasibility screening — they're labeled as estimates
-  // in the UI and must be confirmed against the jurisdiction's zoning ordinance.
-  // Frontage comes from the real parcel geometry, not the estimate. Computed as
-  // a function because it's re-derived once the real zoning district resolves.
+  // B. Build the capacity summary only when the Google Custom Search evidence
+  // returns every required standard. Partial source-backed standards remain
+  // visible in the Zoning & Allowances section without manufacturing defaults.
   const buildGridics = () => {
-    if (!zoningCode || /^(n\/?a|manual review|official map review|zoning code unresolved|land use:|no adopted district)/i.test(zoningCode)) return undefined;
-    const estimated = estimateZoningStandards(zoningCode, zoningDescription);
     const researched = researchedZoningStandards;
+    if (!zoningCode || !researched) return undefined;
     const valid = (value: unknown): value is number => Number.isFinite(Number(value));
-    const frontFt = valid(researched?.setbacks?.frontFt) ? Number(researched?.setbacks?.frontFt) : estimated.setbacks.frontFt;
-    const rearFt = valid(researched?.setbacks?.rearFt) ? Number(researched?.setbacks?.rearFt) : estimated.setbacks.rearFt;
-    const sideFt = valid(researched?.setbacks?.sideFt) ? Number(researched?.setbacks?.sideFt) : estimated.setbacks.sideFt;
-    const maxHeightFt = valid(researched?.maxHeightFt) ? Number(researched?.maxHeightFt) : estimated.maxHeightFt;
-    const floorAreaRatio = valid(researched?.floorAreaRatio) ? Number(researched?.floorAreaRatio) : estimated.floorAreaRatio;
-    const coverage = valid(researched?.maxLotCoveragePct) ? Number(researched?.maxLotCoveragePct) / 100 : 0.4;
+    const required = [
+      researched.setbacks?.frontFt,
+      researched.setbacks?.rearFt,
+      researched.setbacks?.sideFt,
+      researched.maxHeightFt,
+      researched.floorAreaRatio,
+      researched.maxLotCoveragePct,
+    ];
+    if (!required.every(valid)) return undefined;
+    const frontFt = Number(researched.setbacks?.frontFt);
+    const rearFt = Number(researched.setbacks?.rearFt);
+    const sideFt = Number(researched.setbacks?.sideFt);
+    const maxHeightFt = Number(researched.maxHeightFt);
+    const floorAreaRatio = Number(researched.floorAreaRatio);
+    const coverage = Number(researched.maxLotCoveragePct) / 100;
     const netWidth = Math.max(0, W - 2 * sideFt);
     const netDepth = Math.max(0, D - (frontFt + rearFt));
     // Only report a single Width x Depth when the lot is roughly rectangular
@@ -2125,7 +2103,7 @@ export async function executeLandAnalysis(
       frontageLengthFt: W > 0 ? Math.round(W * 100) / 100 : 0,
       lotWidthFt: isRectangularish ? Math.round(W * 10) / 10 : undefined,
       lotDepthFt: isRectangularish ? Math.round(D * 10) / 10 : undefined,
-      lotType: researched?.lotType || estimated.lotType,
+      lotType: researched.lotType || 'district standards',
       // Max footprint ≈ a typical maximum lot coverage applied to the parcel area.
       maxBuildingFootprintSqft: Math.round(grossSf * coverage),
       maxHeightFt,
@@ -2303,6 +2281,9 @@ export async function executeLandAnalysis(
     zoningStandardsStatus,
     zoningStandardsSourceUrl,
     zoningSetbacksStatus,
+    zoningSetbacks,
+    zoningMaxHeightFt,
+    zoningFloorAreaRatio,
     zoningSetbackNotes,
     zoningRestrictions,
     zoningMinimumLotAreaSqft,
@@ -2331,32 +2312,16 @@ export async function executeLandAnalysis(
     return sp;
   });
 
-  // STAGE 3 - zoning. Stream the official parcel district into the existing
-  // Zoning & Allowances card first, then enrich that same card with adopted
-  // ordinance standards. A fallback label is never presented as a district.
-  const officialParcelZoning = String(officialScRecord?.zoning || '').trim();
-  const parcelZoning = officialParcelZoning || String(info.zoning || '').trim();
+  // STAGE 3 - zoning. Search the complete postal address with Google Custom
+  // Search, then let Gemini 3.5 Flash read only those result URLs and populate
+  // the existing Zoning & Allowances card.
   {
-    onStageChange?.("Resolving zoning from official GIS...");
-    const addressHasState = new RegExp(`\\b${selectedState}\\b`, 'i').test(addressString);
-    const zoningLookupAddress = addressHasState
-      ? addressString
-      : [info.siteadd || addressString, info.scity, selectedState].filter(Boolean).join(', ');
-    const zoningHint = cleanCode(parcelZoning);
-    const zoningHintConfidence: ZoningLookupHints['codeConfidence'] = officialParcelZoning || info.recordsource === 'county-gis'
-      ? 'official'
-      : info.recordsource === 'scdot' ? 'statewide' : undefined;
-    const officialMapUrl = getZoningServices(countyName)[0]?.url
-      || (selectedState === 'SC' ? scCountySource(countyName)?.portalUrl : undefined);
-    const zoningHintSourceUrl = zoningHintConfidence === 'official'
-      ? (officialScRecord?.sourceUrl || officialMapUrl)
-      : zoningHintConfidence === 'statewide' ? SC_STATEWIDE_PARCEL_LAYER : undefined;
-    const sourceForZoningResult = (result: ZoningResult): SiteFeasibilityData['zoningSource'] => {
-      if (result.matchMethod === 'parcel-gis') return 'county-gis';
-      if (result.matchMethod === 'statewide-parcel') return 'statewide-gis';
-      if (result.matchMethod === 'official-map-review' || result.matchMethod === 'official-no-district') return 'official-map';
-      return 'web';
-    };
+    onStageChange?.("Searching zoning for the full address...");
+    // Preserve the user's selected autocomplete address verbatim before state
+    // expansion. Rebuilding it from assessor fields can drop the situs ZIP or
+    // substitute the owner's mailing ZIP, which makes an exact-address search
+    // less reliable.
+    const fullZoningAddress = normalizeFullAddressForZoning(addressString);
     const statusForZoningResult = (result: ZoningResult): SiteFeasibilityData['zoningVerificationStatus'] => {
       if (result.matchMethod === 'parcel-gis') return 'official-gis';
       if (result.matchMethod === 'statewide-parcel') return 'statewide-reported';
@@ -2383,7 +2348,7 @@ export async function executeLandAnalysis(
     const applyZoningIdentity = (result: ZoningResult) => {
       zoningCode = cleanCode(result.code) || '';
       zoningDescription = `${result.description} (${evidenceLabelForZoningResult(result)})`;
-      zoningSource = sourceForZoningResult(result);
+      zoningSource = 'web';
       zoningSourceUrl = result.sourceUrl;
       zoningSources = mergeSources(zoningSources, result.sources, [result.sourceUrl]);
       zoningVerificationStatus = statusForZoningResult(result);
@@ -2400,6 +2365,9 @@ export async function executeLandAnalysis(
       zoningStandardsStatus,
       zoningStandardsSourceUrl,
       zoningSetbacksStatus,
+      zoningSetbacks,
+      zoningMaxHeightFt,
+      zoningFloorAreaRatio,
       zoningSetbackNotes,
       zoningRestrictions,
       zoningMinimumLotAreaSqft,
@@ -2411,6 +2379,13 @@ export async function executeLandAnalysis(
       researchedZoningStandards = research.standards;
       zoningJurisdiction = research.jurisdiction || zoningJurisdiction;
       zoningStandardsSourceUrl = research.standards?.sourceUrl;
+      zoningSetbacks = research.standards?.setbacks ? {
+        frontFt: Number.isFinite(Number(research.standards.setbacks.frontFt)) ? Number(research.standards.setbacks.frontFt) : undefined,
+        rearFt: Number.isFinite(Number(research.standards.setbacks.rearFt)) ? Number(research.standards.setbacks.rearFt) : undefined,
+        sideFt: Number.isFinite(Number(research.standards.setbacks.sideFt)) ? Number(research.standards.setbacks.sideFt) : undefined,
+      } : undefined;
+      zoningMaxHeightFt = Number.isFinite(Number(research.standards?.maxHeightFt)) ? Number(research.standards?.maxHeightFt) : undefined;
+      zoningFloorAreaRatio = Number.isFinite(Number(research.standards?.floorAreaRatio)) ? Number(research.standards?.floorAreaRatio) : undefined;
       zoningSetbackNotes = research.standards?.setbackNotes;
       zoningRestrictions = research.standards?.restrictions;
       zoningMinimumLotAreaSqft = research.standards?.minimumLotAreaSqft;
@@ -2418,8 +2393,8 @@ export async function executeLandAnalysis(
       zoningPermittedUses = research.standards?.permittedUses;
       zoningSources = mergeSources(zoningSources, research.sources, [research.standards?.sourceUrl]);
       if (!research.standards) {
-        zoningStandardsStatus = zoningCode ? 'estimated' : 'unavailable';
-        zoningSetbacksStatus = zoningCode ? 'estimated' : 'unavailable';
+        zoningStandardsStatus = 'unavailable';
+        zoningSetbacksStatus = 'unavailable';
         return;
       }
       const setbackValues = [
@@ -2430,7 +2405,7 @@ export async function executeLandAnalysis(
       const verifiedSetbacks = setbackValues.filter((value) => Number.isFinite(Number(value))).length;
       zoningSetbacksStatus = verifiedSetbacks === setbackValues.length
         ? 'official'
-        : verifiedSetbacks > 0 ? 'mixed' : 'estimated';
+        : verifiedSetbacks > 0 ? 'mixed' : 'unavailable';
       const values = [
         research.standards.maxHeightFt,
         research.standards.floorAreaRatio,
@@ -2440,9 +2415,8 @@ export async function executeLandAnalysis(
         research.standards.maxLotCoveragePct,
       ];
       const verifiedCount = values.filter((value) => Number.isFinite(Number(value))).length;
-      zoningStandardsStatus = verifiedCount === values.length ? 'official' : verifiedCount > 0 ? 'mixed' : 'estimated';
+      zoningStandardsStatus = verifiedCount === values.length ? 'official' : verifiedCount > 0 ? 'mixed' : 'unavailable';
     };
-    const districtKey = (value: string) => value.toUpperCase().replace(/[^A-Z0-9]/g, '');
     const withZoningTimeout = <T,>(promise: Promise<T>, timeoutMs: number, fallback: T): Promise<T> => {
       let timer: ReturnType<typeof setTimeout> | undefined;
       const timeout = new Promise<T>((resolve) => {
@@ -2452,165 +2426,44 @@ export async function executeLandAnalysis(
         if (timer) clearTimeout(timer);
       });
     };
-    const firstDistrict = (lookups: Array<Promise<ZoningResult | null>>, timeoutMs: number): Promise<ZoningResult | null> =>
-      new Promise((resolve) => {
-        let pending = lookups.length;
-        let settled = false;
-        const timer = setTimeout(() => {
-          if (!settled) {
-            settled = true;
-            resolve(null);
-          }
-        }, timeoutMs);
-        const complete = (result: ZoningResult | null) => {
-          if (settled) return;
-          if (result && cleanCode(result.code)) {
-            settled = true;
-            clearTimeout(timer);
-            resolve(result);
-            return;
-          }
-          pending -= 1;
-          if (pending === 0) {
-            settled = true;
-            clearTimeout(timer);
-            resolve(null);
-          }
-        };
-        if (!lookups.length) complete(null);
-        for (const lookup of lookups) lookup.then(complete).catch(() => complete(null));
-      });
 
-    const officialParcelHint: ZoningResult | null = zoningHint
-      && zoningHintConfidence === 'official'
-      && zoningHintSourceUrl
-      ? {
-        code: zoningHint,
-        description: 'Official parcel GIS zoning district',
-        sourceUrl: zoningHintSourceUrl,
-        sources: [zoningHintSourceUrl],
-        jurisdiction: countyName ? `${countyBaseName(countyName)} County` : undefined,
-        matchMethod: 'parcel-gis',
-        evidenceTier: 'official',
-      }
-      : null;
+    zoningDescription = `Searching Google Custom Search for ${fullZoningAddress}`;
+    zoningSource = 'web';
+    zoningStandardsStatus = 'resolving';
+    zoningSetbacksStatus = 'resolving';
+    emitZoning();
 
-    let officialZoning = officialParcelHint;
-    if (!officialZoning) {
-      const registryLookup = lookupOfficialZoning({
-        address: zoningLookupAddress,
-        latitude: lat,
-        longitude: lng,
-        parcelId: parcelId && parcelId.toUpperCase() !== 'N/A' ? parcelId : undefined,
-      }).then((registryZoning): ZoningResult | null => {
-        const code = cleanCode(registryZoning.code);
-        if (registryZoning.status !== 'verified' || !code || !registryZoning.sourceUrl) return null;
-        return {
-          code,
-          description: registryZoning.description || (registryZoning.splitZoned
-            ? `Split-zoned parcel; additional districts ${registryZoning.additionalDistricts.map((district) => district.code).filter(Boolean).join(', ')}`
-            : 'Official GIS zoning district'),
-          sourceUrl: registryZoning.sourceUrl,
-          sources: registryZoning.sources,
-          jurisdiction: registryZoning.jurisdiction || undefined,
-          matchMethod: 'parcel-gis',
-          evidenceTier: 'official',
-        };
-      }).catch(() => null);
-      const directLookup = countyName && Number.isFinite(lat) && Number.isFinite(lng)
-        ? fetchCountyZoningCode(countyName, Number(lng), Number(lat), {
-            address: zoningLookupAddress,
-            parcelId,
-            allowServerDiscovery: true,
-          }).then((direct): ZoningResult | null => {
-            const code = cleanCode(direct?.code);
-            if (!direct || !code || !direct.sourceUrl) return null;
-            return {
-              code,
-              description: direct.description || 'Official GIS zoning district',
-              sourceUrl: direct.sourceUrl,
-              sources: [direct.sourceUrl],
-              jurisdiction: direct.jurisdiction || undefined,
-              matchMethod: 'parcel-gis',
-              evidenceTier: 'official',
-            };
-          }).catch(() => null)
-        : Promise.resolve(null);
-      officialZoning = await firstDistrict([registryLookup, directLookup], 15_000);
+    onStageChange?.("Reading Google Custom Search zoning evidence with Gemini 3.5 Flash...");
+    let researched: ZoningResult | null = null;
+    let researchError = '';
+    try {
+      researched = await withZoningTimeout(
+        fetchZoningWithGoogleCustomSearch(fullZoningAddress, countyName),
+        45_000,
+        null,
+      );
+    } catch (error) {
+      researchError = error instanceof Error ? error.message : String(error);
     }
-    const researchHints: ZoningLookupHints = {
-      code: officialZoning?.code || zoningHint,
-      codeSourceUrl: officialZoning?.sourceUrl || zoningHintSourceUrl,
-      codeConfidence: officialZoning ? 'official' : zoningHintConfidence,
-      officialMapUrl,
-      skipDirectLookup: !!officialZoning,
-    };
 
-    if (officialZoning) {
-      applyZoningIdentity(officialZoning);
-      zoningStandardsStatus = 'resolving';
-      zoningSetbacksStatus = 'resolving';
-      emitZoning();
-      onStageChange?.("Reading adopted zoning setbacks and allowances...");
-      const researched = await withZoningTimeout(
-        fetchZoningViaWebSearch(zoningLookupAddress, countyName, lat, lng, parcelId, researchHints),
-        40_000,
-        null,
-      );
-      if (researched && cleanCode(researched.code)
-        && districtKey(researched.code) === districtKey(officialZoning.code)) {
-        applyResearchStandards(researched);
-      } else {
-        zoningStandardsStatus = 'estimated';
-        zoningSetbacksStatus = 'estimated';
-      }
+    if (researched && cleanCode(researched.code)) {
+      applyZoningIdentity(researched);
+      zoningSource = 'web';
+      applyResearchStandards(researched);
     } else {
-      let acceptQuickResult = true;
-      let quickDistrictCode = '';
-      const researched = await withZoningTimeout(
-        fetchZoningViaWebSearch(zoningLookupAddress, countyName, lat, lng, parcelId, {
-          ...researchHints,
-          onQuickResult: (quick) => {
-            if (!acceptQuickResult || !cleanCode(quick.code)) return;
-            applyZoningIdentity(quick);
-            quickDistrictCode = zoningCode;
-            zoningStandardsStatus = 'resolving';
-            zoningSetbacksStatus = 'resolving';
-            emitZoning();
-          },
-        }),
-        42_000,
-        null,
-      );
-      acceptQuickResult = false;
-      if (researched && cleanCode(researched.code)) {
-        applyZoningIdentity(researched);
-        applyResearchStandards(researched);
-      } else if (quickDistrictCode) {
-        zoningCode = quickDistrictCode;
-        zoningStandardsStatus = 'estimated';
-        zoningSetbacksStatus = 'estimated';
-      } else {
-        const fallbackSource = researched?.sourceUrl
-          || officialMapUrl
-          || (selectedState === 'SC'
-            ? 'https://www.sciway.net/maps/sc-gis-county-maps.html'
-            : 'https://www.nconemap.gov/');
-        zoningCode = '';
-        zoningDescription = researched?.description
-          || 'No source-backed district code was returned for this parcel; use the cited jurisdiction map for confirmation.';
-        zoningSource = researched ? sourceForZoningResult(researched) : 'official-map';
-        zoningSourceUrl = fallbackSource;
-        zoningSources = mergeSources(zoningSources, researched?.sources || [], [fallbackSource]);
-        zoningVerificationStatus = researched ? statusForZoningResult(researched) : 'review-required';
-        zoningJurisdiction = researched?.jurisdiction || zoningJurisdiction;
-        zoningStandardsStatus = 'unavailable';
-        zoningSetbacksStatus = 'unavailable';
-      }
+      zoningCode = '';
+      zoningDescription = researchError
+        || `Google Custom Search and Gemini 3.5 Flash did not return a source-backed zoning code for ${fullZoningAddress}.`;
+      zoningSource = 'web';
+      zoningSourceUrl = undefined;
+      zoningSources = [];
+      zoningVerificationStatus = 'unavailable';
+      zoningStandardsStatus = 'unavailable';
+      zoningSetbacksStatus = 'unavailable';
     }
   }
 
-  gridics = buildGridics(); // re-derive setback/height estimates from the real district
+  gridics = buildGridics();
   onPartial?.({
     zoningCode,
     zoningDescription,
@@ -2622,6 +2475,9 @@ export async function executeLandAnalysis(
     zoningStandardsStatus,
     zoningStandardsSourceUrl,
     zoningSetbacksStatus,
+    zoningSetbacks,
+    zoningMaxHeightFt,
+    zoningFloorAreaRatio,
     zoningSetbackNotes,
     zoningRestrictions,
     zoningMinimumLotAreaSqft,
@@ -4420,7 +4276,7 @@ type ZoningResult = {
 };
 
 const GEMINI_ZONING_MODEL = 'gemini-3.5-flash';
-const ZONING_SYSTEM = "You are a persistent zoning research analyst. Use Google Search plus the supplied Crawlee-extracted page and document evidence. Prefer official parcel GIS, official address results, and official parcel reports. If official assignment evidence is unavailable, an exact-address Zillow, Realtor, or Redfin record may be reported, and two independent matching listing providers may be corroborated. Never describe listing evidence as official. An ordinance alone cannot assign a parcel. Setbacks, dimensional standards, and restrictions require an adopted ordinance or official zoning-code URL. Return only the requested JSON and never fabricate.";
+const ZONING_SYSTEM = "You are a zoning research analyst. Use only the supplied Google Custom Search JSON results and the content retrieved from those result URLs with Gemini URL Context. Do not perform another search and do not rely on unstated knowledge. Prefer official parcel GIS, official address results, and official parcel reports. If official assignment evidence is unavailable, an exact-address Zillow, Realtor, or Redfin record may be reported, and two independent matching listing providers may be corroborated. Never describe listing evidence as official. An ordinance alone cannot assign a parcel. Setbacks, dimensional standards, and restrictions require an adopted ordinance or official zoning-code URL returned by Custom Search. Return only the requested JSON and never fabricate.";
 
 function cleanEvidenceUrl(value: unknown): string | null {
   if (typeof value !== 'string' || !/^https?:\/\//i.test(value.trim())) return null;
@@ -4608,20 +4464,15 @@ function geminiResponseText(data: any): string {
     .trim();
 }
 
-function urlsInText(value: string): string[] {
-  const matches = value.match(/https?:\/\/[^\s"'<>\\\])}]+/gi) || [];
-  return [...new Set(matches.map((url) => url.replace(/[.,;:]+$/, '')).map(cleanEvidenceUrl).filter((url): url is string => !!url))];
-}
-
-function geminiGroundingUrls(data: any): string[] {
+function geminiUrlContextUrls(data: any): string[] {
   const candidate = data?.candidates?.[0];
-  const chunks = candidate?.groundingMetadata?.groundingChunks
-    || candidate?.grounding_metadata?.grounding_chunks
-    || [];
-  const urls = Array.isArray(chunks)
-    ? chunks.map((chunk: any) => cleanEvidenceUrl(chunk?.web?.uri || chunk?.web?.url || chunk?.uri))
-    : [];
-  return [...new Set(urls.filter((url): url is string => !!url))];
+  const metadata = candidate?.urlContextMetadata || candidate?.url_context_metadata;
+  const entries = metadata?.urlMetadata || metadata?.url_metadata || [];
+  if (!Array.isArray(entries)) return [];
+  return [...new Set(entries
+    .filter((entry: any) => /SUCCESS$/i.test(String(entry?.urlRetrievalStatus || entry?.url_retrieval_status || '')))
+    .map((entry: any) => cleanEvidenceUrl(entry?.retrievedUrl || entry?.retrieved_url))
+    .filter((url: string | null): url is string => !!url))];
 }
 
 function geminiRetryDelayMs(response: Response, attempt: number): number {
@@ -4641,8 +4492,8 @@ async function zoningExpertViaGemini(
     const body = JSON.stringify({
       contents: [{ role: 'user', parts: [{ text: promptText + evidenceBlock }] }],
       systemInstruction: { parts: [{ text: ZONING_SYSTEM }] },
-      tools: [{ google_search: {} }],
-      generationConfig: { maxOutputTokens: 3200 },
+      tools: [{ url_context: {} }],
+      generationConfig: { maxOutputTokens: 3200, responseMimeType: 'application/json' },
     });
 
     for (let attempt = 0; attempt < 2; attempt++) {
@@ -4661,13 +4512,10 @@ async function zoningExpertViaGemini(
         const data = await response.json();
         const raw = geminiResponseText(data);
         if (!raw) return null;
-        const grounded = geminiGroundingUrls(data);
-        // Canonical URLs emitted in a grounded response are retained alongside
-        // Gemini's redirect citations so official/listing hosts can be checked.
+        const retrieved = geminiUrlContextUrls(data);
         const discoveredUrls = [...new Set([
           ...evidenceUrls,
-          ...grounded,
-          ...(grounded.length ? urlsInText(raw) : []),
+          ...retrieved,
         ])];
         return { raw, result: parseZoningResult(raw, discoveredUrls, countyName) };
       }
@@ -4684,329 +4532,50 @@ async function zoningExpertViaGemini(
   }
 }
 
-function extractZoningCandidateCode(raw: string): string | null {
-  const match = raw.match(/```json\s*([\s\S]*?)\s*```/) || raw.match(/\{[\s\S]*\}/);
-  if (!match) return null;
-  try {
-    const parsed = JSON.parse((match[1] || match[0]).replace(/,\s*([}\]])/g, '$1'));
-    const rawCode = typeof parsed?.zoningCode === 'string' ? parsed.zoningCode.trim() : '';
-    const code = /^unzoned$/i.test(rawCode) ? 'NO ADOPTED DISTRICT' : rawCode;
-    return code && !/^(null|n\/?a|unknown|tbd)$/i.test(code) ? code.slice(0, 32) : null;
-  } catch { return null; }
+function googleCustomSearchZoningCredentials(): { apiKey: string; engineId: string } {
+  const keys = getUserKeys();
+  const env = import.meta.env as Record<string, string | undefined>;
+  return {
+    apiKey: (keys.googleCustomSearch || env.VITE_GOOGLE_CUSTOM_SEARCH_API_KEY || keys.googleMaps || '').trim(),
+    engineId: (keys.googleCustomSearchCx || env.VITE_GOOGLE_CUSTOM_SEARCH_CX || '').trim(),
+  };
 }
 
-function zoningQueriesForRound(input: {
-  round: number;
-  address: string;
-  parcelId?: string;
-  countyName?: string;
-  state: string;
-  candidateCode?: string | null;
-  municipality?: string | null;
-}): string[] {
-  const county = input.countyName ? `${countyBaseName(input.countyName)} County ${input.state}` : input.state;
-  const jurisdiction = input.municipality ? `${input.municipality} ${input.state}` : county;
-  const parcel = input.parcelId && input.parcelId.toUpperCase() !== 'N/A' ? input.parcelId : '';
-  const candidate = input.candidateCode ? ` "${input.candidateCode}"` : '';
-  const rounds = [
-    [
-      `zoning district "${input.address}"${parcel ? ` parcel "${parcel}"` : ''}`,
-      `"${input.address}" zoning GIS parcel viewer`,
-      `${jurisdiction} official zoning map address search`,
-      `site:zillow.com OR site:realtor.com OR site:redfin.com "${input.address}" zoning`,
-      `"${input.address}" "zoning" property`,
-    ],
-    [
-      `site:zillow.com OR site:realtor.com OR site:redfin.com "${input.address}" "zoning code"`,
-      `"${input.address}" parcel zoning${candidate}`,
-      parcel ? `"${parcel}" zoning ${county}` : `${county} parcel ID zoning search`,
-      `${county} assessor property record zoning`,
-      `${county} qPublic Beacon WTHGIS zoning`,
-      `${jurisdiction} planning department zoning verification`,
-      `${jurisdiction} zoning ordinance district${candidate} setbacks permitted uses restrictions`,
-    ],
-    [
-      `${jurisdiction} official GIS identify zoning "${input.address}"${candidate}`,
-      `${jurisdiction} zoning ordinance district${candidate} setbacks minimum lot permitted uses restrictions`,
-      `${jurisdiction} municipal zoning map "${input.address}"`,
-      parcel ? `${county} zoning map parcel "${parcel}"` : `${county} zoning map parcel search`,
-      `site:arcgis.com ${county} zoning`,
-      `"${input.address}" zoning official government GIS`,
-      `site:municode.com ${county} zoning${candidate}`,
-      `site:ecode360.com ${county} zoning${candidate}`,
-    ],
-    [
-      `"${input.address}" zoning district land use`,
-      `"${input.address}" property appraiser zoning`,
-      parcel ? `"${parcel}" "${county}" zoning district` : `"${input.address}" "${county}" zoning district`,
-      `${county} tax parcel report zoning field`,
-      `${county} open data zoning polygons`,
-      `site:zillow.com OR site:realtor.com OR site:redfin.com "${input.address}"`,
-      `${jurisdiction} zoning administrator address lookup`,
-      `${jurisdiction} adopted zoning map${candidate}`,
-    ],
-  ];
-  return [...new Set(rounds[Math.min(input.round, rounds.length - 1)].filter((query) => query.trim()))];
-}
-
-/** Per-round Crawlee budget for zoning research. The zoning section discovers
- * source URLs with Google Search and treats the Crawlee scraper as the PRIMARY
- * lookup (deep page + document extraction). Round 0 is lean; later rounds crawl
- * wider. (Perplexity is not used for zoning — only for the other sections.) */
-const ZONING_DISCOVERY_MAX_URLS = 10;
-const ZONING_FAST_SEARCH_BUDGET = { maxScrapeTargets: 5, maxSources: 12 } as const;
-const ZONING_HARD_FALLBACK_BUDGET = { maxScrapeTargets: 6, maxSources: 14 } as const;
-
-/** Google Search URL discovery for the zoning section: one Gemini pass with the
- * google_search grounding tool whose only job is to surface the canonical
- * county/municipal GIS, parcel-viewer, ordinance, and exact-address listing
- * pages for the queries. Returns the discovered page URLs (canonical URLs the
- * model wrote out first — directly scrapeable — then grounding-redirect URLs as
- * a backup) to hand to the Crawlee scraper. */
-async function googleSearchDiscoverUrls(queries: string[], geminiKey: string, maxUrls = ZONING_DISCOVERY_MAX_URLS): Promise<string[]> {
-  // Cap the queries per grounding call: google_search runs each sub-query, so a
-  // long list balloons latency and truncates the URL list at the token cap.
-  const qs = queries.map((q) => q.trim()).filter(Boolean).slice(0, 5);
-  if (!geminiKey || !qs.length) return [];
-  const prompt = `Use Google Search to find the web pages that answer these property-zoning lookups. Do NOT answer the questions — only search.\n${qs.map((q, i) => `${i + 1}. ${q}`).join('\n')}\nReply with ONLY the full canonical https URLs of the most relevant official county/municipal GIS, parcel-viewer, zoning-ordinance, and exact-address property pages — one URL per line, nothing else.`;
-  try {
-    const res = await queueGemini(() => fetchWithTimeout(
-      `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_ZONING_MODEL}:generateContent?key=${geminiKey}`,
-      18000,
-      {
-        method: 'POST',
-        cache: 'no-store',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contents: [{ role: 'user', parts: [{ text: prompt }] }],
-          tools: [{ google_search: {} }],
-          // Enough headroom for a full URL list (each URL is token-heavy);
-          // MAX_TOKENS truncation drops trailing URLs but earlier ones are kept.
-          generationConfig: { maxOutputTokens: 1024 },
-        }),
-      },
-    ), 'high', 'primary');
-    if (!res.ok) return [];
-    const data = await res.json();
-    // Canonical URLs the model wrote out (directly scrapeable) first, then the
-    // grounding-redirect URLs the search tool attached as a backup set.
-    const urls = [...urlsInText(geminiResponseText(data)), ...geminiGroundingUrls(data)];
-    return [...new Set(urls)].slice(0, maxUrls);
-  } catch {
-    return [];
-  }
-}
-
-/** Zoning research pack — Google Search discovers the source URLs and the
- * Crawlee scraper is the PRIMARY lookup, deep-extracting each page and any
- * linked PDF/DOCX/XLSX ordinance or fee document. Perplexity is not used here.
- * Returns block '' when no key / nothing extracted, so the caller falls back to
- * Gemini's own Google Search grounding during synthesis. */
-async function zoningResearchViaGoogleCrawlee(
-  queries: string[],
-  geminiKey: string,
-  opts?: WebResearchOptions,
-): Promise<{ block: string; urls: string[] }> {
-  if (!geminiKey) return { block: '', urls: [] };
-  const discovered = await googleSearchDiscoverUrls(queries, geminiKey);
-  const seedUrls = [...new Set([...(opts?.seedUrls || []), ...discovered])];
-  if (!seedUrls.length) return { block: '', urls: [] };
-  // Crawlee is the primary extractor: it reads the official pages + linked docs.
-  const results = await crawleeScrapeBatch(seedUrls, queries, opts?.maxScrapeTargets);
-  if (results.length) {
-    return {
-      block: `\n\nLIVE ZONING RESEARCH (Google Search discovery + Crawlee page/document extraction — primary source). Base every figure on THESE extracted sources and cite their URLs in "sources"; do not invent anything beyond them:\n\n${formatCrawleeSources(results, opts?.maxSources ?? 24)}`,
-      urls: results.map((r) => r.url),
-    };
-  }
-  // Crawlee extracted nothing (endpoint unavailable or every page blocked) —
-  // still hand the Google-discovered URLs to the synthesizer so it can
-  // ground/verify them via its own Google Search tool.
-  return { block: '', urls: discovered };
-}
-
-interface ZoningLookupHints {
-  code?: string | null;
-  codeSourceUrl?: string;
-  codeConfidence?: 'official' | 'statewide';
-  landUse?: string;
-  landUseSourceUrl?: string;
-  officialMapUrl?: string;
-  onQuickResult?: (result: ZoningResult) => void;
-  /** The caller already has a fresh official point result and only needs the
-   * adopted ordinance standards. Avoid repeating the same GIS request. */
-  skipDirectLookup?: boolean;
-}
-
-/** Gemini 3.5 Flash zoning resolver. A fresh official ArcGIS point result is
- * retained as the authoritative fallback; for web research the zoning section
- * uses Google Search to discover sources and the Crawlee scraper as the primary
- * lookup, then Gemini reads the adopted district and standards from that
- * extracted evidence (plus its own Google Search grounding). */
-export async function fetchZoningViaWebSearch(
+/** The complete zoning pipeline: Google Custom Search JSON API discovers the
+ * exact-address evidence, then Gemini 3.5 Flash reads only those URLs and
+ * returns the district plus source-backed allowances. */
+export async function fetchZoningWithGoogleCustomSearch(
   address: string,
   countyName?: string,
-  lat?: number,
-  lng?: number,
-  parcelId?: string,
-  hints: ZoningLookupHints = {},
 ): Promise<ZoningResult | null> {
+  const fullAddress = normalizeFullAddressForZoning(address);
   const geminiKey = (getUserKeys().gemini || '').trim();
-  const state = countyName ? countyState(countyName) : 'NC';
-  const county = countyBaseName(countyName || '');
-  const noCountywideZoningSource = state === 'SC'
-    ? SC_NO_COUNTYWIDE_ZONING_SOURCES[county as (typeof SC_COUNTY_NAMES)[number]]
-    : undefined;
-  const incorporatedPlacePromise: Promise<string | null | undefined> = Number.isFinite(lat) && Number.isFinite(lng)
-    ? Promise.race([
-        incorporatedPlaceAtPoint(Number(lat), Number(lng)),
-        new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), 4500)),
-      ])
-    : Promise.resolve(undefined);
-  // The official GIS point lookup and the first research round run CONCURRENTLY:
-  // the research uses the Census place boundary so it searches the governing
-  // municipality rather than assuming every parcel is county-zoned.
-  const directGisLookupPromise: Promise<ResolvedZoning | null> = !hints.skipDirectLookup
-    && countyName && Number.isFinite(lat) && Number.isFinite(lng)
-    ? fetchCountyZoningCode(countyName, Number(lng), Number(lat), { address, parcelId }).catch((error) => {
-        console.warn('Official zoning GIS point lookup failed:', error);
-        return null;
-      })
-    : Promise.resolve(null);
-  const round0ResearchPromise = geminiKey
-    ? incorporatedPlacePromise.then((municipality) => zoningResearchViaGoogleCrawlee(
-        zoningQueriesForRound({ round: 0, address, parcelId, countyName, state, candidateCode: null, municipality }),
-        geminiKey,
-        ZONING_FAST_SEARCH_BUDGET,
-      )).catch(() => ({ block: '', urls: [] as string[] }))
-    : Promise.resolve({ block: '', urls: [] as string[] });
-  const directGis = await Promise.race<ResolvedZoning | null>([
-    directGisLookupPromise,
-    new Promise<null>((resolve) => setTimeout(() => resolve(null), state === 'NC' ? 18000 : 12000)),
-  ]);
-  const registeredGisUrl = directGis?.sourceUrl || (countyName ? getZoningServices(countyName)[0]?.url : undefined);
-  const gisHint = hints.code && !/^(n\/?a|unknown|null)$/i.test(hints.code.trim()) ? hints.code.trim() : '';
-  const fallbackCode = directGis?.code || (hints.codeConfidence === 'official' ? gisHint : '');
-  const fallbackSource = directGis?.sourceUrl || hints.codeSourceUrl || registeredGisUrl;
-  const officialGisFallback: ZoningResult | null = fallbackCode && fallbackSource
-    ? {
-        code: fallbackCode,
-        description: directGis?.description || 'Official GIS zoning district',
-        sourceUrl: fallbackSource,
-        sources: [fallbackSource],
-        jurisdiction: directGis?.jurisdiction || (countyName ? `${countyBaseName(countyName)} County` : undefined),
-        matchMethod: directGis?.resolution === 'no-district' ? 'official-no-district' : 'parcel-gis',
-        evidenceTier: 'official',
-      }
-    : null;
-  if (officialGisFallback) hints.onQuickResult?.(officialGisFallback);
-
-  const statewideHintFallback: ZoningResult | null = !officialGisFallback
-    && hints.codeConfidence === 'statewide'
-    && gisHint
-    && hints.codeSourceUrl
-    ? {
-        code: gisHint,
-        description: 'Statewide parcel snapshot district; confirm against the cited local map because source dates vary',
-        sourceUrl: hints.codeSourceUrl,
-        sources: [hints.codeSourceUrl],
-        jurisdiction: countyName ? `${countyBaseName(countyName)} County` : undefined,
-        matchMethod: 'statewide-parcel',
-        evidenceTier: 'reported',
-      }
-    : null;
-  const landUse = String(hints.landUse || '').replace(/\s+/g, ' ').trim();
-  const planningFallback: ZoningResult | null = !officialGisFallback
-    && !statewideHintFallback
-    && landUse
-    && hints.landUseSourceUrl
-    ? {
-        code: `LAND USE: ${landUse}`.slice(0, 80),
-        description: 'Official parcel planning or land-use designation; the structured parcel record did not include a district code',
-        sourceUrl: hints.landUseSourceUrl,
-        sources: [hints.landUseSourceUrl],
-        jurisdiction: countyName ? `${countyBaseName(countyName)} County` : undefined,
-        matchMethod: 'planning-designation',
-        evidenceTier: 'reported',
-      }
-    : null;
-  const incorporatedPlace = await incorporatedPlacePromise;
-  const noAdoptedDistrictFallback: ZoningResult | null = !officialGisFallback
-    && !statewideHintFallback
-    && !planningFallback
-    && noCountywideZoningSource
-    && incorporatedPlace === null
-    ? {
-        code: 'NO ADOPTED DISTRICT',
-        description: 'The point is outside incorporated municipal limits, and the current official county code does not establish county parcel zoning districts; other land-development rules still apply',
-        sourceUrl: noCountywideZoningSource,
-        sources: [noCountywideZoningSource],
-        jurisdiction: `Unincorporated ${county} County`,
-        matchMethod: 'official-no-district',
-        evidenceTier: 'official',
-      }
-    : null;
-  // NC has no statewide zoning layer, so when no county/municipal service,
-  // listing, planning designation, or statewide snapshot yields a district we
-  // still return a usable result routing to the governing jurisdiction's
-  // official zoning map — never a blank/"unresolved" section.
-  const directoryUrl = state === 'SC'
-    ? 'https://www.sciway.net/maps/sc-gis-county-maps.html'
-    : 'https://www.nconemap.gov/';
-  const reviewSource = hints.officialMapUrl || registeredGisUrl || hints.codeSourceUrl || hints.landUseSourceUrl || directoryUrl;
-  const reviewFallback: ZoningResult | null = state === 'NC' ? {
-    code: 'MANUAL REVIEW',
-    description: 'The jurisdiction requires an interactive official-map review before a final district code can be confirmed',
-    sourceUrl: reviewSource,
-    sources: [reviewSource],
-    jurisdiction: incorporatedPlace || (countyName ? `${countyBaseName(countyName)} County` : undefined),
-    matchMethod: 'official-map-review',
-    evidenceTier: 'reported',
-  } : null;
-  const immediateFallback = officialGisFallback || statewideHintFallback || planningFallback || noAdoptedDistrictFallback || reviewFallback;
-  if (!officialGisFallback && noAdoptedDistrictFallback) hints.onQuickResult?.(noAdoptedDistrictFallback);
-
-  if (!geminiKey) {
-    console.warn('Gemini API key is not configured; returning the strongest source-backed zoning fallback.');
-    return immediateFallback;
+  const credentials = googleCustomSearchZoningCredentials();
+  if (!fullAddress) throw new Error('A full property address is required for zoning search.');
+  if (!credentials.apiKey || !credentials.engineId) {
+    throw new Error('Add a Google Custom Search API key and Programmable Search Engine ID (cx) in Account Settings.');
   }
+  if (!geminiKey) throw new Error('Add a Gemini API key in Account Settings for zoning extraction.');
 
-  const stateFull = state === 'SC' ? 'South Carolina' : 'North Carolina';
+  const evidence = await fetchGoogleCustomSearchZoningEvidence(fullAddress, credentials);
+  if (!evidence.items.length) return null;
 
-  const jurisdictionLine = incorporatedPlace
-    ? ` It is inside the incorporated limits of ${incorporatedPlace}, ${stateFull}, in ${county} County.`
-    : incorporatedPlace === null
-      ? ` It is in unincorporated ${county} County, ${stateFull}.`
-      : countyName ? ` It is in ${countyBaseName(countyName)} County, ${stateFull}.` : '';
-  const coordLine = (lat != null && lng != null) ? ` The parcel is at coordinates ${lat.toFixed(6)}, ${lng.toFixed(6)}.` : '';
-  const parcelLine = parcelId && parcelId.toUpperCase() !== 'N/A' ? ` The parcel ID is "${parcelId}".` : '';
-  const authoritativeHint = directGis?.code || (hints.codeConfidence === 'official' ? gisHint : '');
-  const hintLine = authoritativeHint
-    ? `\nA fresh official GIS or parcel source returns "${authoritativeHint}" at this parcel. Treat that as authoritative unless a more specific official municipal parcel result proves a different governing district.`
-    : '';
-  const statewideHintLine = !authoritativeHint && statewideHintFallback
-    ? `\nA statewide parcel snapshot reports "${statewideHintFallback.code}". Treat it only as a candidate and replace it with a current county or municipal source whenever possible.`
-    : '';
-  const lookupPrompt = `Find the ZONING DISTRICT for this exact property: "${address}".${jurisdictionLine}${coordLine}${hintLine}
-${statewideHintLine}
-Search in this order: (1) county/municipal GIS or parcel report, (2) assessor/planning address result, (3) Zillow, Realtor, and Redfin exact-address property records. Check whether city or county zoning has jurisdiction. Listing records are candidates, not official records.
-Return ONLY a JSON object inside a markdown code block:
-\`\`\`json
-{ "zoningCode": "R-1", "zoningDescription": "Single-Family Residential", "source": "https://..." }
-\`\`\`
-Rules: "zoningCode" must be a district code explicitly shown for THIS exact address or parcel. Never infer a district from nearby properties, land use, or the ordinance alone. Never guess or fabricate a code.`;
+  const prompt = `Determine the current zoning district and adopted allowances for this exact complete address: "${evidence.fullAddress}".
 
-  const researchPrompt = `${lookupPrompt}
+The Google Custom Search JSON API used these exact queries:
+${evidence.queries.map((query, index) => `${index + 1}. ${query}`).join('\n')}
 
-Also verify the CURRENT dimensional standards and return this expanded JSON shape instead:
+Use only the result snippets below and the result URLs available through URL Context. Confirm that parcel-assignment evidence refers to the exact complete address. Prefer an official parcel-specific result. An adopted ordinance can support setbacks and restrictions only after the parcel's district is identified.
+
+Return one JSON object with this shape:
 {
   "zoningCode": "R-1",
   "zoningDescription": "Single-Family Residential",
   "jurisdiction": "Official zoning authority",
   "matchMethod": "parcel-gis|official-address-result|official-parcel-report|corroborated-listings|listing-address-result",
-  "parcelSource": "https://parcel-specific source...",
-  "listingSources": ["https://zillow...", "https://realtor...", "https://redfin..."],
-  "ordinanceSource": "https://official adopted ordinance...",
+  "parcelSource": "https://parcel-specific-result",
+  "listingSources": ["https://exact-address-listing"],
+  "ordinanceSource": "https://adopted-ordinance-or-code",
   "standards": {
     "lotType": "interior",
     "maxHeightFt": 35,
@@ -5014,122 +4583,25 @@ Also verify the CURRENT dimensional standards and return this expanded JSON shap
     "frontSetbackFt": 30,
     "rearSetbackFt": 25,
     "sideSetbackFt": 10,
-    "setbackNotes": ["Corner lots have a second street-yard setback"],
+    "setbackNotes": ["Source-backed rule or exception"],
     "minimumLotAreaSqft": 20000,
     "maxLotCoveragePct": 40,
-    "restrictions": ["Accessory structures must remain behind the principal building line"]
+    "restrictions": ["Source-backed parcel-relevant restriction"]
   },
-  "permittedUses": ["Single-family detached dwelling"],
-  "sources": ["https://..."]
+  "permittedUses": ["Source-backed permitted use"],
+  "sources": ["https://source-returned-by-custom-search"]
 }
 
-The ordinance alone does not prove the parcel's district. For official methods, parcelSource must be an official parcel-specific result. Use corroborated-listings only when at least two independent Zillow/Realtor/Redfin exact-address pages show the same code. Use listing-address-result only as a final fallback when one exact-address listing explicitly publishes the code and no official result was found after every research round. If the official authority explicitly states that no zoning ordinance applies, return zoningCode "NO ADOPTED DISTRICT" with that official parcel or jurisdiction source. Every setback, allowance, setback note, permitted use, and restriction must be supported by an adopted ordinanceSource; use null or [] for missing values. Restrictions should summarize parcel-relevant limits such as conditional uses, accessory structures, buffers, parking, signs, overlays, and special street or corner-lot rules. Return canonical source URLs, not Google redirect URLs.${parcelLine}`;
-
-  const fallbackEvidence = officialGisFallback || statewideHintFallback || planningFallback || noAdoptedDistrictFallback;
-  const evidenceBlocks: string[] = fallbackEvidence
-    ? [`\n\n=== EXISTING PARCEL EVIDENCE ===\nClassification: ${fallbackEvidence.code}\nURL: ${fallbackEvidence.sourceUrl}`]
-    : [];
-  const evidenceUrls: string[] = fallbackEvidence ? [fallbackEvidence.sourceUrl] : [];
-  if (hints.officialMapUrl && !evidenceUrls.includes(hints.officialMapUrl)) {
-    evidenceUrls.push(hints.officialMapUrl);
-    evidenceBlocks.push(`\n\n=== OFFICIAL COUNTY GIS ENTRY POINT ===\nURL: ${hints.officialMapUrl}`);
-  }
-  let candidateCode = officialGisFallback?.code || statewideHintFallback?.code || authoritativeHint || null;
-  let bestOfficialResult: ZoningResult | null = null;
-  let bestListingResult: ZoningResult | null = null;
-  const standardsScore = (result: ZoningResult | null) => {
-    const standards = result?.standards;
-    if (!standards) return 0;
-    const setbacks = [standards.setbacks?.frontFt, standards.setbacks?.rearFt, standards.setbacks?.sideFt]
-      .filter((value) => Number.isFinite(Number(value))).length;
-    return setbacks * 3
-      + (standards.restrictions?.length || 0)
-      + (standards.setbackNotes?.length || 0)
-      + (standards.permittedUses?.length || 0)
-      + (Number.isFinite(Number(standards.maxHeightFt)) ? 1 : 0)
-      + (Number.isFinite(Number(standards.minimumLotAreaSqft)) ? 1 : 0);
-  };
-
-  // The official point resolver handles the common path. Up to three research
-  // rounds remain available for county portals, municipal layers, and adopted
-  // standards when the registered service does not expose a district directly.
-  const maxRounds = 3;
-  const zoningResearchStartedAt = Date.now();
-  for (let round = 0; round < maxRounds; round++) {
-    const elapsed = Date.now() - zoningResearchStartedAt;
-    if ((round === 1 && elapsed > 20000) || (round === 2 && elapsed > 32000)) break;
-    const queries = zoningQueriesForRound({
-      round,
-      address,
-      parcelId,
-      countyName,
-      state,
-      candidateCode,
-      municipality: incorporatedPlace,
-    });
-    const research = round === 0
-      ? await round0ResearchPromise
-      : geminiKey
-        ? await Promise.race([
-            zoningResearchViaGoogleCrawlee(queries, geminiKey, {
-              ...ZONING_HARD_FALLBACK_BUDGET,
-              seedUrls: hints.officialMapUrl ? [hints.officialMapUrl] : [],
-            }),
-            new Promise<{ block: string; urls: string[] }>((resolve) => setTimeout(() => resolve({ block: '', urls: [] }), 14000)),
-          ]).catch(() => ({ block: '', urls: [] as string[] }))
-        : { block: '', urls: [] as string[] };
-    if (research.block && research.urls.length > 0) {
-      evidenceBlocks.push(`\n\n=== ZONING RESEARCH ROUND ${round + 1} ===${research.block.slice(0, 18000)}`);
-      for (const url of research.urls) if (!evidenceUrls.includes(url)) evidenceUrls.push(url);
-    }
-    const evidenceBlock = evidenceBlocks.join('').slice(-56000);
-    const roundPrompt = `${researchPrompt}
-
-This is research round ${round + 1} of ${maxRounds}. ${candidateCode ? `Earlier evidence suggested "${candidateCode}"; verify it rather than assuming it.` : ''}
-${round < maxRounds - 1
-  ? 'Prefer an official parcel assignment. If only listing evidence exists, return it with the correct listing matchMethod so the next round can seek official confirmation.'
-  : 'This is the final pass. Return the strongest exact-address result: official first, two-provider listing corroboration second, or one clearly labeled exact-address listing report last.'}`;
-    const draft = await zoningExpertViaGemini(
-      roundPrompt,
-      evidenceBlock,
-      evidenceUrls,
-      geminiKey,
-      countyName || '',
-    );
-    if (draft) {
-      candidateCode = draft.result?.code || extractZoningCandidateCode(draft.raw) || candidateCode;
-      if (draft.result?.evidenceTier === 'official') {
-        if (standardsScore(draft.result) > standardsScore(bestOfficialResult)) bestOfficialResult = draft.result;
-        const standards = bestOfficialResult?.standards;
-        const completeSetbacks = [
-          standards?.setbacks?.frontFt,
-          standards?.setbacks?.rearFt,
-          standards?.setbacks?.sideFt,
-        ].every((value) => Number.isFinite(Number(value)));
-        const hasQualitative = (standards?.restrictions?.length || 0)
-          + (standards?.setbackNotes?.length || 0)
-          + (standards?.permittedUses?.length || 0) > 0;
-        // An official district with fully verified setbacks is a finished
-        // answer — another round would only hunt for extra prose. Accept it
-        // immediately once any qualitative context exists, or unconditionally
-        // after the second pass.
-        if (completeSetbacks && (hasQualitative || round >= 1)) return bestOfficialResult;
-      } else if (draft.result) {
-        const rank = (result: ZoningResult | null) =>
-          result?.evidenceTier === 'corroborated' ? 2 : result?.evidenceTier === 'reported' ? 1 : 0;
-        if (rank(draft.result) > rank(bestListingResult)) bestListingResult = draft.result;
-      }
-    }
-
-  }
-
-  return bestOfficialResult
-    || officialGisFallback
-    || bestListingResult
-    || statewideHintFallback
-    || planningFallback
-    || noAdoptedDistrictFallback
-    || reviewFallback;
+Use null or [] for fields the supplied sources do not publish. Never infer a district from nearby property, land-use category, or the ordinance alone. Never invent a URL or a number.`;
+  const evidenceBlock = `\n\nGOOGLE CUSTOM SEARCH JSON RESULTS FOR THE FULL ADDRESS:\n\n${evidence.evidenceBlock}`;
+  const draft = await zoningExpertViaGemini(
+    prompt,
+    evidenceBlock,
+    evidence.urls,
+    geminiKey,
+    countyName || '',
+  );
+  return draft?.result || null;
 }
 
 /**

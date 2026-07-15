@@ -268,7 +268,8 @@ export interface SiteFeasibilityData {
   boundaryRings?: number[][][];
   statePlaneRings?: number[][][];
   zoningDescription?: string;
-  /** Where the zoning came from: the county's GIS, or a web search fallback. */
+  /** Where the zoning came from. Zoning research currently reports `web` for
+   *  Google Custom Search evidence interpreted by Gemini 3.5 Flash. */
   zoningSource?: 'county-gis' | 'statewide-gis' | 'official-map' | 'web';
   zoningSourceUrl?: string;
   zoningSources?: string[];
@@ -277,6 +278,13 @@ export interface SiteFeasibilityData {
   zoningStandardsStatus?: 'resolving' | 'official' | 'mixed' | 'estimated' | 'unavailable';
   zoningStandardsSourceUrl?: string;
   zoningSetbacksStatus?: 'resolving' | 'official' | 'mixed' | 'estimated' | 'unavailable';
+  zoningSetbacks?: {
+    frontFt?: number;
+    rearFt?: number;
+    sideFt?: number;
+  };
+  zoningMaxHeightFt?: number;
+  zoningFloorAreaRatio?: number;
   zoningSetbackNotes?: string[];
   zoningRestrictions?: string[];
   zoningMinimumLotAreaSqft?: number;
