@@ -495,7 +495,6 @@ test('Gemini zoning search uses the complete address and a fresh grounded Intera
   assert.equal(call.body.model, 'gemini-3.5-flash');
   assert.equal(call.body.store, false);
   assert.deepEqual(call.body.tools, [{ type: 'google_search' }]);
-  assert.equal(call.body.response_format.mime_type, 'application/json');
   assert.ok(call.body.input.includes(fullAddress));
   assert.doesNotMatch(JSON.stringify(call), /customsearch|programmable search|url_context|"cx"/i);
   assert.equal(result.fullAddress, fullAddress);

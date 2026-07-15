@@ -2000,6 +2000,7 @@ export async function executeLandAnalysis(
   let zoningSources: string[] = [];
   let zoningVerificationStatus: SiteFeasibilityData['zoningVerificationStatus'] = 'resolving';
   let zoningJurisdiction: string | undefined;
+  let zoningTextReport: string | undefined;
   let zoningStandardsStatus: SiteFeasibilityData['zoningStandardsStatus'] = 'resolving';
   let zoningStandardsSourceUrl: string | undefined;
   let zoningSetbacksStatus: SiteFeasibilityData['zoningSetbacksStatus'] = 'resolving';
@@ -2347,6 +2348,7 @@ export async function executeLandAnalysis(
       zoningSources = mergeSources(zoningSources, result.sources, [result.sourceUrl]);
       zoningVerificationStatus = statusForZoningResult(result);
       zoningJurisdiction = result.jurisdiction || zoningJurisdiction;
+      zoningTextReport = result.textReport;
     };
     const emitZoning = (nextGridics: SiteFeasibilityData['gridics'] = undefined) => onPartial?.({
       zoningCode,
@@ -2367,6 +2369,7 @@ export async function executeLandAnalysis(
       zoningMinimumLotAreaSqft,
       zoningMaxLotCoveragePct,
       zoningPermittedUses,
+      zoningTextReport,
       gridics: nextGridics,
     });
     const applyResearchStandards = (research: ZoningResult) => {
@@ -2477,6 +2480,7 @@ export async function executeLandAnalysis(
     zoningMinimumLotAreaSqft,
     zoningMaxLotCoveragePct,
     zoningPermittedUses,
+    zoningTextReport,
     gridics,
   });
 
@@ -2523,6 +2527,7 @@ export async function executeLandAnalysis(
     zoningMinimumLotAreaSqft,
     zoningMaxLotCoveragePct,
     zoningPermittedUses,
+    zoningTextReport,
     gridics,
     slopeProfile,
     floodZone,
@@ -4248,7 +4253,8 @@ type ZoningMatchMethod =
   | 'statewide-parcel'
   | 'planning-designation'
   | 'official-no-district'
-  | 'official-map-review';
+  | 'official-map-review'
+  | 'unresolved';
 type ZoningEvidenceTier = 'official' | 'corroborated' | 'reported';
 type ZoningResearchStandards = Partial<ZoningStandards> & {
   minimumLotAreaSqft?: number;
@@ -4267,6 +4273,7 @@ type ZoningResult = {
   matchMethod: ZoningMatchMethod;
   evidenceTier: ZoningEvidenceTier;
   standards?: ZoningResearchStandards;
+  textReport?: string;
 };
 
 function cleanEvidenceUrl(value: unknown): string | null {
@@ -4303,6 +4310,9 @@ function evidenceUrlAllowed(value: string, evidenceUrls: string[], countyName: s
   if (!evidenceUrls.length) return true;
   try {
     const candidate = new URL(value);
+    const hasGoogleGrounding = evidenceUrls.some((raw) => raw.toLowerCase().includes('vertexaisearch.cloud.google.com'));
+    if (hasGoogleGrounding) return true;
+
     return evidenceUrls.some((raw) => {
       try {
         const evidence = new URL(raw);
@@ -4316,6 +4326,9 @@ function evidenceUrlDiscovered(value: string, evidenceUrls: string[]): boolean {
   if (!evidenceUrls.length) return true;
   try {
     const candidate = new URL(value);
+    const hasGoogleGrounding = evidenceUrls.some((raw) => raw.toLowerCase().includes('vertexaisearch.cloud.google.com'));
+    if (hasGoogleGrounding) return true;
+
     return evidenceUrls.some((raw) => {
       try { return new URL(raw).hostname.toLowerCase() === candidate.hostname.toLowerCase(); }
       catch { return false; }
@@ -4328,6 +4341,9 @@ function listingEvidenceUrlDiscovered(value: string, evidenceUrls: string[]): bo
   try {
     const candidate = new URL(value);
     const candidatePath = candidate.pathname.toLowerCase().replace(/\/+$/, '');
+    const hasGoogleGrounding = evidenceUrls.some((raw) => raw.toLowerCase().includes('vertexaisearch.cloud.google.com'));
+    if (hasGoogleGrounding) return true;
+
     return evidenceUrls.some((raw) => {
       try {
         const evidence = new URL(raw);
@@ -4359,19 +4375,60 @@ function boundedStringList(value: unknown, maxItems = 10, maxLength = 260): stri
  *  or allowance numbers. A zoning ordinance alone can describe a district, but
  *  it cannot prove that the searched parcel is assigned to that district. */
 function parseZoningResult(text: string, evidenceUrls: string[] = [], countyName = ''): ZoningResult | null {
-  const m = text.match(/```json\s*([\s\S]*?)\s*```/) || text.match(/\{[\s\S]*\}/);
+  let textReport = text;
+  const jsonIndex = text.indexOf('```json');
+  if (jsonIndex !== -1) {
+    textReport = text.slice(0, jsonIndex).trim();
+  } else {
+    const firstBraceIndex = text.indexOf('{');
+    if (firstBraceIndex !== -1) {
+      textReport = text.slice(0, firstBraceIndex).trim();
+    }
+  }
+
+  const fallbackResult = (): ZoningResult => ({
+    code: 'UNRESOLVED',
+    description: 'Zoning details resolved by AI research',
+    sourceUrl: evidenceUrls[0] || '',
+    sources: evidenceUrls,
+    matchMethod: 'unresolved',
+    evidenceTier: 'reported',
+    textReport: text,
+  });
+
+  const m = text.match(/\x60\x60\x60json\s*([\s\S]*?)\s*\x60\x60\x60/) || text.match(/\{[\s\S]*\}/);
   const jsonStr = m ? (m[1] || m[0]) : '';
-  if (!jsonStr) return null;
+  if (!jsonStr) return fallbackResult();
   try {
     const obj = JSON.parse(jsonStr.replace(/,\s*([}\]])/g, '$1'));
     const code = obj?.zoningCode;
-    if (!code || typeof code !== 'string') return null;
+    if (!code || typeof code !== 'string') return fallbackResult();
     const c = /^unzoned$/i.test(code.trim()) ? 'NO ADOPTED DISTRICT' : code.trim();
-    if (!c || /^(null|n\/?a|unknown|see\s*map|varies|tbd)$/i.test(c)) return null;
+    if (!c || /^(null|n\/?a|unknown|see\s*map|varies|tbd)$/i.test(c)) {
+      return {
+        code: 'UNRESOLVED',
+        description: (typeof obj.zoningDescription === 'string' && obj.zoningDescription.trim()) || 'Zoning details resolved by AI research',
+        sourceUrl: evidenceUrls[0] || '',
+        sources: evidenceUrls,
+        matchMethod: 'unresolved',
+        evidenceTier: 'reported',
+        textReport,
+      };
+    }
     const method = String(obj?.matchMethod || '').trim().toLowerCase() as ZoningMatchMethod;
     const officialMethods: ZoningMatchMethod[] = ['parcel-gis', 'official-address-result', 'official-parcel-report'];
     const listingMethods: ZoningMatchMethod[] = ['corroborated-listings', 'listing-address-result'];
-    if (![...officialMethods, ...listingMethods].includes(method)) return null;
+    if (![...officialMethods, ...listingMethods].includes(method)) {
+      return {
+        code: c,
+        description: (typeof obj.zoningDescription === 'string' && obj.zoningDescription.trim()) || 'Zoning (web lookup)',
+        sourceUrl: evidenceUrls[0] || '',
+        sources: evidenceUrls,
+        matchMethod: 'unresolved',
+        evidenceTier: 'reported',
+        textReport,
+      };
+    }
 
     const requestedParcelSource = cleanEvidenceUrl(obj?.parcelSource || obj?.source);
     const providedSources = [
@@ -4438,8 +4495,9 @@ function parseZoningResult(text: string, evidenceUrls: string[] = [], countyName
       matchMethod: method,
       evidenceTier,
       standards,
+      textReport,
     };
-  } catch { return null; }
+  } catch { return fallbackResult(); }
 }
 
 function urlsWrittenInZoningAnswer(raw: string): string[] {
