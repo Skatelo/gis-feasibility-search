@@ -2,7 +2,7 @@
 // success. Google (when keyed) gives ROOFTOP precision; Census is the keyless
 // fallback and always available. A provider that isn't configured is skipped.
 
-import type { Geocoder, GeocodedAddress } from '../types';
+import { AmbiguousAddressError, type Geocoder, type GeocodedAddress } from '../types';
 
 export class ChainGeocoder implements Geocoder {
   readonly name = 'chain';
@@ -27,6 +27,7 @@ export class ChainGeocoder implements Geocoder {
       try {
         return await op(provider);
       } catch (err) {
+        if (err instanceof AmbiguousAddressError) throw err;
         errors.push(`${provider.name}: ${err instanceof Error ? err.message : String(err)}`);
       }
     }

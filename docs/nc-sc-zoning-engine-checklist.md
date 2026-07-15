@@ -8,7 +8,8 @@ geocoder chain, and confidence engine are reused.
 ## Coverage Contract
 
 - [x] Treat official current-zoning polygons as the only source of a district.
-- [x] Keep source discovery, browser work, and AI out of normal address lookups.
+- [x] Keep AI out of zoning determination; run bounded source discovery only on
+  an adaptive API registry miss.
 - [x] Return `manual_review` when no verified digital layer is configured.
 - [x] Keep base zoning, overlays, parcels, and future land use as separate roles.
 - [x] Do not infer zoning from parcel tax use, a mailing city, or ordinance text.
@@ -36,7 +37,8 @@ geocoder chain, and confidence engine are reused.
 - [x] Add parcel/zoning intersection and split-zoning percentages.
 - [x] Query overlay layers separately from base zoning.
 - [x] Preserve raw zoning attributes and exact layer URLs in every result.
-- [x] Keep the existing source-discovery service available only to maintenance jobs.
+- [x] Reuse source discovery for bulk maintenance and bounded single-jurisdiction
+  adaptive misses; require a successful point query before activation.
 
 ## Phase 3: Service Layer
 
@@ -44,6 +46,9 @@ geocoder chain, and confidence engine are reused.
 - [x] Add `POST /v1/jurisdictions/resolve`.
 - [x] Add `POST /v1/parcels/lookup`.
 - [x] Add `POST /v1/zoning/lookup`.
+- [x] Add adaptive `POST /api/zoning/lookup` with exact source evidence, stage
+  timings, and unresolved/candidate-address responses.
+- [x] Add durable SQLite local registry and PostgreSQL production registry.
 - [x] Add optional Redis caching with request single-flight behavior.
 - [x] Add PostgreSQL lookup logging without owner or unnecessary personal data.
 - [x] Add OpenAPI documentation and structured error responses.
@@ -55,13 +60,14 @@ geocoder chain, and confidence engine are reused.
 - [x] Add an administrative source dashboard in the existing React app.
 - [x] Add Docker Compose for API, worker, PostGIS, and Redis.
 - [x] Add source onboarding, deployment, error handling, and security docs.
+- [x] Add public rate controls, Prometheus metrics, and benchmark tooling.
 
 ## Verification
 
 - [x] Unit-test registry-only behavior, including proof that discovery is never
   called by a normal lookup.
-- [ ] Unit-test MapServer, FeatureServer, POST fallback, future-land-use
-  rejection, empty results, and broken sources with fixtures.
+- [x] Unit-test MapServer, FeatureServer, POST fallback, future-land-use
+  rejection, empty results, registry-miss discovery, and broken sources with fixtures.
 - [x] Unit-test parcel interior points, nearest-parcel fallback, overlays, and
   split zoning.
 - [x] Unit-test NC/SC authority routing and unsupported states.

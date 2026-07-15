@@ -17,6 +17,10 @@ or too imprecise. HTTP `502` means an official upstream request failed. A valid
 request with no configured source returns HTTP `200` and `manual_review`; it is
 not disguised as a transport failure.
 
+The preferred `POST /api/zoning/lookup` contract uses verification statuses
+`verified_official`, `official_but_ambiguous`, `manual_review_required`, and
+`not_found`. It also returns per-stage timings and the official sources checked.
+
 ## Security controls
 
 - Administrative routes require `x-admin-key` in production.
@@ -28,6 +32,8 @@ not disguised as a transport failure.
 - Source creation accepts HTTPS GIS URLs and creates candidates only.
 - Browser discovery refuses CAPTCHA, Turnstile, login, and payment controls.
 - API bodies are capped at 256 KB; ArcGIS responses have size and timeout caps.
+- Public adaptive lookups are rate-limited per client and have a 29-second hard
+  discovery budget inside the 35-second API request deadline.
 - The lookup log stores normalized address, location, parcel ID, authority,
   result, source version, confidence, and timing. It does not store owner names,
   contact enrichment, or unrelated personal data.

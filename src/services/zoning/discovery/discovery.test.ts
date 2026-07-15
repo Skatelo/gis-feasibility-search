@@ -99,6 +99,19 @@ test('discovery crawls an official page and extracts the embedded service URL', 
   assert.ok(sources.some((s) => /Planning\/Zoning\/MapServer$/.test(s.url)));
 });
 
+test('an official government page can establish context for its ArcGIS-hosted service', async () => {
+  const officialPage = 'https://raleighnc.gov/planning/services/zoning-map';
+  const hosted = 'https://services.arcgis.com/abc/arcgis/rest/services/Raleigh_Current_Zoning/FeatureServer';
+  const svc = new SourceDiscoveryService(
+    async () => [{ url: officialPage }],
+    async () => `<script>const zoning = "${hosted}";</script>`,
+  );
+  const sources = await svc.discover(municipalJur);
+  assert.equal(sources.length, 1);
+  assert.equal(sources[0].official, true);
+  assert.equal(sources[0].officialPageUrl, officialPage);
+});
+
 test('discovery excludes third-party sources unless explicitly allowed', async () => {
   // A direct endpoint hosted on a third-party aggregator: excluded by default,
   // recorded only when third-party sources are explicitly allowed.

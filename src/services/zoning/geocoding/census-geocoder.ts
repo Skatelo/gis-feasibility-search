@@ -6,7 +6,7 @@
 // it is the default provider and the one used in tests.
 
 import { z } from 'zod';
-import type { Geocoder, GeocodedAddress } from '../types';
+import { AmbiguousAddressError, type AddressCandidate, type Geocoder, type GeocodedAddress } from '../types';
 import { buildUrl, fetchJson } from '../utils/http';
 
 const GEOGRAPHIES_BASE = 'https://geocoding.geo.census.gov/geocoder/geographies/onelineaddress';
@@ -84,6 +84,24 @@ function toGeocoded(match: z.infer<typeof AddressMatch>, inputAddress: string): 
   };
 }
 
+function candidateFromMatch(match: z.infer<typeof AddressMatch>): AddressCandidate {
+  return {
+    formattedAddress: match.matchedAddress ?? 'Census address match',
+    latitude: match.coordinates.y,
+    longitude: match.coordinates.x,
+    provider: 'census',
+  };
+}
+
+function materiallyDifferentMatches(matches: z.infer<typeof AddressMatch>[]): z.infer<typeof AddressMatch>[] {
+  const unique = new Map<string, z.infer<typeof AddressMatch>>();
+  for (const match of matches) {
+    const key = `${(match.matchedAddress ?? '').toLowerCase()}|${match.coordinates.y.toFixed(5)}|${match.coordinates.x.toFixed(5)}`;
+    unique.set(key, match);
+  }
+  return [...unique.values()];
+}
+
 export class CensusGeocoder implements Geocoder {
   readonly name = 'census';
 
@@ -99,7 +117,11 @@ export class CensusGeocoder implements Geocoder {
       format: 'json',
     });
     const parsed = CensusResponse.parse(await fetchJson(url, { signal, timeoutMs: 6000 }));
-    const match = parsed.result.addressMatches[0];
+    const matches = materiallyDifferentMatches(parsed.result.addressMatches);
+    if (matches.length > 1) {
+      throw new AmbiguousAddressError(matches.slice(0, 8).map(candidateFromMatch));
+    }
+    const match = matches[0];
     if (!match) throw new Error(`Census geocoder found no match for "${address}"`);
     return toGeocoded(match, address);
   }

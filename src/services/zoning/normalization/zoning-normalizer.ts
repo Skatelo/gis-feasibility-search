@@ -11,6 +11,7 @@ import {
   isDescriptionShaped,
   scanForCode,
   scanForDescription,
+  codeScore,
 } from './value-shape';
 
 export { cleanCode } from './value-shape';
@@ -49,7 +50,12 @@ export function normalizeZoningAttributes(
   // If it holds description-like prose (misleading column name) or is empty, fall
   // back to value-shape scanning to recover the real code. Never fabricated.
   const mappedCode = codeField ? cleanCode(attrs[codeField]) : null;
-  const code = mappedCode && isCodeShaped(mappedCode) ? mappedCode : scanForCode(attrs, undefined) ?? mappedCode;
+  const scannedCode = scanForCode(attrs, undefined);
+  const code = mappedCode && isCodeShaped(mappedCode)
+    ? scannedCode && scannedCode !== mappedCode && codeScore(scannedCode) > codeScore(mappedCode)
+      ? scannedCode
+      : mappedCode
+    : scannedCode ?? mappedCode;
 
   // Description: the mapped field when it reads like prose, otherwise the best
   // description-shaped zoning value that isn't the code.

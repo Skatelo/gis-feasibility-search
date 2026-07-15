@@ -65,7 +65,9 @@ export class SourceDiscoveryService {
       if (!isSafeUrl(url)) return;
       const root = REST_URL_RE.test(url) ? toServiceRoot(url) : url;
       const assessment = assessOfficialDomain(root, jur);
-      if (!assessment.official && !allowThirdParty) return;
+      const contextAssessment = assessOfficialDomain(discoveredFrom, jur);
+      const official = assessment.official || contextAssessment.official;
+      if (!official && !allowThirdParty) return;
       const existing = candidates.get(root);
       if (existing) {
         if (!existing.discoveredFrom.includes(discoveredFrom)) existing.discoveredFrom.push(discoveredFrom);
@@ -74,9 +76,12 @@ export class SourceDiscoveryService {
       candidates.set(root, {
         url: root,
         sourceType: endpointSourceType(root),
-        official: assessment.official,
+        official,
         agency: jurisdiction.zoningAuthority,
         discoveredFrom: [discoveredFrom],
+        officialPageUrl: contextAssessment.official ? discoveredFrom : null,
+        officialReason: assessment.official ? assessment.reason : `Embedded by official page: ${contextAssessment.reason}`,
+        discoveryConfidence: Math.max(assessment.score, contextAssessment.score),
       });
     };
 

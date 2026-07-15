@@ -18,6 +18,8 @@ import {
   type AdapterContext,
   type JurisdictionSourceRecord,
   type ParcelResult,
+  AmbiguousAddressError,
+  type PipelineTimings,
 } from '../types';
 import { resolveJurisdiction } from '../jurisdiction';
 import { layerForRole } from '../arcgis';
@@ -30,6 +32,7 @@ import { inspectedFromRecord } from './record-mapper';
 import { lookupParcel } from '../parcel';
 import { queryZoningForParcel } from '../geometry';
 import type { MultiPolygon, Polygon } from 'geojson';
+import { normalizeAddressInput, addressCacheKey } from '../geocoding/address-normalizer';
 
 export type LookupMode = 'fast' | 'verified' | 'deep';
 
@@ -56,43 +59,71 @@ export class ZoningLookupEngine {
   }
 
   async lookup(rawInput: ZoningLookupInput): Promise<UniversalZoningResult> {
+    const lookupStartedAt = nowMs();
+    const timings = emptyTimings();
+    const diagnosticState = {
+      timings,
+      geocodeCacheHit: false,
+      jurisdictionCacheHit: false,
+      registryHit: false,
+    };
+    const finish = (result: UniversalZoningResult): UniversalZoningResult => {
+      timings.totalMs = roundedMs(nowMs() - lookupStartedAt);
+      return { ...result, diagnostics: diagnosticState };
+    };
     const errors: StageError[] = [];
-    const parsed = ZoningLookupInputSchema.safeParse(rawInput);
+    const normalizeStartedAt = nowMs();
+    const normalizedRawInput = rawInput && typeof rawInput.address === 'string'
+      ? { ...rawInput, address: normalizeAddressInput(rawInput.address) }
+      : rawInput;
+    timings.normalizeMs = roundedMs(nowMs() - normalizeStartedAt);
+    const parsed = ZoningLookupInputSchema.safeParse(normalizedRawInput);
     if (!parsed.success) {
-      return errorResult(rawInput, 'input-validation', parsed.error.issues.map((i) => i.message).join('; '));
+      return finish(errorResult(rawInput, 'input-validation', parsed.error.issues.map((i) => i.message).join('; ')));
     }
     const input = parsed.data;
     const mode: LookupMode = input.mode ?? 'verified';
 
     // 1) Geocode (or use supplied coordinates).
     let address: GeocodedAddress | null = null;
+    let candidateMatches: UniversalZoningResult['candidateMatches'];
+    const geocodeStartedAt = nowMs();
     try {
-      address = await this.geocode(input);
+      const geocoded = await this.geocode(input);
+      address = geocoded.address;
+      diagnosticState.geocodeCacheHit = geocoded.cacheHit;
     } catch (err) {
+      if (err instanceof AmbiguousAddressError) candidateMatches = err.candidates;
       errors.push({ stage: 'geocoding', message: String(err instanceof Error ? err.message : err), recoverable: false });
     }
+    timings.geocodeMs = roundedMs(nowMs() - geocodeStartedAt);
     if (!address) {
-      return {
+      return finish({
         ...baseResult(input),
         errors,
+        candidateMatches,
         status: 'not-found',
-      };
+      });
     }
 
     if (address.stateCode && !['NC', 'SC'].includes(address.stateCode.toUpperCase())) {
-      return {
+      return finish({
         ...baseResult(input),
         address,
         status: 'error',
         errors: [{ stage: 'input-validation', message: 'Address must be in North Carolina or South Carolina', recoverable: false }],
-      };
+      });
     }
 
     // 2) Resolve jurisdiction (geometry-confirmed unless fast mode).
-    const jurisdiction = await this.resolveJurisdictionCached(address, mode).catch((err) => {
+    const jurisdictionStartedAt = nowMs();
+    const jurisdictionResult = await this.resolveJurisdictionCached(address, mode).catch((err) => {
       errors.push({ stage: 'jurisdiction-resolution', message: String(err), recoverable: true });
-      return fallbackJurisdiction(address);
+      return { jurisdiction: fallbackJurisdiction(address), cacheHit: false };
     });
+    timings.jurisdictionMs = roundedMs(nowMs() - jurisdictionStartedAt);
+    const jurisdiction = jurisdictionResult.jurisdiction;
+    diagnosticState.jurisdictionCacheHit = jurisdictionResult.cacheHit;
 
     // 3) Resolve a previously verified GIS source. A miss remains a miss; live
     // requests never search, crawl, inspect viewers, or invoke AI.
@@ -103,6 +134,7 @@ export class ZoningLookupEngine {
     let inspected: InspectedZoningSource | null = null;
     let discoveredSource: DiscoveredSource | null = null;
     let sourceRecord: JurisdictionSourceRecord | null = null;
+    const registryStartedAt = nowMs();
     try {
       const resolved = await this.resolveSource(jurisdiction);
       inspected = resolved.inspected;
@@ -111,10 +143,13 @@ export class ZoningLookupEngine {
     } catch (err) {
       errors.push({ stage: 'registry', message: String(err instanceof Error ? err.message : err), recoverable: true });
     }
+    timings.registryMs = roundedMs(nowMs() - registryStartedAt);
+    diagnosticState.registryHit = !!sourceRecord;
 
     // 4) Locate an official parcel and move the zoning query to an interior
     // point. Deep/verified lookups also intersect the full parcel polygon.
     let parcel: ParcelResult | null = null;
+    const parcelStartedAt = nowMs();
     if (sourceRecord?.parcelLayers[0] && input.includeParcel !== false) {
       try {
         parcel = await lookupParcel(
@@ -131,12 +166,16 @@ export class ZoningLookupEngine {
         errors.push({ stage: 'parcel-query', message: String(err instanceof Error ? err.message : err), recoverable: true });
       }
     }
+    timings.parcelQueryMs = roundedMs(nowMs() - parcelStartedAt);
 
     // 5) Query zoning + overlays deterministically from the saved layer IDs.
     const wantOverlays = input.includeOverlays !== false;
+    const initialNormalizationStartedAt = nowMs();
     let normalized = normalizeZoning([], []);
+    timings.normalizationMs += nowMs() - initialNormalizationStartedAt;
     let zoningMatchQuality: 'parcel-polygon-intersect' | 'interior-point' | 'geocode-point' | 'none' = 'none';
     let coverageByCode = new Map<string, number>();
+    const zoningStartedAt = nowMs();
     if (inspected) {
       const adapter = adapterForSourceType(inspected.sourceType) ?? selectAdapter(inspected.source);
       if (!adapter) {
@@ -154,7 +193,9 @@ export class ZoningLookupEngine {
               errors.push({ stage: 'geometry-processing', message, recoverable: true });
             }
             if (parcelQuery.matches.length > 0) {
+              const normalizationStartedAt = nowMs();
               normalized = normalizeZoning(parcelQuery.matches, inspected.layers);
+              timings.normalizationMs += nowMs() - normalizationStartedAt;
               coverageByCode = parcelQuery.coverageByCode;
               if (normalized.zoning.found) zoningMatchQuality = 'parcel-polygon-intersect';
             }
@@ -173,7 +214,9 @@ export class ZoningLookupEngine {
               },
               ctx,
             );
+            const normalizationStartedAt = nowMs();
             normalized = normalizeZoning(matches, inspected.layers);
+            timings.normalizationMs += nowMs() - normalizationStartedAt;
             if (normalized.zoning.found) zoningMatchQuality = parcel?.interiorPoint ? 'interior-point' : 'geocode-point';
           }
         } catch (err) {
@@ -181,8 +224,11 @@ export class ZoningLookupEngine {
         }
       }
     }
+    timings.zoningQueryMs = roundedMs(nowMs() - zoningStartedAt);
+    timings.normalizationMs = roundedMs(timings.normalizationMs);
 
     // 6) Confidence + status.
+    const validationStartedAt = nowMs();
     const confidence = computeConfidence({
       address,
       jurisdiction,
@@ -206,8 +252,9 @@ export class ZoningLookupEngine {
       coveragePercent: district.code ? roundedCoverage(coverageByCode.get(district.code.toUpperCase())) : null,
     }));
     const resultParcel = parcel ? sanitizeParcel(parcel, input.includeGeometry === true) : null;
+    timings.validationMs = roundedMs(nowMs() - validationStartedAt);
 
-    return {
+    return finish({
       input,
       address,
       jurisdiction,
@@ -238,17 +285,18 @@ export class ZoningLookupEngine {
       status,
       errors,
       rawSources: normalized.zoning.rawAttributes ? [normalized.zoning.rawAttributes] : [],
-    };
+      diagnostics: diagnosticState,
+    });
   }
 
   // --- stages --------------------------------------------------------------
 
-  private async geocode(input: ZoningLookupInput): Promise<GeocodedAddress> {
+  private async geocode(input: ZoningLookupInput): Promise<{ address: GeocodedAddress; cacheHit: boolean }> {
     if (typeof input.latitude === 'number' && typeof input.longitude === 'number') {
       const reversed = await this.geocoder
         .reverseGeocode(input.latitude, input.longitude)
         .catch(() => null);
-      return (
+      return { address: (
         reversed ?? {
           inputAddress: input.address,
           formattedAddress: input.address,
@@ -257,27 +305,27 @@ export class ZoningLookupEngine {
           provider: 'input',
           raw: null,
         }
-      );
+      ), cacheHit: false };
     }
-    const cacheKey = input.address.trim().toLowerCase();
+    const cacheKey = addressCacheKey(input.address);
     if (!input.forceRefresh) {
       const cached = await this.registry.cacheGet<GeocodedAddress>('geocode', cacheKey);
-      if (cached) return cached;
+      if (cached) return { address: cached, cacheHit: true };
     }
     const result = await this.geocoder.geocode(input.address);
     await this.registry.cacheSet('geocode', cacheKey, result, CACHE_TTL.geocoding);
-    return result;
+    return { address: result, cacheHit: false };
   }
 
-  private async resolveJurisdictionCached(address: GeocodedAddress, mode: LookupMode): Promise<JurisdictionResult> {
+  private async resolveJurisdictionCached(address: GeocodedAddress, mode: LookupMode): Promise<{ jurisdiction: JurisdictionResult; cacheHit: boolean }> {
     const key = `${address.latitude.toFixed(5)},${address.longitude.toFixed(5)}`;
     const cached = await this.registry.cacheGet<JurisdictionResult>('jurisdiction', key);
-    if (cached) return cached;
+    if (cached) return { jurisdiction: cached, cacheHit: true };
     const result = this.jurisdictionResolver
       ? await this.jurisdictionResolver(address, mode)
       : await resolveJurisdiction(address, { boundaryLookup: mode !== 'fast' });
     await this.registry.cacheSet('jurisdiction', key, result, CACHE_TTL.jurisdiction);
-    return result;
+    return { jurisdiction: result, cacheHit: false };
   }
 
   private async resolveSource(
@@ -360,6 +408,30 @@ function sanitizeParcel(parcel: ParcelResult, includeGeometry: boolean): ParcelR
   return sanitized;
 }
 
+function nowMs(): number {
+  return globalThis.performance?.now?.() ?? Date.now();
+}
+
+function roundedMs(value: number): number {
+  return Math.max(0, Math.round(value * 100) / 100);
+}
+
+function emptyTimings(): PipelineTimings {
+  return {
+    normalizeMs: 0,
+    geocodeMs: 0,
+    jurisdictionMs: 0,
+    registryMs: 0,
+    discoveryMs: 0,
+    arcgisInspectionMs: 0,
+    parcelQueryMs: 0,
+    zoningQueryMs: 0,
+    normalizationMs: 0,
+    validationMs: 0,
+    totalMs: 0,
+  };
+}
+
 function baseResult(input: ZoningLookupInput): UniversalZoningResult {
   return {
     input,
@@ -376,6 +448,12 @@ function baseResult(input: ZoningLookupInput): UniversalZoningResult {
     status: 'error',
     errors: [],
     rawSources: [],
+    diagnostics: {
+      timings: emptyTimings(),
+      geocodeCacheHit: false,
+      jurisdictionCacheHit: false,
+      registryHit: false,
+    },
   };
 }
 

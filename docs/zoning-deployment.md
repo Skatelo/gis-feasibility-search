@@ -14,6 +14,9 @@
    `http://localhost:8787/documentation/openapi.json`.
 4. Open the React application at `/#/zoning-admin` and use the same
    `ZONING_ADMIN_API_KEY` for administrative requests.
+5. Set the web app's `VITE_ZONING_API_URL` to the externally reachable API base
+   URL. The property workflow calls `/api/zoning/lookup` and falls back to the
+   legacy `/v1` route only during a rolling deployment.
 
 The `bootstrap` service imports current Census TIGER county and incorporated
 place boundaries into PostGIS, then imports the reviewed rollout source records.
@@ -36,8 +39,13 @@ npm run build:zoning-server
 
 Required production variables are `DATABASE_URL`, `REDIS_URL`,
 `ZONING_ADMIN_API_KEY`, and `ZONING_CORS_ORIGINS`. Google is optional because
-the U.S. Census geocoder is the keyless fallback. Perplexity is optional and is
-read only by the maintenance worker.
+the U.S. Census geocoder is the keyless fallback. Perplexity is optional; when
+configured, the adaptive API uses the raw Search API only on registry misses.
+It discovers official URLs but never supplies the zoning designation.
+
+For local development without `DATABASE_URL`, the API defaults to
+`.data/zoning.sqlite`. Override it with `ZONING_SQLITE_PATH` or set it to
+`:memory:` for an ephemeral run. Production should continue to use PostgreSQL.
 
 ## Rollout
 
@@ -46,7 +54,10 @@ Run source validation from the dashboard after import. A source should remain
 sample, and real point query pass. Do not route production traffic to a new
 jurisdiction solely because its boundary was imported.
 
-Use separate API and worker replicas. Keep API request timeouts below the
-platform timeout and allow outbound HTTPS to official ArcGIS and Census hosts.
+Use separate API and worker replicas. Allow at least 35 seconds at the platform
+edge for the hard browser-fallback deadline and allow outbound HTTPS to official
+ArcGIS, Census, and configured Search API hosts. Known registry lookups remain
+on the direct path. Scrape `/metrics` for success, official-source, registry-hit,
+browser-fallback, average latency, and P95 latency gauges.
 Back up PostGIS before registry changes; the source-version trigger preserves
 every prior configuration.

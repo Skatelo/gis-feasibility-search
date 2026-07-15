@@ -3,7 +3,7 @@
 // ArcGIS-result normalizer and the GeoJSON/WFS adapters (whose feature
 // properties carry no field metadata).
 
-const PLACEHOLDER_RE = /^(city|county|etj|none|n\/?a|null|mun\.?|muni|municipal|municipality|split|unknown|not applicable|unzoned|tbd)$/i;
+const PLACEHOLDER_RE = /^(city|county|etj|none|n\/?a|null|mun\.?|muni|municipal|municipality|split|unknown|not applicable|unzoned|tbd|unavailable|unresolved|not published|not found|official map review|zoning code unresolved)$/i;
 const BOOLEANISH_RE = /^(yes|no|true|false|y|n)$/i;
 export const ZONING_KEYISH_RE = /zon|zone|district|dist|class|type|code|category/i;
 export const NON_CODE_KEY_RE = /date|year|objectid|globalid|_id$|shape|hyperlink|petition|url|link|_len|area|acre/i;
