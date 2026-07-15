@@ -20,11 +20,13 @@ const serviceSource = await readFile(new URL('../../../src/services/feasibilityS
 const componentSource = await readFile(new URL('../../../src/components/FeasibilitySearch.tsx', import.meta.url), 'utf8');
 const appSource = await readFile(new URL('../../../src/App.tsx', import.meta.url), 'utf8');
 const settingsSource = await readFile(new URL('../../../src/components/SettingsDrawer.tsx', import.meta.url), 'utf8');
-const customSearchSource = await readFile(new URL('../../../src/services/googleCustomSearchZoning.ts', import.meta.url), 'utf8');
-const customSearchCompiled = ts.transpileModule(customSearchSource, {
+const geminiSearchSource = await readFile(new URL('../../../src/services/geminiZoningSearch.ts', import.meta.url), 'utf8');
+const geminiSearchCompiled = ts.transpileModule(geminiSearchSource, {
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 },
 }).outputText;
-const customSearch = await import(`data:text/javascript;base64,${Buffer.from(customSearchCompiled).toString('base64')}`);
+const geminiSearch = await import(`data:text/javascript;base64,${Buffer.from(geminiSearchCompiled).toString('base64')}`);
+const readmeSource = await readFile(new URL('../../../README.md', import.meta.url), 'utf8');
+const envExampleSource = await readFile(new URL('../../../.env.example', import.meta.url), 'utf8');
 const perplexityProxySource = await readFile(new URL('../perplexity.js', import.meta.url), 'utf8');
 const viteSource = await readFile(new URL('../../../vite.config.ts', import.meta.url), 'utf8');
 
@@ -435,92 +437,121 @@ test('listing zoning evidence distinguishes one-provider reports from corroborat
   assert.equal(evidence.listingZoningEvidenceTier(['https://example.com/a']), null);
 });
 
-test('Google Custom Search zoning uses the complete address and fresh JSON API requests', async () => {
+test('Gemini zoning search uses the complete address and a fresh grounded Interactions request', async () => {
   const input = '12901 Lanecrest Road, Midland, NC 28107';
   const fullAddress = '12901 Lanecrest Road, Midland, North Carolina 28107, United States';
-  assert.equal(customSearch.normalizeFullAddressForZoning(input), fullAddress);
+  assert.equal(geminiSearch.normalizeFullAddressForZoning(input), fullAddress);
   assert.equal(
-    customSearch.normalizeFullAddressForZoning('12901 Lanecrest Road, Midland NC 28107'),
+    geminiSearch.normalizeFullAddressForZoning('12901 Lanecrest Road, Midland NC 28107'),
     fullAddress,
   );
-  assert.deepEqual(customSearch.buildZoningCustomSearchQueries(input), [
-    `What is ${fullAddress} zoning code`,
-    `What are the zoning setbacks, restrictions, and allowances for ${fullAddress}`,
-  ]);
+  assert.match(geminiSearch.buildGeminiZoningSearchPrompt(input, 'Cabarrus, NC'), new RegExp(`What is ${fullAddress.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} zoning code`));
 
   const calls = [];
   const fetcher = async (inputUrl, init) => {
-    calls.push({ url: new URL(String(inputUrl)), init });
+    calls.push({ url: new URL(String(inputUrl)), init, body: JSON.parse(init.body) });
     return new Response(JSON.stringify({
-      items: [{
-        title: 'Official zoning result',
-        link: 'https://planning.example.gov/property/12901-lanecrest-road',
-        snippet: 'The exact-address zoning result and adopted district standards.',
-        displayLink: 'planning.example.gov',
-      }],
+      steps: [
+        {
+          type: 'google_search_call',
+          arguments: { queries: [`What is ${fullAddress} zoning code`] },
+        },
+        {
+          type: 'model_output',
+          content: [{
+            type: 'text',
+            text: JSON.stringify({
+              zoningCode: 'AO',
+              zoningDescription: 'Agricultural Open',
+              jurisdiction: 'Cabarrus County',
+              matchMethod: 'official-address-result',
+              parcelSource: 'https://planning.example.gov/property/12901-lanecrest-road',
+              sources: ['https://planning.example.gov/property/12901-lanecrest-road'],
+            }),
+            annotations: [{
+              type: 'url_citation',
+              url: 'https://planning.example.gov/property/12901-lanecrest-road',
+              title: 'Official zoning result',
+            }],
+          }],
+        },
+      ],
     }), { status: 200, headers: { 'content-type': 'application/json' } });
   };
-  const result = await customSearch.fetchGoogleCustomSearchZoningEvidence(input, {
-    apiKey: 'test-google-key',
-    engineId: 'test-search-engine',
-  }, fetcher);
+  const result = await geminiSearch.fetchGeminiZoningSearchEvidence(
+    input,
+    'test-gemini-key',
+    'Cabarrus, NC',
+    fetcher,
+  );
 
-  assert.equal(calls.length, 2);
-  for (const call of calls) {
-    assert.equal(call.url.origin + call.url.pathname, 'https://www.googleapis.com/customsearch/v1');
-    assert.equal(call.url.searchParams.get('key'), 'test-google-key');
-    assert.equal(call.url.searchParams.get('cx'), 'test-search-engine');
-    assert.ok(call.url.searchParams.get('q').includes(fullAddress));
-    assert.equal(call.init.cache, 'no-store');
-  }
+  assert.equal(calls.length, 1);
+  const [call] = calls;
+  assert.equal(call.url.origin + call.url.pathname, 'https://generativelanguage.googleapis.com/v1beta/interactions');
+  assert.equal(call.url.search, '');
+  assert.equal(call.init.method, 'POST');
+  assert.equal(call.init.cache, 'no-store');
+  assert.equal(call.init.headers['x-goog-api-key'], 'test-gemini-key');
+  assert.equal(call.body.model, 'gemini-3.5-flash');
+  assert.equal(call.body.store, false);
+  assert.deepEqual(call.body.tools, [{ type: 'google_search' }]);
+  assert.equal(call.body.response_format.mime_type, 'application/json');
+  assert.ok(call.body.input.includes(fullAddress));
+  assert.doesNotMatch(JSON.stringify(call), /customsearch|programmable search|url_context|"cx"/i);
   assert.equal(result.fullAddress, fullAddress);
   assert.deepEqual(result.urls, ['https://planning.example.gov/property/12901-lanecrest-road']);
+  assert.deepEqual(result.searchQueries, [`What is ${fullAddress} zoning code`]);
 });
 
-test('property zoning uses only Custom Search JSON and Gemini 3.5 Flash in the allowances card', () => {
+test('property zoning uses only Gemini 3.5 Flash Google Search in the allowances card', () => {
   const stage = serviceSource.slice(
     serviceSource.indexOf('// STAGE 3 - zoning.'),
     serviceSource.indexOf('// STAGE 4'),
   );
-  const customPipeline = serviceSource.slice(
-    serviceSource.indexOf('export async function fetchZoningWithGoogleCustomSearch'),
+  const geminiPipeline = serviceSource.slice(
+    serviceSource.indexOf('export async function fetchZoningWithGeminiSearch'),
     serviceSource.indexOf("Uses client-side Google Maps JavaScript SDK's DistanceMatrixService"),
-  );
-  const geminiZoningCall = serviceSource.slice(
-    serviceSource.indexOf('async function zoningExpertViaGemini'),
-    serviceSource.indexOf('function googleCustomSearchZoningCredentials'),
   );
 
   assert.match(serviceSource, /countyName = `\$\{countyBaseName\(countyName\)\}, \$\{selectedState\}`/);
   assert.match(serviceSource, /addressString\.match\(\/\(\?:,\|\\s\)/);
   assert.match(stage, /normalizeFullAddressForZoning\(addressString\)/);
-  assert.match(stage, /fetchZoningWithGoogleCustomSearch\(fullZoningAddress, countyName\)/);
+  assert.match(stage, /fetchZoningWithGeminiSearch\(fullZoningAddress, countyName\)/);
   assert.match(stage, /emitZoning\(\)/);
   assert.match(stage, /zoningStandardsStatus = 'resolving'/);
   assert.match(stage, /cleanCode\(result\.code\) \|\| ''/);
   assert.match(stage, /zoningSetbackNotes/);
   assert.match(stage, /zoningRestrictions/);
-  assert.doesNotMatch(stage, /lookupOfficialZoning|fetchCountyZoningCode|fetchZoningViaWebSearch|perplexity|crawlee|google_search/i);
-  assert.match(customPipeline, /fetchGoogleCustomSearchZoningEvidence\(fullAddress, credentials\)/);
-  assert.match(customPipeline, /zoningExpertViaGemini\(/);
-  assert.doesNotMatch(customPipeline, /perplexity|crawlee|fetchCountyZoningCode|google_search/i);
-  assert.match(geminiZoningCall, /gemini-3\.5-flash|GEMINI_ZONING_MODEL/);
-  assert.match(geminiZoningCall, /tools: \[\{ url_context: \{\} \}\]/);
-  assert.doesNotMatch(geminiZoningCall, /google_search|perplexity|crawlee/i);
-  assert.match(customSearchSource, /www\.googleapis\.com\/customsearch\/v1/);
-  assert.match(customSearchSource, /searchParams\.set\('key'/);
-  assert.match(customSearchSource, /searchParams\.set\('cx'/);
-  assert.match(customSearchSource, /searchParams\.set\('q'/);
-  assert.match(customSearchSource, /cache: 'no-store'/);
-  assert.match(settingsSource, /googleCustomSearchKey/);
-  assert.match(settingsSource, /googleCustomSearchCx/);
+  assert.doesNotMatch(stage, /lookupOfficialZoning|fetchCountyZoningCode|fetchZoningViaWebSearch|perplexity|crawlee|custom search/i);
+  assert.match(geminiPipeline, /fetchGeminiZoningSearchEvidence\(/);
+  assert.match(geminiPipeline, /evidence\.urls\.length/);
+  assert.doesNotMatch(geminiPipeline, /perplexity|crawlee|fetchCountyZoningCode|custom search/i);
+  assert.match(geminiSearchSource, /gemini-3\.5-flash/);
+  assert.match(geminiSearchSource, /v1beta\/interactions/);
+  assert.match(geminiSearchSource, /tools: \[\{ type: 'google_search' \}\]/);
+  assert.match(geminiSearchSource, /'x-goog-api-key': key/);
+  assert.match(geminiSearchSource, /cache: 'no-store'/);
+  assert.match(geminiSearchSource, /url_citation/);
+  assert.doesNotMatch(geminiSearchSource, /customsearch\/v1|url_context|searchParams\.set\('cx'/i);
+  assert.doesNotMatch(settingsSource, /googleCustomSearch|Programmable Search Engine ID/);
   assert.match(componentSource, /Zoning & Allowances/);
-  assert.match(componentSource, /Analyzing full-address Custom Search results with Gemini 3\.5 Flash/);
+  assert.match(componentSource, /Searching the full address with Gemini 3\.5 Flash/);
   assert.match(componentSource, /Setback rules and exceptions/);
   assert.match(componentSource, /Published zoning restrictions/);
   assert.match(componentSource, /STANDARDS:[\s\S]*LOADING/);
   assert.doesNotMatch(appSource, /ZoningAdmin|zoning-admin|Zoning Sources/);
   assert.doesNotMatch(componentSource, /Zoning \(not published\)/);
+
+  const publicConfigurationSurface = [
+    serviceSource,
+    componentSource,
+    appSource,
+    settingsSource,
+    geminiSearchSource,
+    readmeSource,
+    envExampleSource,
+  ].join('\n');
+  assert.doesNotMatch(publicConfigurationSurface, /googleCustomSearch|GOOGLE_CUSTOM_SEARCH|customsearch\/v1|Programmable Search Engine ID|url_context/i);
 });
 
 test('Perplexity uses the direct Search API without an agent dispatch model', () => {

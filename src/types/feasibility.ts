@@ -269,7 +269,7 @@ export interface SiteFeasibilityData {
   statePlaneRings?: number[][][];
   zoningDescription?: string;
   /** Where the zoning came from. Zoning research currently reports `web` for
-   *  Google Custom Search evidence interpreted by Gemini 3.5 Flash. */
+   *  Gemini 3.5 Flash responses grounded with Google Search citations. */
   zoningSource?: 'county-gis' | 'statewide-gis' | 'official-map' | 'web';
   zoningSourceUrl?: string;
   zoningSources?: string[];

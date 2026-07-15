@@ -127,7 +127,6 @@ function App() {
   const keysConfigured = !!(
     activeUser.keys?.googleMaps
     && activeUser.keys?.gemini
-    && activeUser.keys?.googleCustomSearchCx
   );
 
   return (

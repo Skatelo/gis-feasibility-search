@@ -298,13 +298,15 @@ test('SC manifest contains every county and normal searches do not invoke Enform
 
 test('SC map, zoning, utilities, and clearing estimates require visible provenance', async () => {
   const service = await readFile(new URL('../../../src/services/feasibilityService.ts', import.meta.url), 'utf8');
+  const geminiZoning = await readFile(new URL('../../../src/services/geminiZoningSearch.ts', import.meta.url), 'utf8');
   const component = await readFile(new URL('../../../src/components/FeasibilitySearch.tsx', import.meta.url), 'utf8');
   const proxy = await readFile(new URL('../perplexity-chat.js', import.meta.url), 'utf8');
   const viteConfig = await readFile(new URL('../../../vite.config.ts', import.meta.url), 'utf8');
 
-  assert.match(service, /matchMethod.*parcel-gis\|official-address-result\|official-parcel-report/s);
+  assert.match(geminiZoning, /'parcel-gis'[\s\S]*'official-address-result'[\s\S]*'official-parcel-report'/);
   assert.match(service, /mode: 'hard'/);
-  assert.match(service, /parcelSource must be an official parcel-specific result/);
+  assert.match(geminiZoning, /Prefer official parcel GIS, official address results, and official parcel reports/);
+  assert.match(service, /officialMethods[\s\S]*requestedParcelSource[\s\S]*evidenceUrlAllowed/);
   assert.match(service, /SCDOT statewide snapshot owner/);
   assert.doesNotMatch(service, /UTIL_ESTIMATE|TREE_RATE_FALLBACK|CLEARING_FALLBACK/);
   assert.match(service, /A number without a line-specific source URL is invalid/);

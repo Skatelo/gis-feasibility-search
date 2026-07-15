@@ -10,7 +10,7 @@ A high-performance real estate feasibility screening dashboard built with React,
   - **Gaston County** (Gastonia/Mount Holly)
   - **Cabarrus County** (Concord/Kannapolis)
 * **Topography & Elevation Metrics**: Integrates with OpenTopography (Copernicus COP30 DEM) to gauge site slope and buildability classification (Buildable vs. Non-Buildable).
-* **Zoning & Allowances**: sends the complete NC or SC address to the Google Custom Search JSON API, then uses Gemini 3.5 Flash to extract the source-backed district, setbacks, restrictions, and allowances.
+* **Zoning & Allowances**: sends the complete NC or SC address to Gemini 3.5 Flash with Google Search grounding to return a source-backed district, setbacks, restrictions, and allowances.
 * **Hybrid Live Web Data**: the Perplexity Search API handles non-zoning ranked searches and source discovery; a bounded Crawlee scraper reads harder utility, fee, cost, and report sources plus linked PDF, DOCX, XLSX, CSV, JSON, XML, and text documents.
 * **Comparable Sold Listings**: Scrapes verified sold properties from Realtor.com via Google Search grounding to calculateDeveloped After Repair Value (ARV).
 * **Interactive Gemini Q&A Chatbot**: A contextual chatbot capable of explaining setbacks, zoning rules, or construction options utilizing the current parcel context.
@@ -43,16 +43,9 @@ For local testing of the crawler endpoint, use `npx netlify dev`. Plain `npm run
 
 ## Zoning Search
 
-The in-report **Zoning & Allowances** section uses only Google Custom Search JSON API results and Gemini 3.5 Flash. Each lookup includes the complete street, city, state name, ZIP code, and `United States`; the requests use `cache: "no-store"`. Gemini reads the returned snippets and result URLs with URL Context and does not launch another search provider.
+The in-report **Zoning & Allowances** section uses Gemini 3.5 Flash with its built-in Google Search grounding tool. Each lookup includes the complete street, city, state name, ZIP code, and `United States`; the request uses `cache: "no-store"`. The grounded response must include source citations before the app accepts a district or its adopted standards.
 
-Configure the credentials in **Account & API Settings**, or set:
-
-```bash
-VITE_GOOGLE_CUSTOM_SEARCH_API_KEY=
-VITE_GOOGLE_CUSTOM_SEARCH_CX=
-```
-
-The Google Maps key can be reused when it is authorized for the Custom Search JSON API, but a dedicated key is supported. The Programmable Search Engine must be configured to search the public web or the authoritative sites you want included.
+Configure the Gemini API key in **Account & API Settings**. No separate search credential or search-engine configuration is required.
 
 ## Official NC/SC Zoning Service
 
