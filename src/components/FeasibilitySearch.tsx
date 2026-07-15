@@ -717,8 +717,7 @@ export const FeasibilitySearch: FC = () => {
   const keys = getUserKeys();
   const hasGoogleMapsKey = !!keys.googleMaps;
   const hasGeminiKey = !!keys.gemini;
-  const hasGoogleCustomSearch = !!keys.googleCustomSearchCx && !!(keys.googleCustomSearch || keys.googleMaps);
-  const hasKeys = hasGoogleMapsKey && hasGeminiKey && hasGoogleCustomSearch;
+  const hasKeys = hasGoogleMapsKey && hasGeminiKey;
 
   const [addressInput, setAddressInput] = useState('');
   const [searchMode, setSearchMode] = useState<'address' | 'parcel'>('address');
@@ -2958,7 +2957,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
   const handleSearch = async (addressToSearch: string, countyOverride?: string, knownCoords?: { lat: number; lng: number }) => {
     if (!addressToSearch.trim()) return;
     if (!hasKeys) {
-      setError("Please configure Google Maps, Google Custom Search (including cx), and Gemini API credentials in Account Settings.");
+      setError("Please configure Google Maps and Gemini API credentials in Account Settings.");
       return;
     }
 
@@ -3077,7 +3076,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
     const pin = parcelIdInput.trim();
     if (!pin) return;
     if (!hasKeys) {
-      setError("Please configure Google Maps, Google Custom Search (including cx), and Gemini API credentials in Account Settings.");
+      setError("Please configure Google Maps and Gemini API credentials in Account Settings.");
       return;
     }
     setLoading(true);
@@ -3332,7 +3331,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
             <div className="api-keys-warning-banner" onClick={() => window.dispatchEvent(new CustomEvent('open-gis-settings'))}>
               <AlertCircle size={18} className="warning-icon" />
               <div className="warning-text">
-                <strong>API Keys Required:</strong> Google Maps, Google Custom Search (API key and cx), and Gemini credentials must be configured to run feasibility analyses. Click here to configure them in Account Settings.
+                <strong>API Keys Required:</strong> Google Maps and Gemini credentials must be configured to run feasibility analyses. Click here to configure them in Account Settings.
               </div>
             </div>
           )}
@@ -4091,13 +4090,13 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                   <h3 className="registry-card-header" style={{ margin: 0 }}>Zoning & Allowances</h3>
                   <span
                     title={data.zoningStandardsStatus === 'resolving'
-                      ? 'Google Custom Search is finding full-address evidence and Gemini 3.5 Flash is reading the returned URLs.'
+                      ? 'Gemini 3.5 Flash is searching Google for full-address zoning evidence and source-backed standards.'
                       : data.zoningStandardsStatus === 'official'
                       ? 'Dimensional standards were read from the cited adopted ordinance.'
                       : data.zoningStandardsStatus === 'mixed'
                         ? 'Some standards came from the cited ordinance; fields without source evidence remain omitted.'
                         : data.zoningStandardsStatus === 'unavailable'
-                          ? 'The Google Custom Search results did not publish a source-backed dimensional standard.'
+                          ? 'Gemini Google Search did not return a source-backed dimensional standard.'
                           : 'Some source-backed dimensional standards were returned.'}
                     style={{
                       fontSize: '10px',
@@ -4190,7 +4189,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                 <SourceLinks
                   label="Zoning evidence sources"
                   sources={[...(data.zoningSources || []), ...(data.zoningSourceUrl ? [data.zoningSourceUrl] : [])]}
-                  emptyText="Google Custom Search did not return a source URL for this address."
+                  emptyText="Gemini Google Search did not return a source URL for this address."
                 />
 
                 {data.gridics ? (
@@ -4359,10 +4358,10 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                 ) : data.zoningStandardsStatus === 'resolving' ? (
                   <div style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '12px 0', color: 'var(--text-muted)', fontSize: '0.8rem' }}>
                     <Loader2 size={14} className="spinner" />
-                    <span>Analyzing full-address Custom Search results with Gemini 3.5 Flash...</span>
+                    <span>Searching the full address with Gemini 3.5 Flash...</span>
                   </div>
                 ) : (
-                  <div className="cost-disclaimer">The Google Custom Search results did not publish source-backed setbacks or allowance values for this address.</div>
+                  <div className="cost-disclaimer">Gemini Google Search did not return source-backed setbacks or allowance values for this address.</div>
                 )}
               </div>
 
@@ -5107,13 +5106,13 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                     const countyOverlay = getRenderableZoningServices(data.countyName).length > 0;
                     const webZoning = data.zoningSource === 'web';
                     const canToggle = officialGis || webZoning;
-                    const label = officialGis ? "Zoning (Official GIS)" : webZoning ? "Zoning (Custom Search + Gemini)" : "Zoning (Not returned)";
+                    const label = officialGis ? "Zoning (Official GIS)" : webZoning ? "Zoning (Gemini Search)" : "Zoning (Not returned)";
                     const title = countyOverlay
                       ? `Overlay zoning districts from ${data.countyName} County's own GIS server`
                       : officialGis
                         ? 'Show the exact-parcel result from the official GIS point-query service; this service does not publish raster map export'
                       : webZoning
-                        ? `Zoning resolved from Google Custom Search results by Gemini 3.5 Flash`
+                        ? `Zoning resolved by Gemini 3.5 Flash with Google Search grounding`
                         : `${data.countyName} County does not publish a zoning GIS service`;
                     return (
                       <button

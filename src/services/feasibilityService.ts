@@ -6,16 +6,10 @@ import { scCountySource } from '../data/scCountySources';
 import { normalizeSourcedRange } from '../data/sourcedEstimate';
 import { listingZoningEvidenceTier, zoningListingProvider } from '../data/zoningEvidence';
 import { cleanCode } from './zoning/normalization/zoning-normalizer';
-import { fetchGoogleCustomSearchZoningEvidence, normalizeFullAddressForZoning } from './googleCustomSearchZoning';
+import { fetchGeminiZoningSearchEvidence, normalizeFullAddressForZoning } from './geminiZoningSearch';
 
 export interface UserKeys {
   googleMaps?: string;
-  /** Google Custom Search JSON API credential for zoning evidence discovery.
-   *  When omitted, zoning may reuse googleMaps if that key has the Custom
-   *  Search API enabled. */
-  googleCustomSearch?: string;
-  /** Programmable Search Engine identifier passed as the Custom Search `cx`. */
-  googleCustomSearchCx?: string;
   gemini?: string;
   /** OPTIONAL second Gemini key. When set, background lookups (cost estimate,
    *  takeoff, tree count/rates, utilities, comp photos) run on THIS key in
@@ -2070,7 +2064,7 @@ export async function executeLandAnalysis(
     }
   }
 
-  // B. Build the capacity summary only when the Google Custom Search evidence
+  // B. Build the capacity summary only when the grounded Gemini evidence
   // returns every required standard. Partial source-backed standards remain
   // visible in the Zoning & Allowances section without manufacturing defaults.
   const buildGridics = () => {
@@ -2427,18 +2421,18 @@ export async function executeLandAnalysis(
       });
     };
 
-    zoningDescription = `Searching Google Custom Search for ${fullZoningAddress}`;
+    zoningDescription = `Searching Google with Gemini 3.5 Flash for ${fullZoningAddress}`;
     zoningSource = 'web';
     zoningStandardsStatus = 'resolving';
     zoningSetbacksStatus = 'resolving';
     emitZoning();
 
-    onStageChange?.("Reading Google Custom Search zoning evidence with Gemini 3.5 Flash...");
+    onStageChange?.("Searching the full address with Gemini 3.5 Flash...");
     let researched: ZoningResult | null = null;
     let researchError = '';
     try {
       researched = await withZoningTimeout(
-        fetchZoningWithGoogleCustomSearch(fullZoningAddress, countyName),
+        fetchZoningWithGeminiSearch(fullZoningAddress, countyName),
         45_000,
         null,
       );
@@ -2453,7 +2447,7 @@ export async function executeLandAnalysis(
     } else {
       zoningCode = '';
       zoningDescription = researchError
-        || `Google Custom Search and Gemini 3.5 Flash did not return a source-backed zoning code for ${fullZoningAddress}.`;
+        || `Gemini 3.5 Flash Google Search did not return a source-backed zoning code for ${fullZoningAddress}.`;
       zoningSource = 'web';
       zoningSourceUrl = undefined;
       zoningSources = [];
@@ -4275,9 +4269,6 @@ type ZoningResult = {
   standards?: ZoningResearchStandards;
 };
 
-const GEMINI_ZONING_MODEL = 'gemini-3.5-flash';
-const ZONING_SYSTEM = "You are a zoning research analyst. Use only the supplied Google Custom Search JSON results and the content retrieved from those result URLs with Gemini URL Context. Do not perform another search and do not rely on unstated knowledge. Prefer official parcel GIS, official address results, and official parcel reports. If official assignment evidence is unavailable, an exact-address Zillow, Realtor, or Redfin record may be reported, and two independent matching listing providers may be corroborated. Never describe listing evidence as official. An ordinance alone cannot assign a parcel. Setbacks, dimensional standards, and restrictions require an adopted ordinance or official zoning-code URL returned by Custom Search. Return only the requested JSON and never fabricate.";
-
 function cleanEvidenceUrl(value: unknown): string | null {
   if (typeof value !== 'string' || !/^https?:\/\//i.test(value.trim())) return null;
   try {
@@ -4451,157 +4442,42 @@ function parseZoningResult(text: string, evidenceUrls: string[] = [], countyName
   } catch { return null; }
 }
 
-type ZoningExpertDraft = {
-  result: ZoningResult | null;
-  raw: string;
-};
-
-function geminiResponseText(data: any): string {
-  return (data?.candidates?.[0]?.content?.parts || [])
-    .map((part: any) => typeof part?.text === 'string' ? part.text : '')
-    .filter(Boolean)
-    .join('\n')
-    .trim();
+function urlsWrittenInZoningAnswer(raw: string): string[] {
+  const matches = raw.match(/https?:\/\/[^\s"'<>\])}]+/gi) || [];
+  return [...new Set(matches
+    .map(cleanEvidenceUrl)
+    .filter((url): url is string => !!url))];
 }
 
-function geminiUrlContextUrls(data: any): string[] {
-  const candidate = data?.candidates?.[0];
-  const metadata = candidate?.urlContextMetadata || candidate?.url_context_metadata;
-  const entries = metadata?.urlMetadata || metadata?.url_metadata || [];
-  if (!Array.isArray(entries)) return [];
-  return [...new Set(entries
-    .filter((entry: any) => /SUCCESS$/i.test(String(entry?.urlRetrievalStatus || entry?.url_retrieval_status || '')))
-    .map((entry: any) => cleanEvidenceUrl(entry?.retrievedUrl || entry?.retrieved_url))
-    .filter((url: string | null): url is string => !!url))];
-}
-
-function geminiRetryDelayMs(response: Response, attempt: number): number {
-  const retryAfter = Number(response.headers.get('retry-after'));
-  if (Number.isFinite(retryAfter) && retryAfter > 0) return Math.min(2500, retryAfter * 1000);
-  return Math.min(2500, 1000 * (2 ** attempt));
-}
-
-async function zoningExpertViaGemini(
-  promptText: string,
-  evidenceBlock: string,
-  evidenceUrls: string[],
-  geminiKey: string,
-  countyName: string,
-): Promise<ZoningExpertDraft | null> {
-  try {
-    const body = JSON.stringify({
-      contents: [{ role: 'user', parts: [{ text: promptText + evidenceBlock }] }],
-      systemInstruction: { parts: [{ text: ZONING_SYSTEM }] },
-      tools: [{ url_context: {} }],
-      generationConfig: { maxOutputTokens: 3200, responseMimeType: 'application/json' },
-    });
-
-    for (let attempt = 0; attempt < 2; attempt++) {
-      const response = await queueGemini(() => fetchWithTimeout(
-        `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_ZONING_MODEL}:generateContent?key=${geminiKey}`,
-        30000,
-        {
-          method: 'POST',
-          cache: 'no-store',
-          headers: { 'Content-Type': 'application/json' },
-          body,
-        },
-      ), 'high', 'primary');
-
-      if (response.ok) {
-        const data = await response.json();
-        const raw = geminiResponseText(data);
-        if (!raw) return null;
-        const retrieved = geminiUrlContextUrls(data);
-        const discoveredUrls = [...new Set([
-          ...evidenceUrls,
-          ...retrieved,
-        ])];
-        return { raw, result: parseZoningResult(raw, discoveredUrls, countyName) };
-      }
-
-      const retryable = response.status === 429 || response.status >= 500;
-      console.warn(`Gemini zoning request returned HTTP ${response.status}${retryable ? '; retrying with backoff' : ''}.`);
-      if (!retryable || attempt === 1) return null;
-      await new Promise((resolve) => setTimeout(resolve, geminiRetryDelayMs(response, attempt)));
-    }
-    return null;
-  } catch (error) {
-    console.warn('Gemini 3.5 Flash zoning expert failed:', error);
-    return null;
-  }
-}
-
-function googleCustomSearchZoningCredentials(): { apiKey: string; engineId: string } {
-  const keys = getUserKeys();
-  const env = import.meta.env as Record<string, string | undefined>;
-  return {
-    apiKey: (keys.googleCustomSearch || env.VITE_GOOGLE_CUSTOM_SEARCH_API_KEY || keys.googleMaps || '').trim(),
-    engineId: (keys.googleCustomSearchCx || env.VITE_GOOGLE_CUSTOM_SEARCH_CX || '').trim(),
-  };
-}
-
-/** The complete zoning pipeline: Google Custom Search JSON API discovers the
- * exact-address evidence, then Gemini 3.5 Flash reads only those URLs and
- * returns the district plus source-backed allowances. */
-export async function fetchZoningWithGoogleCustomSearch(
+/** Gemini 3.5 Flash searches the complete address with its built-in Google
+ * Search tool and returns the district plus source-backed allowances. */
+export async function fetchZoningWithGeminiSearch(
   address: string,
   countyName?: string,
 ): Promise<ZoningResult | null> {
   const fullAddress = normalizeFullAddressForZoning(address);
   const geminiKey = (getUserKeys().gemini || '').trim();
-  const credentials = googleCustomSearchZoningCredentials();
   if (!fullAddress) throw new Error('A full property address is required for zoning search.');
-  if (!credentials.apiKey || !credentials.engineId) {
-    throw new Error('Add a Google Custom Search API key and Programmable Search Engine ID (cx) in Account Settings.');
-  }
-  if (!geminiKey) throw new Error('Add a Gemini API key in Account Settings for zoning extraction.');
+  if (!geminiKey) throw new Error('Add a Gemini API key in Account Settings for zoning search.');
 
-  const evidence = await fetchGoogleCustomSearchZoningEvidence(fullAddress, credentials);
-  if (!evidence.items.length) return null;
-
-  const prompt = `Determine the current zoning district and adopted allowances for this exact complete address: "${evidence.fullAddress}".
-
-The Google Custom Search JSON API used these exact queries:
-${evidence.queries.map((query, index) => `${index + 1}. ${query}`).join('\n')}
-
-Use only the result snippets below and the result URLs available through URL Context. Confirm that parcel-assignment evidence refers to the exact complete address. Prefer an official parcel-specific result. An adopted ordinance can support setbacks and restrictions only after the parcel's district is identified.
-
-Return one JSON object with this shape:
-{
-  "zoningCode": "R-1",
-  "zoningDescription": "Single-Family Residential",
-  "jurisdiction": "Official zoning authority",
-  "matchMethod": "parcel-gis|official-address-result|official-parcel-report|corroborated-listings|listing-address-result",
-  "parcelSource": "https://parcel-specific-result",
-  "listingSources": ["https://exact-address-listing"],
-  "ordinanceSource": "https://adopted-ordinance-or-code",
-  "standards": {
-    "lotType": "interior",
-    "maxHeightFt": 35,
-    "floorAreaRatio": null,
-    "frontSetbackFt": 30,
-    "rearSetbackFt": 25,
-    "sideSetbackFt": 10,
-    "setbackNotes": ["Source-backed rule or exception"],
-    "minimumLotAreaSqft": 20000,
-    "maxLotCoveragePct": 40,
-    "restrictions": ["Source-backed parcel-relevant restriction"]
-  },
-  "permittedUses": ["Source-backed permitted use"],
-  "sources": ["https://source-returned-by-custom-search"]
-}
-
-Use null or [] for fields the supplied sources do not publish. Never infer a district from nearby property, land-use category, or the ordinance alone. Never invent a URL or a number.`;
-  const evidenceBlock = `\n\nGOOGLE CUSTOM SEARCH JSON RESULTS FOR THE FULL ADDRESS:\n\n${evidence.evidenceBlock}`;
-  const draft = await zoningExpertViaGemini(
-    prompt,
-    evidenceBlock,
-    evidence.urls,
+  const evidence = await fetchGeminiZoningSearchEvidence(
+    fullAddress,
     geminiKey,
     countyName || '',
+    (input, init) => queueGemini(
+      () => fetchWithTimeout(String(input), 35000, init),
+      'high',
+      'primary',
+    ),
   );
-  return draft?.result || null;
+  // A structured answer without Google Search citations is not accepted as
+  // parcel evidence, even if the model includes plausible-looking URLs.
+  if (!evidence.urls.length) return null;
+  const discoveredUrls = [...new Set([
+    ...evidence.urls,
+    ...urlsWrittenInZoningAnswer(evidence.raw),
+  ])];
+  return parseZoningResult(evidence.raw, discoveredUrls, countyName || '');
 }
 
 /**

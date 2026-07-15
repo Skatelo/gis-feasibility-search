@@ -22,9 +22,6 @@ interface SettingsDrawerProps {
 
 export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdateUser }: SettingsDrawerProps) {
   const [googleMapsKey, setGoogleMapsKey] = useState('');
-  const [googleCustomSearchKey, setGoogleCustomSearchKey] = useState('');
-  const [googleCustomSearchCx, setGoogleCustomSearchCx] = useState('');
-  const [showGoogleCustomSearchKey, setShowGoogleCustomSearchKey] = useState(false);
   const [geminiKey, setGeminiKey] = useState('');
   const [geminiKey2, setGeminiKey2] = useState('');
   const [showGeminiKey2, setShowGeminiKey2] = useState(false);
@@ -57,8 +54,6 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
   useEffect(() => {
     if (isOpen && activeUser) {
       setGoogleMapsKey(activeUser.keys?.googleMaps || '');
-      setGoogleCustomSearchKey(activeUser.keys?.googleCustomSearch || '');
-      setGoogleCustomSearchCx(activeUser.keys?.googleCustomSearchCx || '');
       setGeminiKey(activeUser.keys?.gemini || '');
       setGeminiKey2(activeUser.keys?.gemini2 || '');
       setPerplexityKey(activeUser.keys?.perplexity || '');
@@ -93,15 +88,8 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
       setValidationError("Gemini API Key is required for zoning research, comp exterior-photo selection, and the chatbot.");
       return;
     }
-    if (!googleCustomSearchCx.trim()) {
-      setValidationError("A Google Programmable Search Engine ID (cx) is required for zoning research.");
-      return;
-    }
-
     const updatedKeys = {
       googleMaps: googleMapsKey.trim(),
-      googleCustomSearch: googleCustomSearchKey.trim(),
-      googleCustomSearchCx: googleCustomSearchCx.trim(),
       gemini: geminiKey.trim(),
       gemini2: geminiKey2.trim(),
       perplexity: perplexityKey.trim(),
@@ -223,50 +211,6 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
               <p className="field-help">Used to load satellite maps, autocomplete addresses, and fetch driving times.</p>
             </div>
 
-            <div className="settings-field-group">
-              <div className="field-label-row">
-                <label htmlFor="googleCustomSearchKey">Google Custom Search API Key</label>
-                <span className="badge optional">Optional when Maps key is enabled</span>
-              </div>
-              <div className="field-input-container">
-                <Key className="input-icon" size={16} />
-                <input
-                  id="googleCustomSearchKey"
-                  type={showGoogleCustomSearchKey ? "text" : "password"}
-                  placeholder="Uses Google Maps key when blank"
-                  value={googleCustomSearchKey}
-                  onChange={(e) => setGoogleCustomSearchKey(e.target.value)}
-                />
-                <button
-                  type="button"
-                  className="field-toggle-btn"
-                  onClick={() => setShowGoogleCustomSearchKey(!showGoogleCustomSearchKey)}
-                  title="Show or hide Google Custom Search API key"
-                >
-                  {showGoogleCustomSearchKey ? <EyeOff size={16} /> : <Eye size={16} />}
-                </button>
-              </div>
-              <p className="field-help">Used only by the Zoning &amp; Allowances section. Leave blank to reuse the Google Maps key after enabling the Custom Search JSON API on that Google project.</p>
-            </div>
-
-            <div className="settings-field-group">
-              <div className="field-label-row">
-                <label htmlFor="googleCustomSearchCx">Programmable Search Engine ID (cx)</label>
-                <span className="badge required">Required for zoning</span>
-              </div>
-              <div className="field-input-container">
-                <Key className="input-icon" size={16} />
-                <input
-                  id="googleCustomSearchCx"
-                  type="text"
-                  placeholder="8ac1ab64606d234f1"
-                  value={googleCustomSearchCx}
-                  onChange={(e) => setGoogleCustomSearchCx(e.target.value)}
-                />
-              </div>
-              <p className="field-help">The search engine must be configured to search the public web. Every zoning query includes the complete street, city, state, ZIP, and country.</p>
-            </div>
-
             {/* Gemini Key */}
             <div className="settings-field-group">
               <div className="field-label-row">
@@ -290,7 +234,7 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
                   {showGeminiKey ? <EyeOff size={16} /> : <Eye size={16} />}
                 </button>
               </div>
-              <p className="field-help">Gemini 3.5 Flash reads the Google Custom Search results for zoning codes, setbacks, and restrictions. It also powers comp exterior-photo Vision, cost analysis, and the Advanced chatbot. Comp records themselves come only from RealtyAPI.</p>
+              <p className="field-help">Gemini 3.5 Flash uses Google Search grounding to find full-address zoning codes, setbacks, restrictions, and source links. It also powers comp exterior-photo Vision, cost analysis, and the Advanced chatbot. Comp records themselves come only from RealtyAPI.</p>
             </div>
 
             {/* Gemini Key #2 — optional second quota lane for background lookups */}
@@ -342,7 +286,7 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
                   {showPerplexityKey ? <EyeOff size={16} /> : <Eye size={16} />}
                 </button>
               </div>
-              <p className="field-help">Optional non-zoning research for utilities, fees, costs, and reports. Zoning never uses Perplexity or Crawlee; it uses Google Custom Search JSON API plus Gemini 3.5 Flash only.</p>
+              <p className="field-help">Optional non-zoning research for utilities, fees, costs, and reports. Zoning never uses Perplexity or Crawlee; it uses Gemini 3.5 Flash with Google Search grounding only.</p>
             </div>
 
             {/* Mapbox — satellite base map for the parcel aerial view */}
