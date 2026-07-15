@@ -154,6 +154,13 @@ export async function ncAddressSuggestions(query: string, max = 5): Promise<stri
   } catch { return []; }
 }
 
+/** Gemini's grounded Google-Search zoning lookup is an agentic, multi-step
+ *  search (locate the parcel, find the adopted ordinance, then write the full
+ *  report), so it needs the same generous budget as report generation. The old
+ *  35s cap aborted mid-search and surfaced as "Request timed out" in the
+ *  Zoning & Allowances card. */
+const GEMINI_ZONING_TIMEOUT_MS = 120_000;
+
 /** fetch() with an abort timeout so a hung GIS server fails fast instead of stalling the UI. */
 async function fetchWithTimeout(url: string, ms = 20000, init?: RequestInit): Promise<Response> {
   const controller = new AbortController();
@@ -2436,7 +2443,7 @@ export async function executeLandAnalysis(
     try {
       researched = await withZoningTimeout(
         fetchZoningWithGeminiSearch(fullZoningAddress, countyName),
-        45_000,
+        GEMINI_ZONING_TIMEOUT_MS + 5_000,
         null,
       );
     } catch (error) {
@@ -4528,7 +4535,7 @@ export async function fetchZoningWithGeminiSearch(
     geminiKey,
     countyName || '',
     (input, init) => queueGemini(
-      () => fetchWithTimeout(String(input), 35000, init),
+      () => fetchWithTimeout(String(input), GEMINI_ZONING_TIMEOUT_MS, init),
       'high',
       'primary',
     ),
