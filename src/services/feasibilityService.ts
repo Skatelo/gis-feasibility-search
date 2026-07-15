@@ -2319,11 +2319,18 @@ export async function executeLandAnalysis(
   // the existing Zoning & Allowances card.
   {
     onStageChange?.("Searching zoning for the full address...");
-    // Preserve the user's selected autocomplete address verbatim before state
-    // expansion. Rebuilding it from assessor fields can drop the situs ZIP or
-    // substitute the owner's mailing ZIP, which makes an exact-address search
-    // less reliable.
-    const fullZoningAddress = normalizeFullAddressForZoning(addressString);
+    // The searched/selected text is frequently street-only (an NC statewide
+    // geocoder suggestion especially), which left the zoning lookup with just
+    // "<street>, United States" and no city/state/ZIP to match — so it returned
+    // no district. Resolve the COMPLETE postal address from the geocoded point
+    // first, for every address, then normalize it for the search.
+    const zoningQueryAddress = await resolveFullPostalAddress(
+      addressString,
+      lat,
+      lng,
+      (getUserKeys().googleMaps || '').trim(),
+    );
+    const fullZoningAddress = normalizeFullAddressForZoning(zoningQueryAddress || addressString);
     const statusForZoningResult = (result: ZoningResult): SiteFeasibilityData['zoningVerificationStatus'] => {
       if (result.matchMethod === 'parcel-gis') return 'official-gis';
       if (result.matchMethod === 'statewide-parcel') return 'statewide-reported';
@@ -4212,6 +4219,67 @@ function getPermittedCategory(zoningCode: string, zoningDesc: string): 'resident
 
 export function getUseCategory(zoningCode: string, zoningDesc: string): 'residential' | 'commercial' | 'multifamily' {
   return getPermittedCategory(zoningCode, zoningDesc);
+}
+
+/** Resolve a COMPLETE "street, city, ST ZIP" postal address for the zoning
+ *  search. The searched/selected text is frequently street-only (an NC
+ *  statewide-geocoder suggestion especially), which left the exact-address
+ *  zoning lookup with nothing but the street + country and so returned no
+ *  district. Forward-geocoding the searched text recovers the full postal form
+ *  (keeping the street, adding the city/state/ZIP); if that is too generic we
+ *  reverse-geocode the resolved parcel point. Falls back to the raw input when
+ *  Google geocoding is unavailable. */
+async function resolveFullPostalAddress(
+  rawAddress: string,
+  lat: number,
+  lng: number,
+  apiKey: string,
+): Promise<string> {
+  const pickFull = (results: unknown): string => {
+    const list = Array.isArray(results) ? results : [];
+    const best = list.find((r: any) =>
+      r?.types?.some((t: string) => ['street_address', 'premise', 'subpremise'].includes(t)),
+    ) || list[0];
+    const comps = (best as any)?.address_components || [];
+    const hasCity = comps.some((c: any) =>
+      c?.types?.some((t: string) => ['locality', 'postal_town', 'sublocality'].includes(t)),
+    );
+    const stateShort = String(
+      comps.find((c: any) => c?.types?.includes('administrative_area_level_1'))?.short_name || '',
+    ).toUpperCase();
+    if (!hasCity || (stateShort !== 'NC' && stateShort !== 'SC')) return '';
+    return String((best as any)?.formatted_address || '').replace(/,?\s*USA$/i, '').trim();
+  };
+
+  // 1) Forward-geocode the searched text — keeps the street line and fills in
+  //    the missing city/state/ZIP.
+  if (apiKey && rawAddress.trim()) {
+    try {
+      const url = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(rawAddress)}&components=country:US&key=${apiKey}`;
+      const res = await fetchWithTimeout(url, 8000, { cache: 'no-store' });
+      if (res.ok) {
+        const full = pickFull((await res.json()).results);
+        if (full) return full;
+      }
+    } catch { /* fall through to reverse geocode */ }
+  }
+
+  // 2) Reverse-geocode the resolved point (covers parcel-ID / known-coords runs).
+  if (apiKey && Number.isFinite(lat) && Number.isFinite(lng) && (lat !== 0 || lng !== 0)) {
+    try {
+      const res = await fetchWithTimeout(
+        `https://maps.googleapis.com/maps/api/geocode/json?latlng=${lat},${lng}&key=${apiKey}`,
+        8000,
+        { cache: 'no-store' },
+      );
+      if (res.ok) {
+        const full = pickFull((await res.json()).results);
+        if (full) return full;
+      }
+    } catch { /* fall through */ }
+  }
+
+  return rawAddress;
 }
 
 async function geocodeAddress(address: string, apiKey: string): Promise<{ lat: number; lng: number } | null> {
