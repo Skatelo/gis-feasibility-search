@@ -400,8 +400,159 @@ const lancasterRecords = [
   }),
 ];
 
+// Guilford County publishes one combined zoning layer covering the county and
+// its municipalities (Greensboro, High Point, …); every jurisdiction record
+// points at it and the point query returns that jurisdiction's district.
+const GUILFORD_SERVICE = 'https://gcgis.guilfordcountync.gov/arcgis/rest/services/Planning_Zoning/Combined_Zoning/MapServer';
+const guilfordBase = {
+  stateCode: 'NC' as const,
+  countyName: 'Guilford County',
+  officialDomain: 'guilfordcountync.gov',
+  serviceUrl: GUILFORD_SERVICE,
+  sourceType: 'arcgis-mapserver' as const,
+  parcelLayer: NC_ONEMAP_PARCELS,
+};
+const GUILFORD_ZONING = [layer(GUILFORD_SERVICE, 0, 'Guilford County Combined Zoning', 'ZONING', 'DESCRIPTION', 2264)];
+const guilfordRecords: JurisdictionSourceRecord[] = [
+  record({ ...guilfordBase, agencyName: 'Guilford County', zoningLayers: GUILFORD_ZONING }),
+  ...municipalRecords(
+    guilfordBase,
+    ['Greensboro', 'High Point', 'Jamestown', 'Gibsonville', 'Oak Ridge', 'Pleasant Garden', 'Sedalia', 'Stokesdale', 'Summerfield', 'Whitsett'].map(
+      (name) => ({ name, agency: `${name} zoning authority`, layers: GUILFORD_ZONING }),
+    ),
+  ),
+];
+
+// Forsyth County's Planning_Inspection service (layer 1) carries the zoning
+// district for the county and its municipalities (Winston-Salem, …).
+const FORSYTH_SERVICE = 'https://maps.co.forsyth.nc.us/arcgis/rest/services/Planning_Inspection/Planning_Inspection/MapServer';
+const forsythBase = {
+  stateCode: 'NC' as const,
+  countyName: 'Forsyth County',
+  officialDomain: 'forsyth.cc',
+  serviceUrl: FORSYTH_SERVICE,
+  sourceType: 'arcgis-mapserver' as const,
+  parcelLayer: NC_ONEMAP_PARCELS,
+};
+const FORSYTH_ZONING = [layer(FORSYTH_SERVICE, 1, 'Forsyth County Zoning', 'ZONING_DISTRICT', null, 2264)];
+const forsythRecords: JurisdictionSourceRecord[] = [
+  record({ ...forsythBase, agencyName: 'Forsyth County', zoningLayers: FORSYTH_ZONING }),
+  ...municipalRecords(
+    forsythBase,
+    ['Winston-Salem', 'Kernersville', 'Clemmons', 'Lewisville', 'Rural Hall', 'Walkertown', 'Tobaccoville', 'Bethania'].map(
+      (name) => ({ name, agency: `${name} zoning authority`, layers: FORSYTH_ZONING }),
+    ),
+  ),
+];
+
+// Wake County publishes one zoning service with a SEPARATE layer per
+// jurisdiction (Raleigh, Cary, Apex, …). Every layer uses the CLASS field
+// except Raleigh (ZONING). Each municipality record targets its own layer.
+const WAKE_SERVICE = 'https://maps.wake.gov/arcgis/rest/services/Planning/Zoning/MapServer';
+const WAKE_PARCELS: ParcelLayerConfig = {
+  layerUrl: 'https://maps.wake.gov/arcgis/rest/services/Property/Parcels/MapServer/0',
+  layerId: 0,
+  parcelIdField: 'PIN_NUM',
+  addressField: 'SITE_ADDRESS',
+  acreageField: 'DEED_ACRES',
+  sourceType: 'arcgis-mapserver',
+  maxNearestMeters: 75,
+};
+const wakeBase = {
+  stateCode: 'NC' as const,
+  countyName: 'Wake County',
+  officialDomain: 'wake.gov',
+  serviceUrl: WAKE_SERVICE,
+  sourceType: 'arcgis-mapserver' as const,
+  parcelLayer: WAKE_PARCELS,
+};
+const wakeMunicipalities: ReadonlyArray<{ name: string; layerId: number; codeField: string }> = [
+  { name: 'Raleigh', layerId: 23, codeField: 'ZONING' },
+  { name: 'Cary', layerId: 16, codeField: 'CLASS' },
+  { name: 'Apex', layerId: 14, codeField: 'CLASS' },
+  { name: 'Fuquay-Varina', layerId: 18, codeField: 'CLASS' },
+  { name: 'Garner', layerId: 19, codeField: 'CLASS' },
+  { name: 'Holly Springs', layerId: 20, codeField: 'CLASS' },
+  { name: 'Knightdale', layerId: 21, codeField: 'CLASS' },
+  { name: 'Morrisville', layerId: 22, codeField: 'CLASS' },
+  { name: 'Rolesville', layerId: 24, codeField: 'CLASS' },
+  { name: 'Wake Forest', layerId: 25, codeField: 'CLASS' },
+  { name: 'Wendell', layerId: 26, codeField: 'CLASS' },
+  { name: 'Zebulon', layerId: 27, codeField: 'CLASS' },
+];
+const wakeRecords: JurisdictionSourceRecord[] = [
+  record({ ...wakeBase, agencyName: 'Wake County', zoningLayers: [layer(WAKE_SERVICE, 17, 'County Zoning', 'CLASS', null, 2264)] }),
+  ...municipalRecords(
+    wakeBase,
+    wakeMunicipalities.map((m) => ({
+      name: m.name,
+      agency: `${m.name} zoning authority`,
+      layers: [layer(WAKE_SERVICE, m.layerId, `${m.name} Zoning`, m.codeField, null, 2264)],
+    })),
+  ),
+];
+
+// Greenville County's base map layer 41 is a combined zoning layer covering the
+// county AND its municipalities (City of Greenville -> MX-D, etc.), so county +
+// municipal records point at it.
+const GREENVILLE_SERVICE = 'https://www.gcgis.org/arcgis/rest/services/GCGIA/Greenville_Base/MapServer';
+const GREENVILLE_PARCELS: ParcelLayerConfig = {
+  layerUrl: 'https://citygis.greenvillesc.gov/arcgis/rest/services/AddressSearch/Property/MapServer/3',
+  layerId: 3,
+  parcelIdField: 'PIN',
+  addressField: null,
+  acreageField: 'GIS_ACRES',
+  sourceType: 'arcgis-mapserver',
+  maxNearestMeters: 75,
+};
+const greenvilleBase = {
+  stateCode: 'SC' as const,
+  countyName: 'Greenville County',
+  officialDomain: 'greenvillecounty.org',
+  serviceUrl: GREENVILLE_SERVICE,
+  sourceType: 'arcgis-mapserver' as const,
+  parcelLayer: GREENVILLE_PARCELS,
+};
+const GREENVILLE_ZONING = [layer(GREENVILLE_SERVICE, 41, 'Greenville County Zoning', 'ZONING', null, 2273)];
+const greenvilleRecords: JurisdictionSourceRecord[] = [
+  record({ ...greenvilleBase, agencyName: 'Greenville County', zoningLayers: GREENVILLE_ZONING }),
+  ...municipalRecords(
+    greenvilleBase,
+    ['Greenville', 'Greer', 'Mauldin', 'Simpsonville', 'Fountain Inn', 'Travelers Rest'].map((name) => ({
+      name,
+      agency: `${name} zoning authority`,
+      layers: GREENVILLE_ZONING,
+    })),
+  ),
+];
+
+// Charleston County's viewer layer 44 (ZONE2) gives the county's unincorporated
+// zoning; incorporated municipalities return a "MUNI" placeholder (own services,
+// not yet seeded), so only the county record is registered.
+const CHARLESTON_SERVICE = 'https://gisccapps.charlestoncounty.org/arcgis/rest/services/GIS_VIEWER/New_Public_Search/MapServer';
+const charlestonRecords: JurisdictionSourceRecord[] = [
+  record({
+    stateCode: 'SC',
+    countyName: 'Charleston County',
+    agencyName: 'Charleston County',
+    officialDomain: 'charlestoncounty.org',
+    serviceUrl: CHARLESTON_SERVICE,
+    sourceType: 'arcgis-mapserver',
+    parcelLayer: {
+      layerUrl: `${CHARLESTON_SERVICE}/7`,
+      layerId: 7,
+      parcelIdField: 'PID',
+      addressField: null,
+      acreageField: 'ACREAGE',
+      sourceType: 'arcgis-mapserver',
+      maxNearestMeters: 75,
+    },
+    zoningLayers: [layer(CHARLESTON_SERVICE, 44, 'Charleston County Zoning Districts', 'ZONE2', null, 2273)],
+  }),
+];
+
 /**
- * Bootstrap records for the first six rollout counties. These are import data,
+ * Bootstrap records for the rollout counties. These are import data,
  * not discovery rules: production loads the same records from PostgreSQL.
  */
 export const INITIAL_NC_SC_SOURCE_RECORDS: readonly JurisdictionSourceRecord[] = Object.freeze([
@@ -409,6 +560,11 @@ export const INITIAL_NC_SC_SOURCE_RECORDS: readonly JurisdictionSourceRecord[] =
   ...gastonRecords,
   ...cabarrusRecords,
   ...unionRecords,
+  ...guilfordRecords,
+  ...forsythRecords,
+  ...wakeRecords,
+  ...greenvilleRecords,
+  ...charlestonRecords,
   ...yorkRecords,
   ...lancasterRecords,
 ]);
