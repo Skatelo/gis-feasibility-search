@@ -157,7 +157,7 @@ export async function ncAddressSuggestions(query: string, max = 5): Promise<stri
 /** fetch() with an abort timeout so a hung GIS server fails fast instead of stalling the UI. */
 async function fetchWithTimeout(url: string, ms = 20000, init?: RequestInit): Promise<Response> {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), ms);
+  const timer = setTimeout(() => controller.abort(new DOMException('Request timed out', 'TimeoutError')), ms);
   try {
     return await fetch(url, { ...init, signal: controller.signal });
   } finally {
@@ -2440,7 +2440,12 @@ export async function executeLandAnalysis(
         null,
       );
     } catch (error) {
-      researchError = error instanceof Error ? error.message : String(error);
+      const msg = error instanceof Error ? error.message : String(error);
+      if (msg.toLowerCase().includes('abort') || msg.toLowerCase().includes('timeout')) {
+        researchError = 'Gemini zoning research timed out or was aborted.';
+      } else {
+        researchError = msg;
+      }
     }
 
     if (researched && cleanCode(researched.code)) {
