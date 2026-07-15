@@ -717,7 +717,8 @@ export const FeasibilitySearch: FC = () => {
   const keys = getUserKeys();
   const hasGoogleMapsKey = !!keys.googleMaps;
   const hasGeminiKey = !!keys.gemini;
-  const hasKeys = hasGoogleMapsKey && hasGeminiKey;
+  const hasGoogleCustomSearch = !!keys.googleCustomSearchCx && !!(keys.googleCustomSearch || keys.googleMaps);
+  const hasKeys = hasGoogleMapsKey && hasGeminiKey && hasGoogleCustomSearch;
 
   const [addressInput, setAddressInput] = useState('');
   const [searchMode, setSearchMode] = useState<'address' | 'parcel'>('address');
@@ -2957,7 +2958,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
   const handleSearch = async (addressToSearch: string, countyOverride?: string, knownCoords?: { lat: number; lng: number }) => {
     if (!addressToSearch.trim()) return;
     if (!hasKeys) {
-      setError("Please set your personal Google Maps and Gemini API Keys in Account Settings to run feasibility analyses.");
+      setError("Please configure Google Maps, Google Custom Search (including cx), and Gemini API credentials in Account Settings.");
       return;
     }
 
@@ -3076,7 +3077,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
     const pin = parcelIdInput.trim();
     if (!pin) return;
     if (!hasKeys) {
-      setError("Please set your personal Google Maps and Gemini API Keys in Account Settings to run feasibility analyses.");
+      setError("Please configure Google Maps, Google Custom Search (including cx), and Gemini API credentials in Account Settings.");
       return;
     }
     setLoading(true);
@@ -3331,7 +3332,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
             <div className="api-keys-warning-banner" onClick={() => window.dispatchEvent(new CustomEvent('open-gis-settings'))}>
               <AlertCircle size={18} className="warning-icon" />
               <div className="warning-text">
-                <strong>API Keys Required:</strong> Personal Google Maps and Gemini API Keys must be configured to run feasibility analyses. Click here to configure them in Account Settings.
+                <strong>API Keys Required:</strong> Google Maps, Google Custom Search (API key and cx), and Gemini credentials must be configured to run feasibility analyses. Click here to configure them in Account Settings.
               </div>
             </div>
           )}
@@ -4090,14 +4091,14 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                   <h3 className="registry-card-header" style={{ margin: 0 }}>Zoning & Allowances</h3>
                   <span
                     title={data.zoningStandardsStatus === 'resolving'
-                      ? 'Reading the adopted zoning rules for this district.'
+                      ? 'Google Custom Search is finding full-address evidence and Gemini 3.5 Flash is reading the returned URLs.'
                       : data.zoningStandardsStatus === 'official'
                       ? 'Dimensional standards were read from the cited adopted ordinance.'
                       : data.zoningStandardsStatus === 'mixed'
-                        ? 'Some standards came from the ordinance; missing fields remain labeled estimates.'
+                        ? 'Some standards came from the cited ordinance; fields without source evidence remain omitted.'
                         : data.zoningStandardsStatus === 'unavailable'
-                          ? 'Open the cited official map or planning source before relying on dimensional allowances.'
-                          : 'No complete adopted standard was found; displayed screening values are estimates.'}
+                          ? 'The Google Custom Search results did not publish a source-backed dimensional standard.'
+                          : 'Some source-backed dimensional standards were returned.'}
                     style={{
                       fontSize: '10px',
                       backgroundColor: 'var(--warning-bg, rgba(245, 158, 11, 0.12))',
@@ -4111,8 +4112,8 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                     STANDARDS: {data.zoningStandardsStatus === 'resolving'
                       ? 'LOADING'
                       : data.zoningStandardsStatus === 'unavailable'
-                      ? 'REVIEW REQUIRED'
-                      : (data.zoningStandardsStatus || 'REVIEW REQUIRED').toUpperCase()}
+                      ? 'NOT RETURNED'
+                      : (data.zoningStandardsStatus || 'NOT RETURNED').toUpperCase()}
                   </span>
                 </div>
 
@@ -4122,21 +4123,21 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                       Zoning Classification
                       <span style={{ display: 'block', fontSize: '9px', color: 'var(--text-muted)', fontWeight: 600, letterSpacing: '0.03em' }}>
                         {data.zoningVerificationStatus === 'resolving'
-                          ? 'QUERYING OFFICIAL GIS'
+                          ? 'GOOGLE CUSTOM SEARCH + GEMINI 3.5 FLASH'
                           : data.zoningVerificationStatus === 'official-gis'
                           ? 'VERIFIED: OFFICIAL GIS'
                           : data.zoningVerificationStatus === 'official-research'
-                            ? 'VERIFIED: OFFICIAL JURISDICTION'
+                            ? 'VERIFIED: CUSTOM SEARCH OFFICIAL SOURCE'
                             : data.zoningVerificationStatus === 'corroborated-research'
-                              ? 'CORROBORATED: PROPERTY LISTINGS'
+                              ? 'CUSTOM SEARCH: CORROBORATED LISTINGS'
                               : data.zoningVerificationStatus === 'listing-research'
-                                ? 'REPORTED: PROPERTY LISTING'
+                                ? 'CUSTOM SEARCH: PROPERTY LISTING'
                                 : data.zoningVerificationStatus === 'statewide-reported'
                                   ? 'REPORTED: STATEWIDE PARCEL'
                                   : data.zoningVerificationStatus === 'planning-designation'
                                     ? 'OFFICIAL PLANNING DESIGNATION'
                                     : data.zoningVerificationStatus === 'review-required'
-                                      ? 'OPEN OFFICIAL ZONING MAP'
+                                      ? 'CUSTOM SEARCH RESULT NEEDS REVIEW'
                                       : data.zoningVerificationStatus === 'conflict'
                                         ? 'CONFLICT: GIS RETAINED'
                                         : 'NOT VERIFIED'}
@@ -4189,7 +4190,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                 <SourceLinks
                   label="Zoning evidence sources"
                   sources={[...(data.zoningSources || []), ...(data.zoningSourceUrl ? [data.zoningSourceUrl] : [])]}
-                  emptyText="Open the official jurisdiction map to review this parcel."
+                  emptyText="Google Custom Search did not return a source URL for this address."
                 />
 
                 {data.gridics ? (
@@ -4210,24 +4211,20 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                         </div>
                       )}
                       <div>
-                        <span className="coord-label" style={{ display: 'block', fontSize: '10px', color: 'var(--text-muted)', marginBottom: '2px' }}>{data.zoningMaxLotCoveragePct != null ? 'MAX FOOTPRINT:' : 'MAX FOOTPRINT (EST.):'}</span>
+                        <span className="coord-label" style={{ display: 'block', fontSize: '10px', color: 'var(--text-muted)', marginBottom: '2px' }}>MAX FOOTPRINT (CALC.):</span>
                         <strong style={{ fontSize: '12px', color: 'var(--text-primary)' }}>{data.gridics.maxBuildingFootprintSqft.toLocaleString()} SF</strong>
                       </div>
                       <div>
-                        <span className="coord-label" style={{ display: 'block', fontSize: '10px', color: 'var(--text-muted)', marginBottom: '2px' }}>{data.zoningStandardsStatus === 'official' ? 'MAX HEIGHT:' : 'MAX HEIGHT (EST.):'}</span>
+                        <span className="coord-label" style={{ display: 'block', fontSize: '10px', color: 'var(--text-muted)', marginBottom: '2px' }}>MAX HEIGHT (SOURCE):</span>
                         <strong style={{ fontSize: '12px', color: 'var(--text-primary)' }}>{data.gridics.maxHeightFt} ft</strong>
                       </div>
                       <div>
-                        <span className="coord-label" style={{ display: 'block', fontSize: '10px', color: 'var(--text-muted)', marginBottom: '2px' }}>{data.zoningStandardsStatus === 'official' ? 'FAR:' : 'FAR (EST.):'}</span>
+                        <span className="coord-label" style={{ display: 'block', fontSize: '10px', color: 'var(--text-muted)', marginBottom: '2px' }}>FAR (SOURCE):</span>
                         <strong style={{ fontSize: '12px', color: 'var(--text-primary)' }}>{data.gridics.floorAreaRatio}</strong>
                       </div>
                       <div>
                         <span className="coord-label" style={{ display: 'block', fontSize: '10px', color: 'var(--text-muted)', marginBottom: '2px' }}>
-                          {data.zoningSetbacksStatus === 'official'
-                            ? 'SETBACKS (ORDINANCE):'
-                            : data.zoningSetbacksStatus === 'mixed'
-                              ? 'SETBACKS (PARTIAL + EST.):'
-                              : 'TYPICAL SETBACKS (EST.):'}
+                          SETBACKS (SOURCE):
                         </span>
                         <strong style={{ fontSize: '11px', color: 'var(--text-primary)' }}>
                           F: {data.gridics.setbacks.frontFt} ft | R: {data.gridics.setbacks.rearFt} ft | S: {data.gridics.setbacks.sideFt} ft
@@ -4276,23 +4273,96 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
 
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '10px' }}>
                       <div>
-                        <span className="coord-label" style={{ display: 'block', fontSize: '11px', color: 'var(--text-muted)' }}>NET BUILDABLE ENVELOPE (EST.):</span>
+                        <span className="coord-label" style={{ display: 'block', fontSize: '11px', color: 'var(--text-muted)' }}>NET BUILDABLE ENVELOPE (CALC.):</span>
                         <strong style={{ fontSize: '18px', color: 'var(--success)' }}>
                           {data.gridics.netBuildableAreaSqft.toLocaleString()} <span style={{ fontSize: '12px', fontWeight: 'normal', color: 'var(--text-muted)' }}>SF</span>
                         </strong>
                       </div>
                       <span style={{ fontSize: '10px', backgroundColor: 'var(--success-bg)', color: 'var(--success)', padding: '3px 8px', borderRadius: '4px', textTransform: 'uppercase', fontWeight: 'bold', border: '1px solid var(--success-border)' }}>
-                        {data.zoningStandardsStatus === 'official' ? 'Ordinance-based' : 'Screening estimate'}
+                        Source-backed standards
                       </span>
                     </div>
+                  </>
+                ) : (
+                  data.zoningMaxHeightFt != null
+                  || data.zoningFloorAreaRatio != null
+                  || data.zoningSetbacks?.frontFt != null
+                  || data.zoningSetbacks?.rearFt != null
+                  || data.zoningSetbacks?.sideFt != null
+                  || data.zoningMinimumLotAreaSqft != null
+                  || data.zoningMaxLotCoveragePct != null
+                  || !!data.zoningPermittedUses?.length
+                  || !!data.zoningSetbackNotes?.length
+                  || !!data.zoningRestrictions?.length
+                ) ? (
+                  <>
+                    <div className="gridics-stats-grid" style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '15px', marginTop: '12px' }}>
+                      {data.zoningMaxHeightFt != null && (
+                        <div>
+                          <span className="coord-label" style={{ display: 'block', fontSize: '10px', color: 'var(--text-muted)', marginBottom: '2px' }}>MAX HEIGHT (SOURCE):</span>
+                          <strong style={{ fontSize: '12px', color: 'var(--text-primary)' }}>{data.zoningMaxHeightFt} ft</strong>
+                        </div>
+                      )}
+                      {data.zoningFloorAreaRatio != null && (
+                        <div>
+                          <span className="coord-label" style={{ display: 'block', fontSize: '10px', color: 'var(--text-muted)', marginBottom: '2px' }}>FAR (SOURCE):</span>
+                          <strong style={{ fontSize: '12px', color: 'var(--text-primary)' }}>{data.zoningFloorAreaRatio}</strong>
+                        </div>
+                      )}
+                      {(data.zoningSetbacks?.frontFt != null || data.zoningSetbacks?.rearFt != null || data.zoningSetbacks?.sideFt != null) && (
+                        <div>
+                          <span className="coord-label" style={{ display: 'block', fontSize: '10px', color: 'var(--text-muted)', marginBottom: '2px' }}>SETBACKS (SOURCE):</span>
+                          <strong style={{ fontSize: '11px', color: 'var(--text-primary)' }}>
+                            {[
+                              data.zoningSetbacks?.frontFt != null ? `F: ${data.zoningSetbacks.frontFt} ft` : '',
+                              data.zoningSetbacks?.rearFt != null ? `R: ${data.zoningSetbacks.rearFt} ft` : '',
+                              data.zoningSetbacks?.sideFt != null ? `S: ${data.zoningSetbacks.sideFt} ft` : '',
+                            ].filter(Boolean).join(' | ')}
+                          </strong>
+                        </div>
+                      )}
+                      {data.zoningMinimumLotAreaSqft != null && (
+                        <div>
+                          <span className="coord-label" style={{ display: 'block', fontSize: '10px', color: 'var(--text-muted)', marginBottom: '2px' }}>MINIMUM LOT AREA:</span>
+                          <strong style={{ fontSize: '12px', color: 'var(--text-primary)' }}>{data.zoningMinimumLotAreaSqft.toLocaleString()} SF</strong>
+                        </div>
+                      )}
+                      {data.zoningMaxLotCoveragePct != null && (
+                        <div>
+                          <span className="coord-label" style={{ display: 'block', fontSize: '10px', color: 'var(--text-muted)', marginBottom: '2px' }}>MAX LOT COVERAGE:</span>
+                          <strong style={{ fontSize: '12px', color: 'var(--text-primary)' }}>{data.zoningMaxLotCoveragePct}%</strong>
+                        </div>
+                      )}
+                    </div>
+                    {!!data.zoningPermittedUses?.length && (
+                      <div style={{ marginTop: '12px', fontSize: '0.76rem', color: 'var(--text-secondary)' }}>
+                        <strong style={{ display: 'block', color: 'var(--text-primary)', marginBottom: '4px' }}>Published permitted uses</strong>
+                        {data.zoningPermittedUses.join(' | ')}
+                      </div>
+                    )}
+                    {!!data.zoningSetbackNotes?.length && (
+                      <div style={{ marginTop: '12px', fontSize: '0.76rem', color: 'var(--text-secondary)' }}>
+                        <strong style={{ display: 'block', color: 'var(--text-primary)', marginBottom: '4px' }}>Setback rules and exceptions</strong>
+                        {data.zoningSetbackNotes.map((note) => <div key={note}>- {note}</div>)}
+                      </div>
+                    )}
+                    {!!data.zoningRestrictions?.length && (
+                      <div style={{ marginTop: '12px', fontSize: '0.76rem', color: 'var(--text-secondary)' }}>
+                        <strong style={{ display: 'block', color: 'var(--text-primary)', marginBottom: '4px' }}>Published zoning restrictions</strong>
+                        {data.zoningRestrictions.map((restriction) => <div key={restriction}>- {restriction}</div>)}
+                      </div>
+                    )}
+                    {data.zoningStandardsSourceUrl && (
+                      <SourceLinks label="Setbacks and restrictions source" sources={[data.zoningStandardsSourceUrl]} />
+                    )}
                   </>
                 ) : data.zoningStandardsStatus === 'resolving' ? (
                   <div style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '12px 0', color: 'var(--text-muted)', fontSize: '0.8rem' }}>
                     <Loader2 size={14} className="spinner" />
-                    <span>Reading adopted setback and allowance rules...</span>
+                    <span>Analyzing full-address Custom Search results with Gemini 3.5 Flash...</span>
                   </div>
                 ) : (
-                  <div className="cost-disclaimer">Open the cited official zoning or planning map before relying on setbacks, density, height, or lot-coverage allowances for this parcel.</div>
+                  <div className="cost-disclaimer">The Google Custom Search results did not publish source-backed setbacks or allowance values for this address.</div>
                 )}
               </div>
 
@@ -5037,13 +5107,13 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                     const countyOverlay = getRenderableZoningServices(data.countyName).length > 0;
                     const webZoning = data.zoningSource === 'web';
                     const canToggle = officialGis || webZoning;
-                    const label = officialGis ? "Zoning (Official GIS)" : webZoning ? "Zoning (web lookup)" : "Zoning (Manual review)";
+                    const label = officialGis ? "Zoning (Official GIS)" : webZoning ? "Zoning (Custom Search + Gemini)" : "Zoning (Not returned)";
                     const title = countyOverlay
                       ? `Overlay zoning districts from ${data.countyName} County's own GIS server`
                       : officialGis
                         ? 'Show the exact-parcel result from the official GIS point-query service; this service does not publish raster map export'
                       : webZoning
-                        ? `Zoning resolved via web search — verify against the local ordinance`
+                        ? `Zoning resolved from Google Custom Search results by Gemini 3.5 Flash`
                         : `${data.countyName} County does not publish a zoning GIS service`;
                     return (
                       <button

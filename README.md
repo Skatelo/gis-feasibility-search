@@ -10,8 +10,8 @@ A high-performance real estate feasibility screening dashboard built with React,
   - **Gaston County** (Gastonia/Mount Holly)
   - **Cabarrus County** (Concord/Kannapolis)
 * **Topography & Elevation Metrics**: Integrates with OpenTopography (Copernicus COP30 DEM) to gauge site slope and buildability classification (Buildable vs. Non-Buildable).
-* **Zoning & Setbacks Capacity**: Approximates setbacks, max heights, floor-area ratios, and net buildable envelope dimensions.
-* **Hybrid Live Web Data**: the Perplexity Search API handles fast ranked searches and source discovery; a bounded Crawlee scraper reads harder zoning, utility, fee, cost, and report sources plus linked PDF, DOCX, XLSX, CSV, JSON, XML, and text documents.
+* **Zoning & Allowances**: sends the complete NC or SC address to the Google Custom Search JSON API, then uses Gemini 3.5 Flash to extract the source-backed district, setbacks, restrictions, and allowances.
+* **Hybrid Live Web Data**: the Perplexity Search API handles non-zoning ranked searches and source discovery; a bounded Crawlee scraper reads harder utility, fee, cost, and report sources plus linked PDF, DOCX, XLSX, CSV, JSON, XML, and text documents.
 * **Comparable Sold Listings**: Scrapes verified sold properties from Realtor.com via Google Search grounding to calculateDeveloped After Repair Value (ARV).
 * **Interactive Gemini Q&A Chatbot**: A contextual chatbot capable of explaining setbacks, zoning rules, or construction options utilizing the current parcel context.
 * **Printable Feasibility Report**: Generates vector PDF-ready feasibility reports for wholesalers and developers.
@@ -40,6 +40,19 @@ Crawlee runs inside the Netlify backend and does not require a separate API key.
 The crawler uses HTTP + Cheerio rather than a browser for speed. Each run is limited by page count, crawl depth, concurrency, request timeout, and a 12 MB response cap. It follows only relevant same-site links, respects `robots.txt`, blocks private-network targets, and is rate-limited per visitor in production.
 
 For local testing of the crawler endpoint, use `npx netlify dev`. Plain `npm run dev` still supports Perplexity search, but it does not execute Netlify functions.
+
+## Zoning Search
+
+The in-report **Zoning & Allowances** section uses only Google Custom Search JSON API results and Gemini 3.5 Flash. Each lookup includes the complete street, city, state name, ZIP code, and `United States`; the requests use `cache: "no-store"`. Gemini reads the returned snippets and result URLs with URL Context and does not launch another search provider.
+
+Configure the credentials in **Account & API Settings**, or set:
+
+```bash
+VITE_GOOGLE_CUSTOM_SEARCH_API_KEY=
+VITE_GOOGLE_CUSTOM_SEARCH_CX=
+```
+
+The Google Maps key can be reused when it is authorized for the Custom Search JSON API, but a dedicated key is supported. The Programmable Search Engine must be configured to search the public web or the authoritative sites you want included.
 
 ## Official NC/SC Zoning Service
 

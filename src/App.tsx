@@ -124,7 +124,11 @@ function App() {
   }
 
   // Check if API Keys are configured
-  const keysConfigured = !!(activeUser.keys?.googleMaps && activeUser.keys?.gemini);
+  const keysConfigured = !!(
+    activeUser.keys?.googleMaps
+    && activeUser.keys?.gemini
+    && activeUser.keys?.googleCustomSearchCx
+  );
 
   return (
     <>
