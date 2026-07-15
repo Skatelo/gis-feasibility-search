@@ -400,8 +400,53 @@ const lancasterRecords = [
   }),
 ];
 
+// Guilford County publishes one combined zoning layer covering the county and
+// its municipalities (Greensboro, High Point, …); every jurisdiction record
+// points at it and the point query returns that jurisdiction's district.
+const GUILFORD_SERVICE = 'https://gcgis.guilfordcountync.gov/arcgis/rest/services/Planning_Zoning/Combined_Zoning/MapServer';
+const guilfordBase = {
+  stateCode: 'NC' as const,
+  countyName: 'Guilford County',
+  officialDomain: 'guilfordcountync.gov',
+  serviceUrl: GUILFORD_SERVICE,
+  sourceType: 'arcgis-mapserver' as const,
+  parcelLayer: NC_ONEMAP_PARCELS,
+};
+const GUILFORD_ZONING = [layer(GUILFORD_SERVICE, 0, 'Guilford County Combined Zoning', 'ZONING', 'DESCRIPTION', 2264)];
+const guilfordRecords: JurisdictionSourceRecord[] = [
+  record({ ...guilfordBase, agencyName: 'Guilford County', zoningLayers: GUILFORD_ZONING }),
+  ...municipalRecords(
+    guilfordBase,
+    ['Greensboro', 'High Point', 'Jamestown', 'Gibsonville', 'Oak Ridge', 'Pleasant Garden', 'Sedalia', 'Stokesdale', 'Summerfield', 'Whitsett'].map(
+      (name) => ({ name, agency: `${name} zoning authority`, layers: GUILFORD_ZONING }),
+    ),
+  ),
+];
+
+// Forsyth County's Planning_Inspection service (layer 1) carries the zoning
+// district for the county and its municipalities (Winston-Salem, …).
+const FORSYTH_SERVICE = 'https://maps.co.forsyth.nc.us/arcgis/rest/services/Planning_Inspection/Planning_Inspection/MapServer';
+const forsythBase = {
+  stateCode: 'NC' as const,
+  countyName: 'Forsyth County',
+  officialDomain: 'forsyth.cc',
+  serviceUrl: FORSYTH_SERVICE,
+  sourceType: 'arcgis-mapserver' as const,
+  parcelLayer: NC_ONEMAP_PARCELS,
+};
+const FORSYTH_ZONING = [layer(FORSYTH_SERVICE, 1, 'Forsyth County Zoning', 'ZONING_DISTRICT', null, 2264)];
+const forsythRecords: JurisdictionSourceRecord[] = [
+  record({ ...forsythBase, agencyName: 'Forsyth County', zoningLayers: FORSYTH_ZONING }),
+  ...municipalRecords(
+    forsythBase,
+    ['Winston-Salem', 'Kernersville', 'Clemmons', 'Lewisville', 'Rural Hall', 'Walkertown', 'Tobaccoville', 'Bethania'].map(
+      (name) => ({ name, agency: `${name} zoning authority`, layers: FORSYTH_ZONING }),
+    ),
+  ),
+];
+
 /**
- * Bootstrap records for the first six rollout counties. These are import data,
+ * Bootstrap records for the rollout counties. These are import data,
  * not discovery rules: production loads the same records from PostgreSQL.
  */
 export const INITIAL_NC_SC_SOURCE_RECORDS: readonly JurisdictionSourceRecord[] = Object.freeze([
@@ -409,6 +454,8 @@ export const INITIAL_NC_SC_SOURCE_RECORDS: readonly JurisdictionSourceRecord[] =
   ...gastonRecords,
   ...cabarrusRecords,
   ...unionRecords,
+  ...guilfordRecords,
+  ...forsythRecords,
   ...yorkRecords,
   ...lancasterRecords,
 ]);
