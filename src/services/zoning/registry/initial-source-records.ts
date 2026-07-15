@@ -492,6 +492,65 @@ const wakeRecords: JurisdictionSourceRecord[] = [
   ),
 ];
 
+// Greenville County's base map layer 41 is a combined zoning layer covering the
+// county AND its municipalities (City of Greenville -> MX-D, etc.), so county +
+// municipal records point at it.
+const GREENVILLE_SERVICE = 'https://www.gcgis.org/arcgis/rest/services/GCGIA/Greenville_Base/MapServer';
+const GREENVILLE_PARCELS: ParcelLayerConfig = {
+  layerUrl: 'https://citygis.greenvillesc.gov/arcgis/rest/services/AddressSearch/Property/MapServer/3',
+  layerId: 3,
+  parcelIdField: 'PIN',
+  addressField: null,
+  acreageField: 'GIS_ACRES',
+  sourceType: 'arcgis-mapserver',
+  maxNearestMeters: 75,
+};
+const greenvilleBase = {
+  stateCode: 'SC' as const,
+  countyName: 'Greenville County',
+  officialDomain: 'greenvillecounty.org',
+  serviceUrl: GREENVILLE_SERVICE,
+  sourceType: 'arcgis-mapserver' as const,
+  parcelLayer: GREENVILLE_PARCELS,
+};
+const GREENVILLE_ZONING = [layer(GREENVILLE_SERVICE, 41, 'Greenville County Zoning', 'ZONING', null, 2273)];
+const greenvilleRecords: JurisdictionSourceRecord[] = [
+  record({ ...greenvilleBase, agencyName: 'Greenville County', zoningLayers: GREENVILLE_ZONING }),
+  ...municipalRecords(
+    greenvilleBase,
+    ['Greenville', 'Greer', 'Mauldin', 'Simpsonville', 'Fountain Inn', 'Travelers Rest'].map((name) => ({
+      name,
+      agency: `${name} zoning authority`,
+      layers: GREENVILLE_ZONING,
+    })),
+  ),
+];
+
+// Charleston County's viewer layer 44 (ZONE2) gives the county's unincorporated
+// zoning; incorporated municipalities return a "MUNI" placeholder (own services,
+// not yet seeded), so only the county record is registered.
+const CHARLESTON_SERVICE = 'https://gisccapps.charlestoncounty.org/arcgis/rest/services/GIS_VIEWER/New_Public_Search/MapServer';
+const charlestonRecords: JurisdictionSourceRecord[] = [
+  record({
+    stateCode: 'SC',
+    countyName: 'Charleston County',
+    agencyName: 'Charleston County',
+    officialDomain: 'charlestoncounty.org',
+    serviceUrl: CHARLESTON_SERVICE,
+    sourceType: 'arcgis-mapserver',
+    parcelLayer: {
+      layerUrl: `${CHARLESTON_SERVICE}/7`,
+      layerId: 7,
+      parcelIdField: 'PID',
+      addressField: null,
+      acreageField: 'ACREAGE',
+      sourceType: 'arcgis-mapserver',
+      maxNearestMeters: 75,
+    },
+    zoningLayers: [layer(CHARLESTON_SERVICE, 44, 'Charleston County Zoning Districts', 'ZONE2', null, 2273)],
+  }),
+];
+
 /**
  * Bootstrap records for the rollout counties. These are import data,
  * not discovery rules: production loads the same records from PostgreSQL.
@@ -504,6 +563,8 @@ export const INITIAL_NC_SC_SOURCE_RECORDS: readonly JurisdictionSourceRecord[] =
   ...guilfordRecords,
   ...forsythRecords,
   ...wakeRecords,
+  ...greenvilleRecords,
+  ...charlestonRecords,
   ...yorkRecords,
   ...lancasterRecords,
 ]);
