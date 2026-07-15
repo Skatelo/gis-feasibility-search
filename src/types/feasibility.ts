@@ -268,6 +268,7 @@ export interface SiteFeasibilityData {
   boundaryRings?: number[][][];
   statePlaneRings?: number[][][];
   zoningDescription?: string;
+  zoningTextReport?: string;
   /** Where the zoning came from. Zoning research currently reports `web` for
    *  Gemini 3.5 Flash responses grounded with Google Search citations. */
   zoningSource?: 'county-gis' | 'statewide-gis' | 'official-map' | 'web';

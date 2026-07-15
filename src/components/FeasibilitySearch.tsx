@@ -4268,6 +4268,26 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                       <SourceLinks label="Setbacks and restrictions source" sources={[data.zoningStandardsSourceUrl]} />
                     )}
 
+                    {data.zoningTextReport && (
+                      <div style={{
+                        marginTop: '15px',
+                        padding: '12px',
+                        backgroundColor: 'var(--bg-card-hover, rgba(255, 255, 255, 0.02))',
+                        border: '1px solid var(--bg-card-border)',
+                        borderRadius: '8px',
+                        fontSize: '0.82rem',
+                        lineHeight: '1.5',
+                        color: 'var(--text-secondary)'
+                      }}>
+                        <strong style={{ display: 'block', color: 'var(--text-primary)', marginBottom: '8px', borderBottom: '1px solid var(--bg-card-border)', paddingBottom: '4px' }}>
+                          AI Zoning Research Report
+                        </strong>
+                        <div className="markdown-body zoning-report-markdown" style={{ overflowX: 'auto' }}>
+                          {parseMarkdown(data.zoningTextReport)}
+                        </div>
+                      </div>
+                    )}
+
                     <hr style={{ border: '0', borderTop: '1px solid var(--bg-card-border)', margin: '15px 0' }} />
 
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '10px' }}>
@@ -4293,6 +4313,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                   || !!data.zoningPermittedUses?.length
                   || !!data.zoningSetbackNotes?.length
                   || !!data.zoningRestrictions?.length
+                  || !!data.zoningTextReport
                 ) ? (
                   <>
                     <div className="gridics-stats-grid" style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '15px', marginTop: '12px' }}>
@@ -4351,6 +4372,26 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                         {data.zoningRestrictions.map((restriction) => <div key={restriction}>- {restriction}</div>)}
                       </div>
                     )}
+                    {data.zoningTextReport && (
+                      <div style={{
+                        marginTop: '15px',
+                        padding: '12px',
+                        backgroundColor: 'var(--bg-card-hover, rgba(255, 255, 255, 0.02))',
+                        border: '1px solid var(--bg-card-border)',
+                        borderRadius: '8px',
+                        fontSize: '0.82rem',
+                        lineHeight: '1.5',
+                        color: 'var(--text-secondary)'
+                      }}>
+                        <strong style={{ display: 'block', color: 'var(--text-primary)', marginBottom: '8px', borderBottom: '1px solid var(--bg-card-border)', paddingBottom: '4px' }}>
+                          AI Zoning Research Report
+                        </strong>
+                        <div className="markdown-body zoning-report-markdown" style={{ overflowX: 'auto' }}>
+                          {parseMarkdown(data.zoningTextReport)}
+                        </div>
+                      </div>
+                    )}
+
                     {data.zoningStandardsSourceUrl && (
                       <SourceLinks label="Setbacks and restrictions source" sources={[data.zoningStandardsSourceUrl]} />
                     )}

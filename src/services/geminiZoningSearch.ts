@@ -94,7 +94,21 @@ export function buildGeminiZoningSearchPrompt(address: string, countyName = ''):
     ? `The detected county is ${compactText(countyName)}; confirm the actual county or municipal zoning authority from sources.`
     : 'Confirm the county or municipal zoning authority from sources.';
 
-  return `Search Google now for this exact query:\n"${requestedQuery}"\n\nThe complete address must remain verbatim in every search used to identify this parcel. ${jurisdictionHint}\n\nContinue with additional exact-address searches as needed to find the parcel-specific district. Search official county or municipal GIS and planning sources first. Exact-address Zillow, Realtor, and Redfin pages are fallback assignment evidence only. After identifying the district, find the adopted ordinance or official code that publishes its setbacks, restrictions, permitted uses, height, lot area, lot coverage, and floor-area ratio.\n\nReturn one JSON object matching the response schema. Use an empty string, empty array, or omit an optional standards field when grounded sources do not publish it. Set matchMethod to "unresolved" rather than guessing. Every URL in the JSON must come from the Google Search results used for this answer.`;
+  return `Search Google now for this exact query:
+"${requestedQuery}"
+
+The complete address must remain verbatim in every search used to identify this parcel. ${jurisdictionHint}
+
+Continue with additional exact-address searches as needed to find the parcel-specific district. Search official county or municipal GIS and planning sources first. Exact-address Zillow, Realtor, and Redfin pages are fallback assignment evidence only. After identifying the district, find the adopted ordinance or official code that publishes its setbacks, restrictions, permitted uses, height, lot area, lot coverage, and floor-area ratio.
+
+First, write a comprehensive, detailed zoning and development report for the property in clear markdown format. Explain the zoning district, setbacks (front, rear, side), height limits, building coverage limits, accessory dwelling unit (ADU) rules, and allowed uses. Include clear headings and bold key figures.
+
+Then, at the very end of your response, output a single JSON block wrapped in \`\`\`json and \`\`\` containing the structured fields matching the following schema. Use an empty string, empty array, or omit an optional standards field when grounded sources do not publish it. Set matchMethod to "unresolved" if the district cannot be confirmed.
+
+JSON SCHEMA:
+${JSON.stringify(ZONING_RESPONSE_SCHEMA, null, 2)}
+
+Every URL in the JSON must come from the Google Search results used for this answer.`;
 }
 
 function annotationsFrom(value: unknown): any[] {
@@ -186,11 +200,6 @@ export async function fetchGeminiZoningSearchEvidence(
     system_instruction: ZONING_SYSTEM,
     store: false,
     tools: [{ type: 'google_search' }],
-    response_format: {
-      type: 'text',
-      mime_type: 'application/json',
-      schema: ZONING_RESPONSE_SCHEMA,
-    },
   });
 
   for (let attempt = 0; attempt < 2; attempt++) {
