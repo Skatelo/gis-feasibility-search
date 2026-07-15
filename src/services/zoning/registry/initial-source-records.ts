@@ -445,6 +445,53 @@ const forsythRecords: JurisdictionSourceRecord[] = [
   ),
 ];
 
+// Wake County publishes one zoning service with a SEPARATE layer per
+// jurisdiction (Raleigh, Cary, Apex, …). Every layer uses the CLASS field
+// except Raleigh (ZONING). Each municipality record targets its own layer.
+const WAKE_SERVICE = 'https://maps.wake.gov/arcgis/rest/services/Planning/Zoning/MapServer';
+const WAKE_PARCELS: ParcelLayerConfig = {
+  layerUrl: 'https://maps.wake.gov/arcgis/rest/services/Property/Parcels/MapServer/0',
+  layerId: 0,
+  parcelIdField: 'PIN_NUM',
+  addressField: 'SITE_ADDRESS',
+  acreageField: 'DEED_ACRES',
+  sourceType: 'arcgis-mapserver',
+  maxNearestMeters: 75,
+};
+const wakeBase = {
+  stateCode: 'NC' as const,
+  countyName: 'Wake County',
+  officialDomain: 'wake.gov',
+  serviceUrl: WAKE_SERVICE,
+  sourceType: 'arcgis-mapserver' as const,
+  parcelLayer: WAKE_PARCELS,
+};
+const wakeMunicipalities: ReadonlyArray<{ name: string; layerId: number; codeField: string }> = [
+  { name: 'Raleigh', layerId: 23, codeField: 'ZONING' },
+  { name: 'Cary', layerId: 16, codeField: 'CLASS' },
+  { name: 'Apex', layerId: 14, codeField: 'CLASS' },
+  { name: 'Fuquay-Varina', layerId: 18, codeField: 'CLASS' },
+  { name: 'Garner', layerId: 19, codeField: 'CLASS' },
+  { name: 'Holly Springs', layerId: 20, codeField: 'CLASS' },
+  { name: 'Knightdale', layerId: 21, codeField: 'CLASS' },
+  { name: 'Morrisville', layerId: 22, codeField: 'CLASS' },
+  { name: 'Rolesville', layerId: 24, codeField: 'CLASS' },
+  { name: 'Wake Forest', layerId: 25, codeField: 'CLASS' },
+  { name: 'Wendell', layerId: 26, codeField: 'CLASS' },
+  { name: 'Zebulon', layerId: 27, codeField: 'CLASS' },
+];
+const wakeRecords: JurisdictionSourceRecord[] = [
+  record({ ...wakeBase, agencyName: 'Wake County', zoningLayers: [layer(WAKE_SERVICE, 17, 'County Zoning', 'CLASS', null, 2264)] }),
+  ...municipalRecords(
+    wakeBase,
+    wakeMunicipalities.map((m) => ({
+      name: m.name,
+      agency: `${m.name} zoning authority`,
+      layers: [layer(WAKE_SERVICE, m.layerId, `${m.name} Zoning`, m.codeField, null, 2264)],
+    })),
+  ),
+];
+
 /**
  * Bootstrap records for the rollout counties. These are import data,
  * not discovery rules: production loads the same records from PostgreSQL.
@@ -456,6 +503,7 @@ export const INITIAL_NC_SC_SOURCE_RECORDS: readonly JurisdictionSourceRecord[] =
   ...unionRecords,
   ...guilfordRecords,
   ...forsythRecords,
+  ...wakeRecords,
   ...yorkRecords,
   ...lancasterRecords,
 ]);
