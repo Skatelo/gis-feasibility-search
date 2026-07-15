@@ -33,6 +33,9 @@ test('cleanCode rejects placeholders and blanks', () => {
   assert.equal(cleanCode('CITY'), null);
   assert.equal(cleanCode('UNZONED'), null);
   assert.equal(cleanCode('OFFICIAL MAP REVIEW'), null);
+  assert.equal(cleanCode('MANUAL REVIEW'), null);
+  assert.equal(cleanCode('NO ADOPTED DISTRICT'), null);
+  assert.equal(cleanCode('LAND USE: residential'), null);
   assert.equal(cleanCode('Not published'), null);
   assert.equal(cleanCode('Unavailable'), null);
   assert.equal(cleanCode(''), null);
@@ -114,7 +117,7 @@ test('normalizeZoning reports not-found when no clean code is present', () => {
 });
 
 test('normalizeZoning never promotes UI fallback text to a zoning district', () => {
-  for (const value of ['OFFICIAL MAP REVIEW', 'ZONING CODE UNRESOLVED', 'Not published', 'Unavailable']) {
+  for (const value of ['OFFICIAL MAP REVIEW', 'MANUAL REVIEW', 'ZONING CODE UNRESOLVED', 'NO ADOPTED DISTRICT', 'LAND USE: residential', 'Not published', 'Unavailable']) {
     const { zoning } = normalizeZoning([match(23, { ZONING: value })], [layer(23)]);
     assert.equal(zoning.found, false, value);
     assert.equal(zoning.code, null, value);

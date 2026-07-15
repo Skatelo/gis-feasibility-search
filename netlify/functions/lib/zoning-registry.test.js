@@ -18,6 +18,8 @@ const evidenceCompiled = ts.transpileModule(evidenceSource, {
 const evidence = await import(`data:text/javascript;base64,${Buffer.from(evidenceCompiled).toString('base64')}`);
 const serviceSource = await readFile(new URL('../../../src/services/feasibilityService.ts', import.meta.url), 'utf8');
 const componentSource = await readFile(new URL('../../../src/components/FeasibilitySearch.tsx', import.meta.url), 'utf8');
+const appSource = await readFile(new URL('../../../src/App.tsx', import.meta.url), 'utf8');
+const officialLookupSource = await readFile(new URL('../../../src/services/officialZoningLookup.ts', import.meta.url), 'utf8');
 const perplexityProxySource = await readFile(new URL('../perplexity.js', import.meta.url), 'utf8');
 const viteSource = await readFile(new URL('../../../vite.config.ts', import.meta.url), 'utf8');
 
@@ -428,7 +430,7 @@ test('listing zoning evidence distinguishes one-provider reports from corroborat
   assert.equal(evidence.listingZoningEvidenceTier(['https://example.com/a']), null);
 });
 
-test('normal zoning uses only reviewed official GIS and never invokes discovery or AI', () => {
+test('property zoning streams a fresh official district and enriches the existing allowances card', () => {
   const stage = serviceSource.slice(
     serviceSource.indexOf('// STAGE 3 - zoning.'),
     serviceSource.indexOf('// STAGE 4'),
@@ -438,19 +440,26 @@ test('normal zoning uses only reviewed official GIS and never invokes discovery 
   assert.match(serviceSource, /addressString\.match\(\/\(\?:,\|\\s\)/);
   assert.match(stage, /lookupOfficialZoning\(/);
   assert.match(stage, /fetchCountyZoningCode\(/);
-  assert.match(stage, /allowServerDiscovery: false/);
-  assert.match(stage, /registryZoning\?\.status === 'verified'/);
+  assert.match(stage, /allowServerDiscovery: true/);
+  assert.match(stage, /zoningLookupAddress/);
   assert.match(stage, /matchMethod: 'parcel-gis'/);
-  assert.match(stage, /zoningCode = 'MANUAL REVIEW'/);
+  assert.match(stage, /fetchZoningViaWebSearch\(/);
+  assert.match(stage, /skipDirectLookup: !!officialZoning/);
+  assert.match(stage, /emitZoning\(\)/);
+  assert.match(stage, /zoningStandardsStatus = 'resolving'/);
+  assert.match(stage, /cleanCode\(result\.code\) \|\| ''/);
   assert.match(stage, /zoningSetbackNotes/);
   assert.match(stage, /zoningRestrictions/);
-  assert.doesNotMatch(stage, /fetchZoningViaWebSearch\(/);
-  assert.doesNotMatch(stage, /gemini|perplexity|crawlee|google_search/i);
+  assert.doesNotMatch(stage, /zoningCode = 'MANUAL REVIEW'/);
   assert.doesNotMatch(stage, /OFFICIAL MAP REVIEW|ZONING CODE UNRESOLVED/);
   assert.doesNotMatch(serviceSource, /code: 'OFFICIAL MAP REVIEW'/);
+  assert.match(officialLookupSource, /fresh: true/);
+  assert.match(componentSource, /Zoning & Allowances/);
+  assert.match(componentSource, /Reading adopted setback and allowance rules/);
   assert.match(componentSource, /Setback rules and exceptions/);
   assert.match(componentSource, /Published zoning restrictions/);
-  assert.match(componentSource, /STANDARDS:[\s\S]*REVIEW REQUIRED/);
+  assert.match(componentSource, /STANDARDS:[\s\S]*LOADING/);
+  assert.doesNotMatch(appSource, /ZoningAdmin|zoning-admin|Zoning Sources/);
   assert.doesNotMatch(componentSource, /Zoning \(not published\)/);
 });
 

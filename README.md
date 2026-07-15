@@ -54,7 +54,7 @@ npm run build:zoning-server
 docker compose --env-file .env.zoning -f docker-compose.zoning.yml up --build
 ```
 
-The first rollout covers reviewed sources in Mecklenburg, Gaston, Cabarrus,
-Union (NC), York, and Lancaster (SC). It does not claim all 100 NC and 46 SC
-counties are validated. See `docs/zoning-coverage.md` and open
-`/#/zoning-admin` for source health and review.
+The adaptive manifest includes every NC and SC county, while source approval
+remains evidence-based. See `docs/zoning-coverage.md`; source health and review
+are managed through the zoning service API and registry tools, not a separate
+property-search page.

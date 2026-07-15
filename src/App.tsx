@@ -5,20 +5,19 @@ import { SkipTrace } from './components/SkipTrace';
 import { NewsTicker } from './components/NewsTicker';
 import { AuthPortal } from './components/AuthPortal';
 import { SettingsDrawer } from './components/SettingsDrawer';
-import { ZoningAdmin } from './components/ZoningAdmin';
-import { Database, FileJson, FolderOpen, Globe, Settings, Map as MapIcon, Sparkles, Fingerprint, ShieldCheck } from 'lucide-react';
+import { Database, FileJson, FolderOpen, Globe, Settings, Map as MapIcon, Sparkles, Fingerprint } from 'lucide-react';
 import { getSupabase, isSupabaseConfigured } from './services/supabaseClient';
 import { buildSessionUser, signOutEverywhere, writeSessionMirror, deriveFirstName } from './services/authService';
 
 
-type AppView = 'feasibility' | 'finder' | 'skiptrace' | 'zoning-admin';
+type AppView = 'feasibility' | 'finder' | 'skiptrace';
 
 function App() {
   const [activeUser, setActiveUser] = useState<any>(null);
   const [sessionLoaded, setSessionLoaded] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const hashToView = (h: string): AppView =>
-    h === '#/finder' ? 'finder' : h === '#/skiptrace' ? 'skiptrace' : h === '#/zoning-admin' ? 'zoning-admin' : 'feasibility';
+    h === '#/finder' ? 'finder' : h === '#/skiptrace' ? 'skiptrace' : 'feasibility';
   const [view, setView] = useState<AppView>(() => hashToView(window.location.hash));
   const lastUserIdRef = useRef<string | null>(null);
 
@@ -31,7 +30,7 @@ function App() {
   }, []);
 
   const goTo = (next: AppView) => {
-    window.location.hash = next === 'finder' ? '#/finder' : next === 'skiptrace' ? '#/skiptrace' : next === 'zoning-admin' ? '#/zoning-admin' : '#/';
+    window.location.hash = next === 'finder' ? '#/finder' : next === 'skiptrace' ? '#/skiptrace' : '#/';
     setView(next);
   };
 
@@ -166,14 +165,6 @@ function App() {
             <Fingerprint size={16} />
             <span>Skip Trace</span>
           </button>
-          <button
-            type="button"
-            className={`app-nav-btn ${view === 'zoning-admin' ? 'active' : ''}`}
-            onClick={() => goTo('zoning-admin')}
-          >
-            <ShieldCheck size={16} />
-            <span>Zoning Sources</span>
-          </button>
         </nav>
 
         <div className="header-actions">
@@ -211,7 +202,7 @@ function App() {
       </header>
 
       {/* Auto-scrolling real estate / housing news strip (NC-tailored) */}
-      {view !== 'zoning-admin' && <NewsTicker />}
+      <NewsTicker />
 
       {/* Main Content — feasibility search, AI finder, or LLC skip trace */}
       <main className="main-content">
@@ -219,9 +210,7 @@ function App() {
           ? <DistressedFinder />
           : view === 'skiptrace'
             ? <SkipTrace />
-            : view === 'zoning-admin'
-              ? <ZoningAdmin />
-              : <FeasibilitySearch />}
+            : <FeasibilitySearch />}
       </main>
 
       {/* Dashboard Footer */}

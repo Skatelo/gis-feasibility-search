@@ -10,6 +10,7 @@ import type { ChatConversation } from '../services/chatStore';
 import { getSearchHistory, addSearchHistory } from '../services/searchHistoryStore';
 import { ReportsDrawer } from './ReportsDrawer';
 import type { SiteFeasibilityData, ConstructionCostEstimate, CostLineItem, MaterialTakeoff, LandClearingEstimate, UtilitiesEstimate } from '../types/feasibility';
+import { cleanCode } from '../services/zoning/normalization/zoning-normalizer';
 
 /** Group cost line items by category, preserving first-seen order. (Avoids the
  *  global Map — lucide-react's `Map` icon is imported in this file.) */
@@ -1855,7 +1856,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
       }
       emit(sideStart, start);
     });
-    const hasRealZoning = !!data.zoningSource && data.zoningCode !== 'N/A';
+    const hasRealZoning = !!data.zoningSource && !!cleanCode(data.zoningCode);
     if (hasRealZoning) {
       const confidence = data.zoningVerificationStatus === 'official-research'
         ? 'verified'
@@ -2528,7 +2529,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
       // Draw zoning label over the parcel whenever we have a real zoning code —
       // from county GIS, or the web-search fallback (marked "web"). We don't float
       // a code when none was resolved (N/A).
-      const hasRealZoning = !!data.zoningSource && data.zoningCode !== 'N/A';
+      const hasRealZoning = !!data.zoningSource && !!cleanCode(data.zoningCode);
       if (hasRealZoning) {
         const confidence = data.zoningVerificationStatus === 'official-research'
           ? 'verified'
@@ -4088,7 +4089,9 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '8px', marginBottom: '1rem' }}>
                   <h3 className="registry-card-header" style={{ margin: 0 }}>Zoning & Allowances</h3>
                   <span
-                    title={data.zoningStandardsStatus === 'official'
+                    title={data.zoningStandardsStatus === 'resolving'
+                      ? 'Reading the adopted zoning rules for this district.'
+                      : data.zoningStandardsStatus === 'official'
                       ? 'Dimensional standards were read from the cited adopted ordinance.'
                       : data.zoningStandardsStatus === 'mixed'
                         ? 'Some standards came from the ordinance; missing fields remain labeled estimates.'
@@ -4105,7 +4108,9 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                       border: '1px solid var(--warning-border, rgba(245, 158, 11, 0.35))'
                     }}
                   >
-                    STANDARDS: {data.zoningStandardsStatus === 'unavailable'
+                    STANDARDS: {data.zoningStandardsStatus === 'resolving'
+                      ? 'LOADING'
+                      : data.zoningStandardsStatus === 'unavailable'
                       ? 'REVIEW REQUIRED'
                       : (data.zoningStandardsStatus || 'REVIEW REQUIRED').toUpperCase()}
                   </span>
@@ -4116,7 +4121,9 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                     <span className="field-label">
                       Zoning Classification
                       <span style={{ display: 'block', fontSize: '9px', color: 'var(--text-muted)', fontWeight: 600, letterSpacing: '0.03em' }}>
-                        {data.zoningVerificationStatus === 'official-gis'
+                        {data.zoningVerificationStatus === 'resolving'
+                          ? 'QUERYING OFFICIAL GIS'
+                          : data.zoningVerificationStatus === 'official-gis'
                           ? 'VERIFIED: OFFICIAL GIS'
                           : data.zoningVerificationStatus === 'official-research'
                             ? 'VERIFIED: OFFICIAL JURISDICTION'
@@ -4135,7 +4142,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                                         : 'NOT VERIFIED'}
                       </span>
                     </span>
-                    {data.zoningCode ? (
+                    {cleanCode(data.zoningCode) ? (
                       <span
                         className={`zoning-badge ${data.zoningSource === 'county-gis' ? 'active-zone' : 'fallback-zone'}`}
                         style={String(data.zoningCode).length > 14 ? {
@@ -4147,12 +4154,16 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                           textAlign: 'right',
                         } : undefined}
                       >
-                        {data.zoningCode}
+                        {cleanCode(data.zoningCode)}
                       </span>
-                    ) : (
+                    ) : data.zoningVerificationStatus === 'resolving' ? (
                       <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', fontSize: '0.78rem', color: 'var(--text-muted)' }}>
                         <Loader2 size={13} className="spinner" />
                         <span>Resolving...</span>
+                      </span>
+                    ) : (
+                      <span style={{ fontSize: '0.78rem', color: 'var(--text-muted)', textAlign: 'right' }}>
+                        No district code returned
                       </span>
                     )}
                   </div>
@@ -4275,6 +4286,11 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                       </span>
                     </div>
                   </>
+                ) : data.zoningStandardsStatus === 'resolving' ? (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '12px 0', color: 'var(--text-muted)', fontSize: '0.8rem' }}>
+                    <Loader2 size={14} className="spinner" />
+                    <span>Reading adopted setback and allowance rules...</span>
+                  </div>
                 ) : (
                   <div className="cost-disclaimer">Open the cited official zoning or planning map before relying on setbacks, density, height, or lot-coverage allowances for this parcel.</div>
                 )}
