@@ -495,6 +495,7 @@ test('Gemini zoning search uses the complete address and a fresh grounded Intera
   assert.equal(call.body.model, 'gemini-3-flash-preview');
   assert.equal(call.body.store, false);
   assert.deepEqual(call.body.tools, [{ type: 'google_search' }]);
+  assert.equal(call.body.generation_config.thinking_level, 'low');
   assert.ok(call.body.input.includes(fullAddress));
   assert.doesNotMatch(JSON.stringify(call), /customsearch|programmable search|url_context|"cx"/i);
   assert.equal(result.fullAddress, fullAddress);
@@ -529,6 +530,7 @@ test('property zoning uses only Gemini 3.5 Flash Google Search in the allowances
   assert.match(geminiSearchSource, /gemini-3\.5-flash/);
   assert.match(geminiSearchSource, /v1beta\/interactions/);
   assert.match(geminiSearchSource, /tools: \[\{ type: 'google_search' \}\]/);
+  assert.match(geminiSearchSource, /thinking_level: GEMINI_ZONING_THINKING_LEVEL/);
   assert.match(geminiSearchSource, /'x-goog-api-key': key/);
   assert.match(geminiSearchSource, /cache: 'no-store'/);
   assert.match(geminiSearchSource, /url_citation/);
