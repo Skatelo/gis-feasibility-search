@@ -14,6 +14,11 @@ type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Respo
 // ever retired (a retired model answers HTTP 404, which triggers the fallback).
 export const GEMINI_ZONING_MODELS = ['gemini-3-flash-preview', 'gemini-3.5-flash'] as const;
 export const GEMINI_ZONING_MODEL = GEMINI_ZONING_MODELS[0];
+
+// Grounded search defaults to 'high' thinking (~50s). 'low' keeps the same
+// district accuracy in testing but returns in ~8-10s (a 5-6x speedup); the
+// model still performs as many Google Searches as it needs to pin the parcel.
+export const GEMINI_ZONING_THINKING_LEVEL = 'low';
 export const GEMINI_INTERACTIONS_ENDPOINT = 'https://generativelanguage.googleapis.com/v1beta/interactions';
 
 const ZONING_RESPONSE_SCHEMA = {
@@ -211,6 +216,7 @@ export async function fetchGeminiZoningSearchEvidence(
       system_instruction: ZONING_SYSTEM,
       store: false,
       tools: [{ type: 'google_search' }],
+      generation_config: { thinking_level: GEMINI_ZONING_THINKING_LEVEL },
     });
 
     for (let attempt = 0; attempt < 2; attempt++) {
