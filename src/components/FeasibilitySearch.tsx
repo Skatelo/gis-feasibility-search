@@ -3126,18 +3126,23 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
   // Comp property-type buckets for the display filter.
   const compTypeBucket = (t?: string): string => {
     const s = String(t || '').toLowerCase().replace(/[_-]+/g, ' ').trim();
-    if (/single|sfr|detached/.test(s)) return 'single-family';
-    if (/townh/.test(s)) return 'townhouse';
+    if (/single|sfr|detached|\bhouse\b|\bhome\b/.test(s)) return 'single-family';
+    if (/town|row\s?house/.test(s)) return 'townhome';
     if (/condo/.test(s)) return 'condo';
-    if (/multi|duplex|triplex|quadruplex|apartment|\bapt\b/.test(s)) return 'multi-family';
+    if (/multi|duplex|triplex|quad|fourplex|apartment|\bapt\b|co.?op/.test(s)) return 'multi-family';
+    if (/mobile|manufactured/.test(s)) return 'mobile';
     return 'other';
   };
+  // The comp type filter chips are DRIVEN BY THE ZONING: only the building types
+  // this district permits (data.compAllowedTypes) are offered, defaulting to
+  // "All allowed" (a mix of every permitted type).
+  const COMP_TYPE_LABELS_MAP: Record<string, string> = {
+    'single-family': 'Single Family', 'townhome': 'Townhome', 'condo': 'Condo', 'multi-family': 'Multi-Family', 'mobile': 'Mobile/Manufactured',
+  };
+  const compAllowedTypes = (data?.compAllowedTypes || []).filter((t) => COMP_TYPE_LABELS_MAP[t]);
   const COMP_TYPE_OPTIONS: { value: string; label: string }[] = [
-    { value: 'all', label: 'All types' },
-    { value: 'single-family', label: 'Single Family' },
-    { value: 'townhouse', label: 'Townhouse' },
-    { value: 'condo', label: 'Condo' },
-    { value: 'multi-family', label: 'Multi-Family' },
+    { value: 'all', label: compAllowedTypes.length ? 'All allowed' : 'All types' },
+    ...compAllowedTypes.map((t) => ({ value: t, label: COMP_TYPE_LABELS_MAP[t] })),
   ];
   const allComps = data?.comps || [];
   const filteredComps = compTypeFilter === 'all' ? allComps : allComps.filter((c) => compTypeBucket(c.propertyType) === compTypeFilter);

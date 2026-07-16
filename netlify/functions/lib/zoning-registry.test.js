@@ -573,8 +573,8 @@ test('comps use RealtyAPI records filtered by zoning while retaining Gemini Visi
   );
 
   assert.match(pipeline, /fetchRealtyApiSoldComps/);
-  assert.match(pipeline, /getPermittedCategory\(zoningCode, zoningDesc\)/);
+  assert.match(pipeline, /zoningAllowedBuildingTypes\(permittedUses, zoningCode, zoningDesc\)/);
   assert.match(pipeline, /selectExteriorComps\(result, getBackgroundGeminiKey\(\)\)/);
   assert.doesNotMatch(pipeline, /fetchGoogleMlsComps|runGeminiCompQuery|google_search|ENABLE_GOOGLE_MLS_COMPS/);
-  assert.match(serviceSource, /matchesZoningUse\(c\.propertyType, category\)/);
+  assert.match(serviceSource, /matchesAllowedTypes\(c\.propertyType, allowedTypes\)/);
 });

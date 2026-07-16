@@ -2520,6 +2520,7 @@ export async function executeLandAnalysis(
     onStageChange,
     compRadiusMiles,
     zoningSupportsComps,
+    zoningPermittedUses || [],
   );
   onPartial?.({ comps: compRun.comps, compRunSummary: compRun.summary });
 
@@ -2528,6 +2529,8 @@ export async function executeLandAnalysis(
     floodZonePromise.catch(() => undefined),
     wetlandsPromise.catch(() => undefined),
   ]);
+
+  const compAllowedTypes = zoningAllowedBuildingTypes(zoningPermittedUses, zoningCode, zoningDescription);
 
   return {
     ...baseResult,
@@ -2546,6 +2549,7 @@ export async function executeLandAnalysis(
     zoningMinimumLotAreaSqft,
     zoningMaxLotCoveragePct,
     zoningPermittedUses,
+    compAllowedTypes,
     zoningTextReport,
     gridics,
     slopeProfile,
@@ -4221,6 +4225,58 @@ export function getUseCategory(zoningCode: string, zoningDesc: string): 'residen
   return getPermittedCategory(zoningCode, zoningDesc);
 }
 
+/** Canonical residential comp building types. Office/commercial is intentionally
+ *  excluded — the Verified Market Comps are residential sold records only. */
+export type CompBuildingType = 'single-family' | 'townhome' | 'condo' | 'multi-family' | 'mobile';
+
+/** Residential building types a district permits, derived from the zoning
+ *  research's permittedUses (code/description as a fallback). Drives which comp
+ *  property types are fetched, kept, and offered as UI filters. */
+export function zoningAllowedBuildingTypes(
+  permittedUses: string[] | undefined,
+  zoningCode: string,
+  zoningDesc: string,
+): CompBuildingType[] {
+  const hay = [...(permittedUses || []), zoningDesc || ''].join(' | ').toLowerCase();
+  const set = new Set<CompBuildingType>();
+  if (/\b(single[-\s]?family|one[-\s]?family|sfr|detached|site[-\s]?built)\b/.test(hay)) set.add('single-family');
+  if (/\b(town[-\s]?home|town[-\s]?house|row[-\s]?house|attached dwelling|attached single)\b/.test(hay)) set.add('townhome');
+  if (/\bcondo(minium)?\b/.test(hay)) set.add('condo');
+  if (/\b(duplex|triplex|quad(ra|ru)?plex|four[-\s]?plex|two[-\s]?family|three[-\s]?family|four[-\s]?family|multi[-\s]?family|multifamily|apartment)\b/.test(hay)) set.add('multi-family');
+  if (/\b(manufactured home|manufactured hous|mobile home|hud[-\s]?code)\b/.test(hay)) set.add('mobile');
+  if (set.size === 0) {
+    const cat = getPermittedCategory(zoningCode, zoningDesc);
+    if (cat === 'multifamily') { set.add('townhome'); set.add('condo'); set.add('multi-family'); }
+    else if (cat === 'residential') { set.add('single-family'); }
+    // 'commercial' -> no residential comp types (office/commercial excluded by design).
+  }
+  const order: CompBuildingType[] = ['single-family', 'townhome', 'condo', 'multi-family', 'mobile'];
+  return order.filter((t) => set.has(t));
+}
+
+/** Map a comp's pretty property-type label to a canonical building-type bucket. */
+function compBuildingTypeOf(prettyType: string | undefined): CompBuildingType | 'land' | 'unknown' {
+  switch (prettyType) {
+    case 'Single-Family': return 'single-family';
+    case 'Townhome': return 'townhome';
+    case 'Condo': return 'condo';
+    case 'Multi-Family':
+    case 'Co-op': return 'multi-family';
+    case 'Mobile/Manufactured': return 'mobile';
+    case 'Land': return 'land';
+    default: return 'unknown';
+  }
+}
+
+/** Does a comp fit the building types this zoning permits? Land is never a comp;
+ *  an unknown type is kept (per-platform type filters already narrowed it). */
+function matchesAllowedTypes(prettyType: string | undefined, allowed: CompBuildingType[]): boolean {
+  const bucket = compBuildingTypeOf(prettyType);
+  if (bucket === 'land') return false;
+  if (bucket === 'unknown') return true;
+  return allowed.includes(bucket);
+}
+
 /** Resolve a COMPLETE "street, city, ST ZIP" postal address for the zoning
  *  search. The searched/selected text is frequently street-only (an NC
  *  statewide-geocoder suggestion especially), which left the exact-address
@@ -4856,15 +4912,15 @@ export function getMapboxToken(): string {
 // OpenAPI spec). Land / lots are deliberately excluded — comps are completed
 // HOMES only, never vacant land. Zillow's homeType tokens aren't documented, so
 // it is left unrestricted and filtered client-side by matchesZoningUse() instead.
-function realtorPropertyTypes(cat: 'residential' | 'commercial' | 'multifamily'): string {
-  if (cat === 'multifamily') return "Townhome,Condo,Multi_Family,Co-op";
-  if (cat === 'commercial') return "House,Condo,Townhome,Multi_Family";
-  return "House";
+function realtorPropertyTypes(types: CompBuildingType[]): string {
+  const map: Record<CompBuildingType, string> = { 'single-family': 'House', 'townhome': 'Townhome', 'condo': 'Condo', 'multi-family': 'Multi_Family', 'mobile': 'Manufactured' };
+  const out = [...new Set(types.map((t) => map[t]).filter(Boolean))];
+  return out.length ? out.join(',') : 'House';
 }
-function redfinHomeTypes(cat: 'residential' | 'commercial' | 'multifamily'): string {
-  if (cat === 'multifamily') return "townhouse,condo,Multi family,Co-op";
-  if (cat === 'commercial') return "House,condo,townhouse,Multi family";
-  return "House";
+function redfinHomeTypes(types: CompBuildingType[]): string {
+  const map: Record<CompBuildingType, string> = { 'single-family': 'House', 'townhome': 'townhouse', 'condo': 'condo', 'multi-family': 'Multi family', 'mobile': 'Mobile/Manufactured' };
+  const out = [...new Set(types.map((t) => map[t]).filter(Boolean))];
+  return out.length ? out.join(',') : 'House';
 }
 
 /** Clean, human-readable property-type label (Single-Family / Townhome / Condo / Multi-Family / ...). */
@@ -4881,14 +4937,7 @@ function prettyPropertyType(t: any): string | undefined {
   return undefined;
 }
 
-/** Does a comp's property type fit the subject's COUNTY ZONING use category? */
-function matchesZoningUse(prettyType: string | undefined, category: 'residential' | 'commercial' | 'multifamily'): boolean {
-  if (prettyType === "Land" || prettyType === "Mobile/Manufactured") return false; // never land/mobile
-  if (!prettyType) return true; // unknown type — server-side type filters already applied
-  if (category === 'residential') return prettyType === "Single-Family";
-  if (category === 'multifamily') return ["Townhome", "Condo", "Multi-Family", "Co-op"].includes(prettyType);
-  return true; // commercial zoning: any completed home type qualifies
-}
+// Comp property-type matching now uses zoningAllowedBuildingTypes + matchesAllowedTypes (above).
 
 /** Closed/SOLD only — reject under-contract, pending, coming-soon, for-sale, active listings. */
 function isClosedSale(listingStatus: any, saleDate: string, price: number): boolean {
@@ -5171,7 +5220,7 @@ async function fetchRealtyPlatform(
   lat: number,
   lng: number,
   radiusMiles: number,
-  category: 'residential' | 'commercial' | 'multifamily',
+  allowedTypes: CompBuildingType[],
   oneYearAgo: Date,
   key: string,
   onStageChange?: (stage: string) => void,
@@ -5200,10 +5249,10 @@ async function fetchRealtyPlatform(
       q.set("sortOrder", "Most_Recently_Sold");
       q.set("resultCount", "200");
       if (platform === "realtor") {
-        q.set("propertyType", realtorPropertyTypes(category));
+        q.set("propertyType", realtorPropertyTypes(allowedTypes));
         q.set("yearBuiltRange", `min:${MIN_COMP_YEAR_BUILT}`);
       } else {
-        q.set("homeType", redfinHomeTypes(category));
+        q.set("homeType", redfinHomeTypes(allowedTypes));
         q.set("soldWithin", "Last_1_Year");
         q.set("minYearBuilt", String(MIN_COMP_YEAR_BUILT));
         q.set("maxYearBuilt", String(MAX_COMP_YEAR_BUILT));
@@ -5250,7 +5299,7 @@ async function fetchRealtyPlatform(
       if (!isClosedSale(c.listingStatus, c.saleDate, c.price)) continue;
       // Match the subject's COUNTY ZONING use (residential -> single-family;
       // multifamily -> townhome/condo/multi-family). Also drops land/lots.
-      if (!matchesZoningUse(c.propertyType, category)) continue;
+      if (!matchesAllowedTypes(c.propertyType, allowedTypes)) continue;
       out.push(c);
     }
     onStageChange?.(`Scanning ${platform} sold records... page ${page} (${out.length} found)`);
@@ -5280,7 +5329,7 @@ async function fetchRealtyPlatform(
 async function fetchRealtyApiSoldComps(
   lat: number,
   lng: number,
-  category: 'residential' | 'commercial' | 'multifamily',
+  allowedTypes: CompBuildingType[],
   oneYearAgo: Date,
   onStageChange?: (stage: string) => void,
   radiusMiles = 5,
@@ -5297,7 +5346,7 @@ async function fetchRealtyApiSoldComps(
   const platforms: ('realtor' | 'redfin' | 'zillow')[] = ["realtor", "redfin", "zillow"];
   const perPlatform = await Promise.all(
     platforms.map((pf) =>
-      fetchRealtyPlatform(pf, lat, lng, RADIUS_MILES, category, oneYearAgo, key, onStageChange).catch((e) => {
+      fetchRealtyPlatform(pf, lat, lng, RADIUS_MILES, allowedTypes, oneYearAgo, key, onStageChange).catch((e) => {
         console.warn(`RealtyAPI ${pf} platform failed:`, e);
         return [] as any[];
       }),
@@ -5702,6 +5751,7 @@ export async function fetchGoogleDistanceMatrixComps(
   onStageChange?: (stage: string) => void,
   maxRadiusMiles = 5,
   zoningVerified = true,
+  permittedUses: string[] = [],
 ): Promise<CompRunResult> {
   onStageChange?.("Searching sold listings...");
 
@@ -5725,7 +5775,10 @@ export async function fetchGoogleDistanceMatrixComps(
   const MIN_DIST_MILES = 0;
 
   // Permitted use category (drives the Realtor search property type).
-  const category = getPermittedCategory(zoningCode, zoningDesc);
+  const allowedTypes = zoningAllowedBuildingTypes(permittedUses, zoningCode, zoningDesc);
+  if (allowedTypes.length === 0) {
+    return { comps: [], summary: "No residential comps run: this parcel's zoning is office/commercial, so residential sold records do not apply." };
+  }
 
   // Straight-line (haversine-approx) miles from the subject to a candidate.
   const straightMiles = (c: { coords: { lat: number; lng: number } }) => {
@@ -5772,7 +5825,7 @@ export async function fetchGoogleDistanceMatrixComps(
   // date, construction-year, and driving-distance checks. Gemini is not used to
   // discover, price, or validate a comp; it is used later only to select the
   // exterior image from a RealtyAPI listing's photo set.
-  const realtyComps = await fetchRealtyApiSoldComps(lat, lng, category, oneYearAgo, onStageChange, EXPANDED_RADIUS_MILES).catch((e) => {
+  const realtyComps = await fetchRealtyApiSoldComps(lat, lng, allowedTypes, oneYearAgo, onStageChange, EXPANDED_RADIUS_MILES).catch((e) => {
     console.warn("RealtyAPI sold comp search failed:", e);
     return [] as any[];
   });
