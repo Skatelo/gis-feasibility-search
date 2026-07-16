@@ -291,6 +291,8 @@ export interface SiteFeasibilityData {
   zoningMinimumLotAreaSqft?: number;
   zoningMaxLotCoveragePct?: number;
   zoningPermittedUses?: string[];
+  /** Residential building types this zoning permits — drives the comps filter/chips. */
+  compAllowedTypes?: string[];
   gridics?: GridicsData;
   isSimulated?: boolean;
 
