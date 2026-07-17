@@ -212,6 +212,9 @@ export function normalizeRealEstateApiAddress(value: string): string {
     .replace(/\bSouth Carolina\b/gi, 'SC')
     .replace(/\s*,\s*/g, ', ')
     .replace(/,\s*,/g, ',')
+    // Property Detail documents the formatted-address form as
+    // "123 Main St, City ST 12345" (no comma between city and state).
+    .replace(/,\s*(NC|SC)\b(?=\s+\d{5}(?:-\d{4})?\b|$)/i, ' $1')
     .trim();
 }
 

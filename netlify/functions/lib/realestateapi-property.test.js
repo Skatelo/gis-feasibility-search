@@ -95,7 +95,7 @@ const FIXTURE = {
 test('normalizes a full Carolina address and parses mortgage plus sale history', () => {
   assert.equal(
     propertyApi.normalizeRealEstateApiAddress('12901 Lanecrest Road, Midland, North Carolina 28107, United States'),
-    '12901 Lanecrest Road, Midland, NC 28107',
+    '12901 Lanecrest Road, Midland NC 28107',
   );
 
   const result = propertyApi.parseRealEstatePropertyTransactions(
@@ -197,7 +197,7 @@ test('each button lookup makes a fresh no-store exact-match request', async () =
     assert.equal(call.init.cache, 'no-store');
     assert.equal(new Headers(call.init.headers).get('x-api-key'), 'test-key');
     assert.deepEqual(JSON.parse(call.init.body), {
-      address: '12901 Lanecrest Road, Midland, NC 28107',
+      address: '12901 Lanecrest Road, Midland NC 28107',
       exact_match: true,
       comps: false,
     });
@@ -230,7 +230,7 @@ test('Netlify proxy forwards only the exact address request and API key', async 
     assert.equal(captured.init.headers['x-api-key'], 'server-test-key');
     assert.equal(captured.init.cache, 'no-store');
     assert.deepEqual(JSON.parse(captured.init.body), {
-      address: '12901 Lanecrest Road, Midland, NC 28107',
+      address: '12901 Lanecrest Road, Midland NC 28107',
       exact_match: true,
       comps: false,
     });
