@@ -515,7 +515,7 @@ test('property zoning uses only Gemini 3.5 Flash Google Search in the allowances
 
   assert.match(serviceSource, /countyName = `\$\{countyBaseName\(countyName\)\}, \$\{selectedState\}`/);
   assert.match(serviceSource, /addressString\.match\(\/\(\?:,\|\\s\)/);
-  assert.match(stage, /resolveFullPostalAddress\(/);
+  assert.match(stage, /resolveFullCarolinaPostalAddress\(/);
   assert.match(stage, /normalizeFullAddressForZoning\(zoningQueryAddress \|\| addressString\)/);
   assert.match(stage, /fetchZoningWithGeminiSearch\(fullZoningAddress, countyName\)/);
   assert.match(stage, /emitZoning\(\)/);
