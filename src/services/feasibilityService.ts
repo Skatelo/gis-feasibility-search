@@ -6027,6 +6027,12 @@ async function groundedGeminiText(geminiKey: string, prompt: string, systemText:
   const body = JSON.stringify({
     contents: [{ role: 'user', parts: [{ text: effectivePrompt }] }],
     systemInstruction: { parts: [{ text: systemText }] },
+    // 'low' thinking: these lookups (utilities/taps/permit fees, construction
+    // cost, material takeoff) EXTRACT and synthesize figures from the supplied
+    // sources rather than reason deeply, so low thinking keeps the numbers
+    // accurate while ~halving latency (~17s -> ~8-9s per round) and easing rate
+    // limits. Not 'minimal'/off — a little reasoning still helps fee parsing.
+    generationConfig: { thinkingConfig: { thinkingLevel: 'low' } },
     ...(usePerplexity ? {} : { tools: [{ google_search: {} }] }),
   });
   const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=${geminiKey}`;
