@@ -15,10 +15,13 @@ type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Respo
 export const GEMINI_ZONING_MODELS = ['gemini-3-flash-preview', 'gemini-3.5-flash'] as const;
 export const GEMINI_ZONING_MODEL = GEMINI_ZONING_MODELS[0];
 
-// Grounded search defaults to 'high' thinking (~50s). 'low' keeps the same
-// district accuracy in testing but returns in ~8-10s (a 5-6x speedup); the
-// model still performs as many Google Searches as it needs to pin the parcel.
-export const GEMINI_ZONING_THINKING_LEVEL = 'low';
+// Zoning district identification needs the model's full agentic search depth.
+// 'low' thinking made it flip to the WRONG district (e.g. S-R / City of Belmont
+// instead of R-1 / unincorporated Gaston County) and return sparse permittedUses
+// (which also starved the comps type filter). 'high' (the model default) reliably
+// pins the correct district + full permitted uses. Slower (~30-60s), but accuracy
+// is the whole point and the 120s timeout covers it.
+export const GEMINI_ZONING_THINKING_LEVEL = 'high';
 export const GEMINI_INTERACTIONS_ENDPOINT = 'https://generativelanguage.googleapis.com/v1beta/interactions';
 
 const ZONING_RESPONSE_SCHEMA = {
@@ -97,12 +100,14 @@ export function normalizeFullAddressForZoning(value: string): string {
   return `${expandedState}, United States`;
 }
 
-export function buildGeminiZoningSearchPrompt(address: string, countyName = ''): string {
+export function buildGeminiZoningSearchPrompt(address: string, countyName = '', jurisdiction = ''): string {
   const fullAddress = normalizeFullAddressForZoning(address);
   const requestedQuery = `What is ${fullAddress} zoning code`;
-  const jurisdictionHint = compactText(countyName)
-    ? `The detected county is ${compactText(countyName)}; confirm the actual county or municipal zoning authority from sources.`
-    : 'Confirm the county or municipal zoning authority from sources.';
+  const jurisdictionHint = compactText(jurisdiction)
+    ? `AUTHORITATIVE JURISDICTION (from U.S. Census place boundaries at the exact parcel point): this parcel is ${compactText(jurisdiction)}. Use THAT authority's adopted zoning ordinance for the code. Do NOT assume the postal/mailing city is the zoning authority — a mailing address like "Belmont" is frequently UNINCORPORATED county land governed by the COUNTY's zoning code, not the city's.`
+    : compactText(countyName)
+      ? `The detected county is ${compactText(countyName)}; confirm the actual county or municipal zoning authority from sources.`
+      : 'Confirm the county or municipal zoning authority from sources.';
 
   return `Search Google now for this exact query:
 "${requestedQuery}"
@@ -111,7 +116,7 @@ The complete address must remain verbatim in every search used to identify this 
 
 Continue with additional exact-address searches as needed to find the parcel-specific district. Search official county or municipal GIS and planning sources first. Exact-address Zillow, Realtor, and Redfin pages are fallback assignment evidence only. After identifying the district, find the adopted ordinance or official code that publishes its setbacks, restrictions, permitted uses, height, lot area, lot coverage, and floor-area ratio.
 
-First, write a comprehensive, detailed zoning and development report for the property in clear markdown format. Explain the zoning district, setbacks (front, rear, side), height limits, building coverage limits, accessory dwelling unit (ADU) rules, and allowed uses. Include clear headings and bold key figures.
+First, write a comprehensive, detailed zoning and development report for the property in clear markdown format. Lead with the EXACT adopted zoning CODE (e.g. R-1, RS-8, MF-2) as published by the jurisdiction's official GIS/ordinance — the specific code, not a generic label. Then explain that district, its setbacks (front, rear, side), height limits, building coverage limits, accessory dwelling unit (ADU) rules, and allowed uses. Include clear headings and bold key figures.
 
 Then, at the very end of your response, output a single JSON block wrapped in \`\`\`json and \`\`\` containing the structured fields matching the following schema. Use an empty string, empty array, or omit an optional standards field when grounded sources do not publish it. Set matchMethod to "unresolved" if the district cannot be confirmed.
 
@@ -197,6 +202,7 @@ export async function fetchGeminiZoningSearchEvidence(
   apiKey: string,
   countyName = '',
   fetcher: FetchLike = fetch,
+  jurisdiction = '',
 ): Promise<GeminiZoningSearchEvidence> {
   const fullAddress = normalizeFullAddressForZoning(address);
   const key = apiKey.trim();
@@ -204,7 +210,7 @@ export async function fetchGeminiZoningSearchEvidence(
   if (!key) throw new Error('A Gemini API key is required for zoning search.');
 
   const requestedQuery = `What is ${fullAddress} zoning code`;
-  const input = buildGeminiZoningSearchPrompt(fullAddress, countyName);
+  const input = buildGeminiZoningSearchPrompt(fullAddress, countyName, jurisdiction);
 
   // Try each model in priority order. A retired/unknown model answers HTTP 404,
   // so we transparently fall back to the next one instead of failing the lookup.
