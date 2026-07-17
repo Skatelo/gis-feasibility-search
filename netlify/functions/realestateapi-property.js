@@ -38,7 +38,16 @@ export const handler = async (event) => {
     return json(400, { error: 'Invalid JSON body.' });
   }
 
-  const address = String(input.address || '').replace(/\s+/g, ' ').trim();
+  const address = String(input.address || '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/,+$/, '')
+    .replace(/,?\s*(?:United States(?: of America)?|USA|U\.S\.A\.|US)\.?$/i, '')
+    .replace(/\bNorth Carolina\b/gi, 'NC')
+    .replace(/\bSouth Carolina\b/gi, 'SC')
+    .replace(/\s*,\s*/g, ', ')
+    .replace(/,\s*(NC|SC)\b(?=\s+\d{5}(?:-\d{4})?\b|$)/i, ' $1')
+    .trim();
   if (!address || !/\b(?:NC|SC)\b/i.test(address)) {
     return json(400, { error: 'A full North Carolina or South Carolina address is required.' });
   }

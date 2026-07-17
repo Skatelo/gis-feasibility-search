@@ -11,6 +11,12 @@ const compiled = ts.transpileModule(source, {
 }).outputText;
 const propertyApi = await import(`data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`);
 
+const addressSource = await readFile(new URL('../../../src/services/carolinaAddress.ts', import.meta.url), 'utf8');
+const addressCompiled = ts.transpileModule(addressSource, {
+  compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 },
+}).outputText;
+const addressResolver = await import(`data:text/javascript;base64,${Buffer.from(addressCompiled).toString('base64')}`);
+
 const FIXTURE = {
   data: {
     id: 8195564,
@@ -89,7 +95,7 @@ const FIXTURE = {
 test('normalizes a full Carolina address and parses mortgage plus sale history', () => {
   assert.equal(
     propertyApi.normalizeRealEstateApiAddress('12901 Lanecrest Road, Midland, North Carolina 28107, United States'),
-    '12901 Lanecrest Road, Midland, NC 28107',
+    '12901 Lanecrest Road, Midland NC 28107',
   );
 
   const result = propertyApi.parseRealEstatePropertyTransactions(
@@ -108,6 +114,50 @@ test('normalizes a full Carolina address and parses mortgage plus sale history',
   assert.equal(result.sales[1].amount, undefined, 'zero-dollar transfers are not displayed as $0 sales');
   assert.equal(result.openMortgageBalance, 250000);
   assert.equal(result.freeClear, false);
+});
+
+test('resolves a street-only GIS address from the selected parcel point', async () => {
+  const calls = [];
+  const fetcher = async (url, init) => {
+    calls.push({ url: String(url), init });
+    if (String(url).includes('address=')) {
+      return new Response(JSON.stringify({ status: 'ZERO_RESULTS', results: [] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+    return new Response(JSON.stringify({
+      status: 'OK',
+      results: [{
+        formatted_address: '116 Wright Sims Road, Union, SC 29379, USA',
+        types: ['street_address'],
+        address_components: [
+          { short_name: '116', long_name: '116', types: ['street_number'] },
+          { short_name: 'Wright Sims Rd', long_name: 'Wright Sims Road', types: ['route'] },
+          { short_name: 'Union', long_name: 'Union', types: ['locality'] },
+          { short_name: 'SC', long_name: 'South Carolina', types: ['administrative_area_level_1'] },
+          { short_name: '29379', long_name: '29379', types: ['postal_code'] },
+        ],
+      }],
+    }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
+  };
+
+  const result = await addressResolver.resolveFullCarolinaPostalAddress({
+    addresses: ['116 WRIGHT-SIMS ROAD'],
+    coordinates: { lat: 34.79865, lng: -81.52509 },
+    countyName: 'Union, SC',
+    googleMapsKey: 'google-test-key',
+    fetcher,
+  });
+
+  assert.equal(result, '116 Wright Sims Road, Union, SC 29379');
+  assert.equal(calls.length, 2, 'forward geocode falls back to the exact parcel point');
+  assert.match(calls[0].url, /Union%20County%2C%20SC/);
+  assert.match(calls[1].url, /latlng=34\.79865,-81\.52509/);
+  assert.ok(calls.every((call) => call.init.cache === 'no-store'));
 });
 
 test('rejects a conflicting exact-address response', () => {
@@ -147,7 +197,7 @@ test('each button lookup makes a fresh no-store exact-match request', async () =
     assert.equal(call.init.cache, 'no-store');
     assert.equal(new Headers(call.init.headers).get('x-api-key'), 'test-key');
     assert.deepEqual(JSON.parse(call.init.body), {
-      address: '12901 Lanecrest Road, Midland, NC 28107',
+      address: '12901 Lanecrest Road, Midland NC 28107',
       exact_match: true,
       comps: false,
     });
@@ -180,7 +230,7 @@ test('Netlify proxy forwards only the exact address request and API key', async 
     assert.equal(captured.init.headers['x-api-key'], 'server-test-key');
     assert.equal(captured.init.cache, 'no-store');
     assert.deepEqual(JSON.parse(captured.init.body), {
-      address: '12901 Lanecrest Road, Midland, NC 28107',
+      address: '12901 Lanecrest Road, Midland NC 28107',
       exact_match: true,
       comps: false,
     });
@@ -197,10 +247,12 @@ test('report wiring is on-demand, left-column, and separate from RealtyAPI comps
 
   assert.doesNotMatch(background, /fetchRealEstatePropertyTransactions|fetchPropertyTransactions/);
   assert.match(component, /Pull Mortgage &amp; Sales History/);
+  assert.match(component, /await resolveFullCarolinaPostalAddress/);
   assert.ok(component.indexOf('Mortgage &amp; Sales Transactions') < component.indexOf('Land Information'));
   assert.doesNotMatch(component, /Mortgage &amp; Transactions — Enformion/);
   assert.match(settings, /realEstateApi: realEstateApiKey\.trim\(\)/);
   assert.match(settings, /This is separate from RealtyAPI\.io below/);
   assert.match(service, /realEstateApi\?: string/);
   assert.match(service, /realtyApi\?: string/);
+  assert.match(component, /handleSearch\(address, county\)/);
 });

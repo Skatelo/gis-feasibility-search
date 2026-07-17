@@ -7,6 +7,8 @@ import { normalizeSourcedRange } from '../data/sourcedEstimate';
 import { listingZoningEvidenceTier, zoningListingProvider } from '../data/zoningEvidence';
 import { cleanCode } from './zoning/normalization/zoning-normalizer';
 import { fetchGeminiZoningSearchEvidence, normalizeFullAddressForZoning } from './geminiZoningSearch';
+import { isFullCarolinaPostalAddress, resolveFullCarolinaPostalAddress } from './carolinaAddress';
+import { CensusGeocoder } from './zoning/geocoding/census-geocoder';
 
 export interface UserKeys {
   googleMaps?: string;
@@ -1482,6 +1484,29 @@ async function countyAtPoint(lat: number, lng: number): Promise<CountyAtPointRes
   } catch { return null; }
 }
 
+type CensusCarolinaMatch = CountyAtPointResult & { lat: number; lng: number };
+
+/** Keyless fallback for complete NC/SC addresses when Google is unavailable,
+ * denied, or rate-limited. The Census match supplies an address coordinate and
+ * county geography without persisting or caching the lookup. */
+async function censusCarolinaAddress(address: string): Promise<CensusCarolinaMatch | null> {
+  try {
+    const match = await new CensusGeocoder().geocode(address);
+    const stateCode = String(match.stateCode || '').toUpperCase();
+    if (stateCode !== 'NC' && stateCode !== 'SC') return null;
+
+    const state = stateCode as SupportedState;
+    const county = String(match.county || '').replace(/\s+County$/i, '').trim();
+    const names = state === 'NC' ? NC_COUNTY_NAMES : SC_COUNTY_NAMES;
+    const canonical = names.find((name) => name.toLowerCase() === county.toLowerCase());
+    if (!canonical || !Number.isFinite(match.latitude) || !Number.isFinite(match.longitude)) return null;
+
+    return { name: canonical, state, lat: match.latitude, lng: match.longitude };
+  } catch {
+    return null;
+  }
+}
+
 /**
  * The incorporated municipality (city/town) whose limits contain a coordinate,
  * via the U.S. Census TIGERweb "Incorporated Places" layer (point-in-polygon).
@@ -1505,37 +1530,48 @@ async function incorporatedPlaceAtPoint(lat: number, lng: number): Promise<strin
 }
 
 export async function detectNcCounty(address: string, googleKey: string): Promise<string | null> {
-  if (!googleKey || !address.trim()) return null;
-  try {
-    const url = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(address)}` +
-      `&key=${googleKey}`;
-    const res = await fetchWithTimeout(url, 8000, { cache: 'no-store' });
-    if (!res.ok) return null;
-    const data = await res.json();
-    if (data.status !== 'OK' || !data.results?.[0]) return null;
-    const r0 = data.results[0];
-    const comps = r0.address_components || [];
-    const state = comps.find((c: any) => c.types?.includes('administrative_area_level_1'));
-    const stateCode = String(state?.short_name || '').toUpperCase();
-    if (stateCode !== 'NC' && stateCode !== 'SC') return null;
+  if (!address.trim()) return null;
+  if (googleKey) {
+    try {
+      const url = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(address)}` +
+        `&key=${googleKey}`;
+      const res = await fetchWithTimeout(url, 8000, { cache: 'no-store' });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.status === 'OK' && data.results?.[0]) {
+          const r0 = data.results[0];
+          const comps = r0.address_components || [];
+          const state = comps.find((c: any) => c.types?.includes('administrative_area_level_1'));
+          const stateCode = String(state?.short_name || '').toUpperCase();
+          if (stateCode === 'NC' || stateCode === 'SC') {
+            // AUTHORITATIVE: the county whose boundary actually contains the
+            // geocoded point. Google's county component is only a fallback.
+            const loc = r0.geometry?.location;
+            if (loc && typeof loc.lat === 'number' && typeof loc.lng === 'number') {
+              const byPoint = await countyAtPoint(loc.lat, loc.lng);
+              if (byPoint) return `${byPoint.name}, ${byPoint.state}`;
+            }
 
-    // AUTHORITATIVE: the county whose boundary actually contains the geocoded
-    // point. Google's administrative_area_level_2 is frequently wrong near county
-    // lines or when the mailing city sits in a different county than the parcel.
-    const loc = r0.geometry?.location;
-    if (loc && typeof loc.lat === 'number' && typeof loc.lng === 'number') {
-      const byPoint = await countyAtPoint(loc.lat, loc.lng);
-      if (byPoint) return `${byPoint.name}, ${byPoint.state}`;
+            const countyComp = comps.find((c: any) => c.types?.includes('administrative_area_level_2'));
+            const county = String(countyComp?.long_name || countyComp?.short_name || '')
+              .replace(/\s+County$/i, '')
+              .trim();
+            const names = stateCode === 'NC' ? NC_COUNTY_NAMES : SC_COUNTY_NAMES;
+            const canonical = names.find((name) => name.toLowerCase() === county.toLowerCase());
+            if (canonical) return `${canonical}, ${stateCode as SupportedState}`;
+          }
+        }
+      }
+    } catch {
+      // Continue to the keyless Census address/geography lookup.
     }
+  }
 
-    // Fallback only: Google's county component.
-    const countyComp = comps.find((c: any) => c.types?.includes('administrative_area_level_2'));
-    if (!countyComp) return null;
-    const county = String(countyComp.long_name || countyComp.short_name || '').replace(/\s+County$/i, '').trim();
-    const names = stateCode === 'NC' ? NC_COUNTY_NAMES : SC_COUNTY_NAMES;
-    const canonical = names.find((n) => n.toLowerCase() === county.toLowerCase());
-    return canonical ? `${canonical}, ${stateCode as SupportedState}` : null;
-  } catch { return null; }
+  const census = await censusCarolinaAddress(address);
+  if (!census) return null;
+  const byPoint = await countyAtPoint(census.lat, census.lng);
+  const county = byPoint || census;
+  return `${county.name}, ${county.state}`;
 }
 
 /**
@@ -1647,15 +1683,18 @@ export async function executeLandAnalysis(
 
   if (!lng || !lat) {
     const googleApiKey = getUserKeys().googleMaps;
-    if (!googleApiKey) {
-      throw new Error("Google Maps API Key is required to geocode address coordinates. Please set it in Account Settings.");
-    }
-    const googleCoords = await geocodeAddress(addressString, googleApiKey);
+    const googleCoords = googleApiKey ? await geocodeAddress(addressString, googleApiKey) : null;
     if (googleCoords) {
       lng = googleCoords.lng;
       lat = googleCoords.lat;
     } else {
-      throw new Error("No geographic locations found matching this address. Neither the NC Geocoder nor the Google geocoding fallback could resolve it.");
+      const censusCoords = await censusCarolinaAddress(addressString);
+      if (censusCoords && censusCoords.state === selectedState) {
+        lng = censusCoords.lng;
+        lat = censusCoords.lat;
+      } else {
+        throw new Error("No geographic locations found matching this address. The state, Google, and Census geocoders could not resolve an exact NC or SC property location.");
+      }
     }
   }
 
@@ -2270,7 +2309,9 @@ export async function executeLandAnalysis(
   // and comps stream in afterwards via further onPartial() emissions.
   // -------------------------------------------------------------------------
   const baseResult: SiteFeasibilityData = {
-    inputAddress: info.siteadd || addressString,
+    // Preserve a complete searched address. County GIS situs fields are often
+    // street-only and previously poisoned history and exact-address lookups.
+    inputAddress: isFullCarolinaPostalAddress(addressString) ? addressString : (info.siteadd || addressString),
     parcelId: info.parno || "N/A",
     countyName: countyName,
     grossSf,
@@ -2320,6 +2361,7 @@ export async function executeLandAnalysis(
   // STAGE 3 - zoning. Search the complete postal address with Google Custom
   // Search, then let Gemini 3.5 Flash read only those result URLs and populate
   // the existing Zoning & Allowances card.
+  let resolvedPostalAddress = baseResult.inputAddress;
   {
     onStageChange?.("Searching zoning for the full address...");
     // The searched/selected text is frequently street-only (an NC statewide
@@ -2327,12 +2369,15 @@ export async function executeLandAnalysis(
     // "<street>, United States" and no city/state/ZIP to match — so it returned
     // no district. Resolve the COMPLETE postal address from the geocoded point
     // first, for every address, then normalize it for the search.
-    const zoningQueryAddress = await resolveFullPostalAddress(
-      addressString,
-      lat,
-      lng,
-      (getUserKeys().googleMaps || '').trim(),
-    );
+    const zoningQueryAddress = await resolveFullCarolinaPostalAddress({
+      addresses: [addressString, info.siteadd],
+      coordinates: { lat, lng },
+      countyName,
+      googleMapsKey: (getUserKeys().googleMaps || '').trim(),
+    });
+    if (isFullCarolinaPostalAddress(zoningQueryAddress)) {
+      resolvedPostalAddress = zoningQueryAddress;
+    }
     const fullZoningAddress = normalizeFullAddressForZoning(zoningQueryAddress || addressString);
     const statusForZoningResult = (result: ZoningResult): SiteFeasibilityData['zoningVerificationStatus'] => {
       if (result.matchMethod === 'parcel-gis') return 'official-gis';
@@ -2484,6 +2529,7 @@ export async function executeLandAnalysis(
 
   gridics = buildGridics();
   onPartial?.({
+    inputAddress: resolvedPostalAddress,
     zoningCode,
     zoningDescription,
     zoningSource,
@@ -2537,6 +2583,7 @@ export async function executeLandAnalysis(
 
   return {
     ...baseResult,
+    inputAddress: resolvedPostalAddress,
     zoningCode,
     zoningDescription,
     zoningSource,
@@ -4278,67 +4325,6 @@ function matchesAllowedTypes(prettyType: string | undefined, allowed: CompBuildi
   if (bucket === 'land') return false;
   if (bucket === 'unknown') return true;
   return allowed.includes(bucket);
-}
-
-/** Resolve a COMPLETE "street, city, ST ZIP" postal address for the zoning
- *  search. The searched/selected text is frequently street-only (an NC
- *  statewide-geocoder suggestion especially), which left the exact-address
- *  zoning lookup with nothing but the street + country and so returned no
- *  district. Forward-geocoding the searched text recovers the full postal form
- *  (keeping the street, adding the city/state/ZIP); if that is too generic we
- *  reverse-geocode the resolved parcel point. Falls back to the raw input when
- *  Google geocoding is unavailable. */
-async function resolveFullPostalAddress(
-  rawAddress: string,
-  lat: number,
-  lng: number,
-  apiKey: string,
-): Promise<string> {
-  const pickFull = (results: unknown): string => {
-    const list = Array.isArray(results) ? results : [];
-    const best = list.find((r: any) =>
-      r?.types?.some((t: string) => ['street_address', 'premise', 'subpremise'].includes(t)),
-    ) || list[0];
-    const comps = (best as any)?.address_components || [];
-    const hasCity = comps.some((c: any) =>
-      c?.types?.some((t: string) => ['locality', 'postal_town', 'sublocality'].includes(t)),
-    );
-    const stateShort = String(
-      comps.find((c: any) => c?.types?.includes('administrative_area_level_1'))?.short_name || '',
-    ).toUpperCase();
-    if (!hasCity || (stateShort !== 'NC' && stateShort !== 'SC')) return '';
-    return String((best as any)?.formatted_address || '').replace(/,?\s*USA$/i, '').trim();
-  };
-
-  // 1) Forward-geocode the searched text — keeps the street line and fills in
-  //    the missing city/state/ZIP.
-  if (apiKey && rawAddress.trim()) {
-    try {
-      const url = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(rawAddress)}&components=country:US&key=${apiKey}`;
-      const res = await fetchWithTimeout(url, 8000, { cache: 'no-store' });
-      if (res.ok) {
-        const full = pickFull((await res.json()).results);
-        if (full) return full;
-      }
-    } catch { /* fall through to reverse geocode */ }
-  }
-
-  // 2) Reverse-geocode the resolved point (covers parcel-ID / known-coords runs).
-  if (apiKey && Number.isFinite(lat) && Number.isFinite(lng) && (lat !== 0 || lng !== 0)) {
-    try {
-      const res = await fetchWithTimeout(
-        `https://maps.googleapis.com/maps/api/geocode/json?latlng=${lat},${lng}&key=${apiKey}`,
-        8000,
-        { cache: 'no-store' },
-      );
-      if (res.ok) {
-        const full = pickFull((await res.json()).results);
-        if (full) return full;
-      }
-    } catch { /* fall through */ }
-  }
-
-  return rawAddress;
 }
 
 async function geocodeAddress(address: string, apiKey: string): Promise<{ lat: number; lng: number } | null> {

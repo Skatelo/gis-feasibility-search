@@ -6,6 +6,7 @@ import type { SkipTraceContact } from '../services/feasibilityService';
 import type { ChatMessage, ChatAttachment } from '../services/feasibilityService';
 import { fetchRealEstatePropertyTransactions } from '../services/realEstateApiProperty';
 import type { RealEstatePropertyTransactions } from '../services/realEstateApiProperty';
+import { resolveFullCarolinaPostalAddress } from '../services/carolinaAddress';
 import { saveReport, getReportEtaMs, recordReportDuration } from '../services/reportStore';
 import { listConversations, saveConversation, deleteConversation as deleteConvo, newConversationId, deriveTitle } from '../services/chatStore';
 import type { ChatConversation } from '../services/chatStore';
@@ -988,8 +989,16 @@ export const FeasibilitySearch: FC = () => {
     setPropertyTransactions(null);
     setPropertyTransactionsError('');
     setPropertyTransactionsLoading(true);
-    const fullAddress = (searchedAddressRef.current || reportData.inputAddress || '').trim();
     try {
+      const fullAddress = await resolveFullCarolinaPostalAddress({
+        addresses: [searchedAddressRef.current, reportData.inputAddress],
+        coordinates: reportData.coordinates,
+        countyName: reportData.countyName,
+        googleMapsKey: getUserKeys().googleMaps,
+      });
+      // Legacy history and parcel-ID searches can carry only the assessor's
+      // street line. Keep retries on the exact postal address we just resolved.
+      searchedAddressRef.current = fullAddress;
       const records = await fetchRealEstatePropertyTransactions(fullAddress, getRealEstateApiKey());
       if (seq !== searchSeqRef.current) return;
       setPropertyTransactions(records);
@@ -3108,9 +3117,10 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
 
   const handleHistoryClick = (item: any) => {
     const address = typeof item === 'string' ? item : item.address;
+    const county = typeof item === 'string' ? undefined : item.county || undefined;
     setSearchMode('address');
     setAddressInput(address);
-    handleSearch(address);
+    handleSearch(address, county);
   };
 
   const handleCopy = (text: string, id: string) => {
