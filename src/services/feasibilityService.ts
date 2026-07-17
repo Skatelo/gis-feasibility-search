@@ -6446,10 +6446,12 @@ Return ONLY JSON: {"small":<int>,"medium":<int>,"large":<int>,"canopyCoverPct":<
   const parts: any[] = [{ text: prompt }];
   imgs.forEach((img) => parts.push({ inline_data: { mime_type: img.mimeType, data: img.data } }));
   const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=${geminiKey}`;
-  // maxOutputTokens must be LARGE: on thinking models the internal reasoning
-  // tokens count against this budget — 800 made every answer stop at
-  // MAX_TOKENS mid-JSON ("the satellite tree count didn't answer").
-  const body = JSON.stringify({ contents: [{ role: 'user', parts }], generationConfig: { temperature: 0, responseMimeType: 'application/json', maxOutputTokens: 8192 } });
+  // Counting trees from an image is pure visual classification, so thinking is
+  // turned OFF (thinkingBudget: 0). gemini-3.5-flash defaults to `medium`
+  // thinking, which only added latency AND sometimes consumed the whole response
+  // so no JSON came back ("the satellite tree count didn't answer"). With thinking
+  // off the model returns clean JSON in ~1.5s (vs ~4-5s) on every attempt.
+  const body = JSON.stringify({ contents: [{ role: 'user', parts }], generationConfig: { temperature: 0, responseMimeType: 'application/json', maxOutputTokens: 8192, thinkingConfig: { thinkingBudget: 0 } } });
   // 4 attempts with real backoff. The tree count fires alongside the cost
   // estimate, takeoff, utilities and report generation — all on the same
   // Gemini key — so a free-tier per-minute rate limit (429) is the most common
