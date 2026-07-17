@@ -7855,7 +7855,12 @@ ${reportData.comps && reportData.comps.length > 0
   const baseBody = {
     contents,
     systemInstruction: { parts: [{ text: systemPrompt }] },
-    generationConfig: { maxOutputTokens: 32768, temperature: 1 },
+    // 'low' thinking: the report SYNTHESIZES the provided data packet + explicit
+    // pro-forma formulas rather than reasoning open-endedly, so low thinking keeps
+    // the financial math exact (verified) while cutting latency ~35% AND freeing
+    // the 32k budget that medium thinking otherwise burned (the cause of the
+    // occasional empty "No response generated.").
+    generationConfig: { maxOutputTokens: 32768, temperature: 1, thinkingConfig: { thinkingLevel: 'low' } },
     ...(researchUrls.length ? {} : { tools: [{ google_search: {} }] }),
   };
 
