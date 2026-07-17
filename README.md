@@ -13,6 +13,7 @@ A high-performance real estate feasibility screening dashboard built with React,
 * **Zoning & Allowances**: sends the complete NC or SC address to Gemini 3.5 Flash with Google Search grounding to return a source-backed district, setbacks, restrictions, and allowances.
 * **Hybrid Live Web Data**: the Perplexity Search API handles non-zoning ranked searches and source discovery; a bounded Crawlee scraper reads harder utility, fee, cost, and report sources plus linked PDF, DOCX, XLSX, CSV, JSON, XML, and text documents.
 * **Comparable Sold Listings**: Scrapes verified sold properties from Realtor.com via Google Search grounding to calculateDeveloped After Repair Value (ARV).
+* **Mortgage & Sales Transactions**: Runs an explicit, on-demand RealEstateAPI.com Property Detail lookup for the exact NC or SC address and displays recorded mortgage and sale history in the left report column.
 * **Interactive Gemini Q&A Chatbot**: A contextual chatbot capable of explaining setbacks, zoning rules, or construction options utilizing the current parcel context.
 * **Printable Feasibility Report**: Generates vector PDF-ready feasibility reports for wholesalers and developers.
 
@@ -40,6 +41,12 @@ Crawlee runs inside the Netlify backend and does not require a separate API key.
 The crawler uses HTTP + Cheerio rather than a browser for speed. Each run is limited by page count, crawl depth, concurrency, request timeout, and a 12 MB response cap. It follows only relevant same-site links, respects `robots.txt`, blocks private-network targets, and is rate-limited per visitor in production.
 
 For local testing of the crawler endpoint, use `npx netlify dev`. Plain `npm run dev` still supports Perplexity search, but it does not execute Netlify functions.
+
+## Mortgage & Sales History
+
+The left-side **Mortgage & Sales Transactions** card does not run during a normal parcel search. Press **Pull Mortgage & Sales History** to make a fresh, uncached RealEstateAPI.com Property Detail request for the complete NC or SC address.
+
+Configure `REALESTATEAPI_KEY` as a Netlify server environment variable, or add a personal RealEstateAPI.com key in **Account & API Settings**. Plain `npm run dev` forwards the same route to the official Property Detail endpoint and uses the personal key. The existing `realtyApi` setting remains separate and continues to power Realtor/Redfin/Zillow comps through RealtyAPI.io.
 
 ## Zoning Search
 
