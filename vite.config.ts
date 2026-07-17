@@ -22,6 +22,14 @@ export default defineConfig({
         changeOrigin: true,
         rewrite: () => '/search',
       },
+      // Property Detail includes mortgageHistory and saleHistory. Production
+      // uses the Netlify function at this route; local Vite forwards the same
+      // request directly so the feature can be exercised without netlify dev.
+      '/.netlify/functions/realestateapi-property': {
+        target: 'https://api.realestateapi.com',
+        changeOrigin: true,
+        rewrite: () => '/v2/PropertyDetail',
+      },
     },
   },
 })

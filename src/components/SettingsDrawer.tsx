@@ -32,6 +32,8 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
   const [enformionName, setEnformionName] = useState('');
   const [enformionPassword, setEnformionPassword] = useState('');
   const [showEnformionPassword, setShowEnformionPassword] = useState(false);
+  const [realEstateApiKey, setRealEstateApiKey] = useState('');
+  const [showRealEstateApiKey, setShowRealEstateApiKey] = useState(false);
   const [realtyApiKey, setRealtyApiKey] = useState('');
   const [showRealtyKey, setShowRealtyKey] = useState(false);
   const [deepSeekKey, setDeepSeekKey] = useState('');
@@ -60,6 +62,7 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
       setMapboxToken(activeUser.keys?.mapbox || '');
       setEnformionName(activeUser.keys?.enformionApName || '');
       setEnformionPassword(activeUser.keys?.enformionApPassword || '');
+      setRealEstateApiKey(activeUser.keys?.realEstateApi || '');
       setRealtyApiKey(activeUser.keys?.realtyApi || '');
       setDeepSeekKey(activeUser.keys?.deepSeek || '');
       setRentCastKey(activeUser.keys?.rentCast || '');
@@ -96,6 +99,7 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
       mapbox: mapboxToken.trim(),
       enformionApName: enformionName.trim(),
       enformionApPassword: enformionPassword.trim(),
+      realEstateApi: realEstateApiKey.trim(),
       realtyApi: realtyApiKey.trim(),
       deepSeek: deepSeekKey.trim(),
       rentCast: rentCastKey.trim()
@@ -357,6 +361,33 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
                 </button>
               </div>
               <p className="field-help">Enformion Go API access-profile PASSWORD (paired with the AP Name above).</p>
+            </div>
+
+            {/* RealEstateAPI.com Property Detail: on-demand mortgage and sale history */}
+            <div className="settings-field-group">
+              <div className="field-label-row">
+                <label htmlFor="realEstateApiKey">RealEstateAPI.com Key (mortgage &amp; sales history)</label>
+                <span className="badge optional">Optional</span>
+              </div>
+              <div className="field-input-container">
+                <Key className="input-icon" size={16} />
+                <input
+                  id="realEstateApiKey"
+                  type={showRealEstateApiKey ? "text" : "password"}
+                  placeholder="RealEstateAPI.com key..."
+                  value={realEstateApiKey}
+                  onChange={(e) => setRealEstateApiKey(e.target.value)}
+                />
+                <button
+                  type="button"
+                  className="field-toggle-btn"
+                  onClick={() => setShowRealEstateApiKey(!showRealEstateApiKey)}
+                  title={showRealEstateApiKey ? 'Hide RealEstateAPI.com key' : 'Show RealEstateAPI.com key'}
+                >
+                  {showRealEstateApiKey ? <EyeOff size={16} /> : <Eye size={16} />}
+                </button>
+              </div>
+              <p className="field-help">Used only when you press Pull Mortgage &amp; Sales History in a property report. It calls RealEstateAPI.com Property Detail for the exact full NC or SC address; normal address searches do not consume these API credits. This is separate from RealtyAPI.io below.</p>
             </div>
 
             {/* RealtyAPI Key (Realtor + Redfin + Zillow sold records) */}

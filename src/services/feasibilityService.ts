@@ -21,6 +21,9 @@ export interface UserKeys {
   perplexity?: string;
   /** Mapbox public access token (pk.…) — satellite base map for the parcel aerial view. */
   mapbox?: string;
+  /** RealEstateAPI.com Property Detail key for on-demand mortgage and sale history. */
+  realEstateApi?: string;
+  /** RealtyAPI.io key for Realtor, Redfin, and Zillow comp records. */
   realtyApi?: string;
   deepSeek?: string;
   rentCast?: string;
@@ -4892,6 +4895,14 @@ function getRealtyApiKey(): string {
     ? import.meta.env.VITE_REALTYAPI_KEY
     : (globalThis as any).process?.env?.VITE_REALTYAPI_KEY;
   return getUserKeys().realtyApi || (envVar as string | undefined) || "";
+}
+
+/** RealEstateAPI.com key used only by the explicit mortgage/sales history button. */
+export function getRealEstateApiKey(): string {
+  const envVar = (typeof import.meta !== 'undefined' && import.meta.env)
+    ? import.meta.env.VITE_REALESTATEAPI_KEY
+    : (globalThis as any).process?.env?.VITE_REALESTATEAPI_KEY;
+  return (getUserKeys().realEstateApi || (envVar as string | undefined) || '').trim();
 }
 
 function getDeepSeekKey(): string {

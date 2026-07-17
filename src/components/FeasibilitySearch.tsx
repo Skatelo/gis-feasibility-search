@@ -1,9 +1,11 @@
 import { useState, useEffect, useRef } from 'react';
 import type { FormEvent, KeyboardEvent, FC } from 'react';
 import { createRoot } from 'react-dom/client';
-import { executeLandAnalysis, chatWithGemini, chatFollowUp, getUserKeys, getMapboxToken, detectNcCounty, lookupParcelById, fetchConstructionCostEstimate, fetchLandClearingEstimate, fetchUtilitiesEstimate, fetchGoogleDistanceMatrixComps, fetchParcelsInBbox, getCompPrefs, getReportAutoGenerate, clearAddressSearchCache, enformionConfigured, enformionContactEnrich, enformionPersonSearch, enformionBusinessSearch, looksLikeBusiness, enformionDiagMessage, getLastEnformionShape, getLastEnformionDetail, enformionPropertySearch, ncAddressSuggestions } from '../services/feasibilityService';
-import type { SkipTraceContact, EnformionPropertyRecord } from '../services/feasibilityService';
+import { executeLandAnalysis, chatWithGemini, chatFollowUp, getUserKeys, getMapboxToken, getRealEstateApiKey, detectNcCounty, lookupParcelById, fetchConstructionCostEstimate, fetchLandClearingEstimate, fetchUtilitiesEstimate, fetchGoogleDistanceMatrixComps, fetchParcelsInBbox, getCompPrefs, getReportAutoGenerate, clearAddressSearchCache, enformionConfigured, enformionContactEnrich, enformionPersonSearch, enformionBusinessSearch, looksLikeBusiness, enformionDiagMessage, getLastEnformionShape, getLastEnformionDetail, ncAddressSuggestions } from '../services/feasibilityService';
+import type { SkipTraceContact } from '../services/feasibilityService';
 import type { ChatMessage, ChatAttachment } from '../services/feasibilityService';
+import { fetchRealEstatePropertyTransactions } from '../services/realEstateApiProperty';
+import type { RealEstatePropertyTransactions } from '../services/realEstateApiProperty';
 import { saveReport, getReportEtaMs, recordReportDuration } from '../services/reportStore';
 import { listConversations, saveConversation, deleteConversation as deleteConvo, newConversationId, deriveTitle } from '../services/chatStore';
 import type { ChatConversation } from '../services/chatStore';
@@ -29,6 +31,19 @@ const optionalCurrency = (value?: number): string =>
   typeof value === 'number' && Number.isFinite(value)
     ? `$${new Intl.NumberFormat().format(value)}`
     : 'Unavailable';
+
+const recordCurrency = (value?: number): string | null =>
+  typeof value === 'number' && Number.isFinite(value) && value > 0
+    ? new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 }).format(value)
+    : null;
+
+const recordDate = (value?: string): string => {
+  if (!value) return '';
+  const parsed = new Date(`${value.slice(0, 10)}T00:00:00Z`);
+  return Number.isNaN(parsed.getTime())
+    ? value
+    : parsed.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
+};
 
 const ownerMapLabel = (data: SiteFeasibilityData): string | null => {
   if (!data.ownerName) return null;
@@ -738,13 +753,12 @@ export const FeasibilitySearch: FC = () => {
   const [utilities, setUtilities] = useState<UtilitiesEstimate | null>(null);
   const [utilitiesLoading, setUtilitiesLoading] = useState(false);
   const [utilitiesError, setUtilitiesError] = useState('');
-  // Enformion Property Search V2 for the searched address — deed owners,
-  // recorded mortgages & sale transactions.
-  const [enfProperty, setEnfProperty] = useState<EnformionPropertyRecord | null>(null);
-  const [enfLoading, setEnfLoading] = useState(false);
-  const [enfErrors, setEnfErrors] = useState<{ property?: string }>({});
-  const enfIdle = !enfProperty && !enfErrors.property && !enfLoading;
-  const showEnformionPropertyPanel: boolean = false;
+  // RealEstateAPI.com Property Detail is intentionally on-demand. A normal
+  // address search never consumes mortgage/sale-history credits.
+  const [propertyTransactions, setPropertyTransactions] = useState<RealEstatePropertyTransactions | null>(null);
+  const [propertyTransactionsLoading, setPropertyTransactionsLoading] = useState(false);
+  const [propertyTransactionsError, setPropertyTransactionsError] = useState('');
+  const propertyTransactionsIdle = !propertyTransactions && !propertyTransactionsError && !propertyTransactionsLoading;
   // Manual report mode: report awaits the "Generate AI Report" button
   const [reportPending, setReportPending] = useState(false);
   // Owner skip trace (Enformion) — phones/emails for the parcel owner
@@ -773,9 +787,9 @@ export const FeasibilitySearch: FC = () => {
 
   // Monotonic search sequence — partial emissions from a superseded search are ignored.
   const searchSeqRef = useRef(0);
-  // The address as the user searched it (usually "street, city, NC zip") — the
-  // GIS situs address in reportData.inputAddress is often street-only, so
-  // Enformion gets its city/state/zip from this.
+  // The address as the user searched it (usually "street, city, state zip").
+  // GIS situs fields are often street-only, so paid exact-address lookups use
+  // this complete value instead.
   const searchedAddressRef = useRef('');
 
   // Chatbot states
@@ -967,45 +981,27 @@ export const FeasibilitySearch: FC = () => {
       .finally(() => { if (seq === searchSeqRef.current) setUtilitiesLoading(false); });
   };
 
-  // Enformion Property Search V2 for the searched address — deed, current
-  // owners, recorded MORTGAGES & sale TRANSACTIONS. Called directly against
-  // Enformion's CORS-enabled API (no serverless proxy in the hot path).
-  const fetchEnformionRecords = async (reportData: SiteFeasibilityData, seq: number) => {
-    setEnfProperty(null);
-    setEnfErrors({});
-    setEnfLoading(false);
-    const addr = (reportData.inputAddress || '').trim();
-    if (!enformionConfigured() || !addr) return;
-    setEnfLoading(true);
-
-    // The REAL failure reason: base status message plus Enformion's own error
-    // text (validation messages, input errors).
-    const errOf = (fallback: string) => {
-      const detail = getLastEnformionDetail();
-      // Enformion's per-key permission wall: the search type isn't enabled on
-      // this API Access Profile. Give the exact fix instead of a raw error.
-      const m = detail.match(/Access Profile does not permit client to call\s*([^.·]+)/i);
-      if (m) {
-        return `Your Enformion API Access Profile doesn't have "${m[1].trim()}" enabled. This is a per-key permission: log in at api.enformion.com → Keys, or email supportgo@enformion.com and ask them to enable ${m[1].trim()} on your access profile — then hit Retry.`;
-      }
-      const base = enformionDiagMessage() || fallback;
-      return detail && !base.includes(detail) ? `${base}\n${detail}` : base;
-    };
-
+  // Pulls mortgage and sale history only after an explicit button press. The
+  // same-origin route uses a deployment key when present, or relays the user's
+  // personal RealEstateAPI.com key without storing or caching the response.
+  const fetchPropertyTransactions = async (reportData: SiteFeasibilityData, seq: number) => {
+    setPropertyTransactions(null);
+    setPropertyTransactionsError('');
+    setPropertyTransactionsLoading(true);
+    const fullAddress = (searchedAddressRef.current || reportData.inputAddress || '').trim();
     try {
-      let rec: EnformionPropertyRecord | null = null;
-      try {
-        rec = await enformionPropertySearch(
-          addr,
-          searchedAddressRef.current,
-          reportData.coordinates ? { lat: reportData.coordinates.lat, lng: reportData.coordinates.lng } : undefined,
-        );
-      } catch { /* handled below */ }
+      const records = await fetchRealEstatePropertyTransactions(fullAddress, getRealEstateApiKey());
       if (seq !== searchSeqRef.current) return;
-      if (rec) setEnfProperty(rec);
-      else setEnfErrors({ property: errOf('Property record search failed — please try again.') });
+      setPropertyTransactions(records);
+    } catch (error) {
+      if (seq !== searchSeqRef.current) return;
+      setPropertyTransactionsError(
+        error instanceof Error
+          ? error.message
+          : 'The mortgage and sales history lookup failed. Retry this on-demand request.',
+      );
     } finally {
-      if (seq === searchSeqRef.current) setEnfLoading(false);
+      if (seq === searchSeqRef.current) setPropertyTransactionsLoading(false);
     }
   };
 
@@ -2963,7 +2959,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
 
     const seq = ++searchSeqRef.current; // invalidates any in-flight previous search
     clearAddressSearchCache(); // repeat submissions must perform fresh geocode/zoning/comp lookups
-    searchedAddressRef.current = addressToSearch.trim(); // full "street, city, state" for Enformion
+    searchedAddressRef.current = addressToSearch.trim(); // full address for exact-address lookups
     // Comp-search preferences (Account & API Settings) drive the search radius +
     // the initial property-type filter for this run.
     const compPrefs = getCompPrefs();
@@ -2980,9 +2976,9 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
     setUtilities(null);
     setUtilitiesLoading(false);
     setUtilitiesError('');
-    setEnfProperty(null);
-    setEnfErrors({});
-    setEnfLoading(false);
+    setPropertyTransactions(null);
+    setPropertyTransactionsError('');
+    setPropertyTransactionsLoading(false);
     setOwnerSkip(null);
     setOwnerSkipError('');
     setOwnerSkipLoading(false);
@@ -3031,12 +3027,12 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
       if (seq !== searchSeqRef.current) return;
       setData(result);
       addToHistory(result.inputAddress, county);
-      // Kick off the per-parcel lookups (tree clearing, utilities, Enformion).
+      // Kick off the free/background per-parcel lookups (tree clearing and utilities).
       // The construction-cost estimate itself waits behind its "Generate Cost
       // Estimate" button, so estPromise resolves null immediately — if the user
       // generates it BEFORE the report, startReportManually links its figures
       // into the report's Development Cost section.
-      generateCostEstimates(result, seq); // land-clearing / utilities / enformion
+      generateCostEstimates(result, seq); // land-clearing / utilities only
       // Manual mode: don't auto-run the report — show a "Generate AI Report" button.
       if (!getReportAutoGenerate()) {
         setReportPending(true);
@@ -3673,174 +3669,192 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                 </div>
               </div>
 
-              {/* Enformion Property Search V2: deed owners, recorded mortgages
-                  & sale transactions for the searched address. */}
-              {showEnformionPropertyPanel && enformionConfigured() && (
-                <div className="card registry-card enf-records-card">
-                  <h3 className="registry-card-header" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                    <FileText size={16} style={{ color: 'var(--primary)' }} />
-                    <span>Mortgage &amp; Transactions — Enformion</span>
-                    {(enfProperty || enfErrors.property) && (
+              {/* RealEstateAPI.com Property Detail: explicit, fresh mortgage and
+                  sale-history lookup for the exact full address. */}
+              <div className="card registry-card property-records-card">
+                <h3 className="registry-card-header property-records-header">
+                  <Landmark size={16} />
+                  <span className="property-records-title">Mortgage &amp; Sales Transactions</span>
+                  <span className="property-records-mode">On demand</span>
+                  {(propertyTransactions || propertyTransactionsError) && (
                     <button
                       type="button"
                       className="enf-retry-btn"
-                      title="Re-run the Enformion record searches"
-                      disabled={enfLoading}
-                      onClick={() => { if (data) fetchEnformionRecords(data, searchSeqRef.current); }}
+                      title="Run a fresh RealEstateAPI.com Property Detail request"
+                      disabled={propertyTransactionsLoading}
+                      onClick={() => fetchPropertyTransactions(data, searchSeqRef.current)}
                     >
-                      {enfLoading ? <Loader2 size={13} className="spinner" /> : <History size={13} />}
-                      <span>{enfLoading ? 'Searching…' : 'Retry'}</span>
+                      {propertyTransactionsLoading ? <Loader2 size={13} className="spinner" /> : <History size={13} />}
+                      <span>{propertyTransactionsLoading ? 'Searching…' : 'Retry'}</span>
                     </button>
-                    )}
-                  </h3>
-                  {enfLoading && (
-                    <div className="enf-loading"><Loader2 size={14} className="spinner" /><span>Pulling deed, mortgage &amp; transaction records…</span></div>
                   )}
-                  {enfIdle && (
-                    <div className="enf-empty" style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: '8px', marginTop: '6px' }}>
-                      <div>Deed, mortgage, and transaction records can be retrieved from Enformion for this property address.</div>
-                      <button
-                        type="button"
-                        className="owner-skip-btn"
-                        disabled={enfLoading}
-                        onClick={() => { if (data) fetchEnformionRecords(data, searchSeqRef.current); }}
-                      >
-                        <Database size={14} />
-                        <span>Pull Deed, Mortgage &amp; Transactions</span>
-                      </button>
-                    </div>
-                  )}
+                </h3>
 
-                  {/* Deep assessor data (Property Search V2): APN & parcel
-                      identification, land-use / property-type flags, exact
-                      acreage & land sqft, and the structural characteristics —
-                      the raw-land vs. improved signal straight from county
-                      assessor files. */}
-                  {!enfIdle && (
-                    <>
-                  {enfProperty && (
-                    <div className="enf-section">
-                      <div className="enf-section-head">
-                        <LayoutGrid size={14} />
-                        <span>Assessor Data &amp; Parcel Identification</span>
-                        <span
-                          className="enf-count-pill"
-                          title={enfProperty.isVacantLand
-                            ? 'County records show a vacant/unimproved land-use flag and/or 0 structural sqft — raw land with no house or building on it.'
-                            : 'County records show a structure on this parcel.'}
-                          style={enfProperty.isVacantLand
-                            ? { background: 'var(--success-bg, #dcfce7)', color: 'var(--success, #16a34a)', border: '1px solid var(--success-border, #86efac)' }
-                            : { background: 'var(--warning-bg, #fef3c7)', color: 'var(--warning-text, #92400e)', border: '1px solid var(--warning-border, #fcd34d)' }}
-                        >
-                          {enfProperty.isVacantLand ? 'Raw / vacant land' : 'Improved — structure on record'}
-                        </span>
-                      </div>
-                      {enfProperty.apn && (
-                        <div className="enf-kv"><span className="k">APN (Assessor's Parcel #)</span><span className="v">{enfProperty.apn}{enfProperty.apnUnformatted && enfProperty.apnUnformatted !== enfProperty.apn ? ` · raw ${enfProperty.apnUnformatted}` : ''}</span></div>
-                      )}
-                      {(enfProperty.county || enfProperty.fips) && (
-                        <div className="enf-kv"><span className="k">County / FIPS</span><span className="v">{[enfProperty.county, enfProperty.fips && `FIPS ${enfProperty.fips}`].filter(Boolean).join(' · ')}</span></div>
-                      )}
-                      {enfProperty.legalDescription && (
-                        <div className="enf-kv"><span className="k">Legal description</span><span className="v">{enfProperty.legalDescription}</span></div>
-                      )}
-                      {enfProperty.zoning && (
-                        <div className="enf-kv"><span className="k">Zoning flag (assessor)</span><span className="v">{enfProperty.zoning}</span></div>
-                      )}
-                      {(enfProperty.landUse || enfProperty.landUseCode) && (
-                        <div className="enf-kv"><span className="k">Land use</span><span className="v">{enfProperty.landUse || '—'}{enfProperty.landUseCode ? ` (code ${enfProperty.landUseCode})` : ''}</span></div>
-                      )}
-                      {enfProperty.propertyType && (
-                        <div className="enf-kv"><span className="k">Property type flag</span><span className="v">{enfProperty.propertyType}</span></div>
-                      )}
-                      {(enfProperty.lotAcres > 0 || enfProperty.lotSqft > 0) && (
-                        <div className="enf-kv"><span className="k">Parcel size (assessor)</span><span className="v">{[enfProperty.lotAcres > 0 && `${enfProperty.lotAcres.toLocaleString(undefined, { maximumFractionDigits: 3 })} acres`, enfProperty.lotSqft > 0 && `${enfProperty.lotSqft.toLocaleString()} sqft land`].filter(Boolean).join(' · ')}</span></div>
-                      )}
-                      <div className="enf-kv"><span className="k">Structure sqft</span><span className="v">{enfProperty.buildingSqft > 0 ? `${enfProperty.buildingSqft.toLocaleString()} sqft` : '0 — no building on record'}</span></div>
-                      {enfProperty.yearBuilt > 0 && (
-                        <div className="enf-kv"><span className="k">Year built</span><span className="v">{enfProperty.yearBuilt}</span></div>
-                      )}
-                      {(enfProperty.beds > 0 || enfProperty.baths > 0) && (
-                        <div className="enf-kv"><span className="k">Beds / baths</span><span className="v">{[enfProperty.beds > 0 && `${enfProperty.beds} bed`, enfProperty.baths > 0 && `${enfProperty.baths} bath${enfProperty.bathsPartial > 0 ? ` + ${enfProperty.bathsPartial} half` : ''}`].filter(Boolean).join(' / ')}</span></div>
-                      )}
-                      {enfProperty.stories && (
-                        <div className="enf-kv"><span className="k">Stories</span><span className="v">{enfProperty.stories}</span></div>
-                      )}
-                      {(enfProperty.construction || enfProperty.exteriorWalls) && (
-                        <div className="enf-kv"><span className="k">Construction</span><span className="v">{[enfProperty.construction, enfProperty.exteriorWalls].filter(Boolean).join(' · ')}</span></div>
-                      )}
-                      <div style={{ fontSize: '0.68rem', color: 'var(--text-muted)', marginTop: '6px', lineHeight: 1.45 }}>
-                        Pulled straight from the county assessor file — the APN is the single source of truth for unaddressed land (county records like “0 Smith Rd” / “State Hwy 49”): query by APN + county/state via the Parcel # search mode instead of a flaky street address. Land-use codes (Vacant Land, Agricultural, Timberland, Unimproved Residential) and the 0-structural-sqft flag instantly separate raw lots from built ones.
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Property Search V2: deed + mortgages + sale transactions */}
-                  <div className="enf-section">
-                    <div className="enf-section-head">
-                      <Landmark size={14} />
-                      <span>Recorded Deed, Mortgages &amp; Sales</span>
-                      {enfProperty && (
-                        <span className="enf-count-pill">{enfProperty.mortgages.length + enfProperty.transactions.length} record{enfProperty.mortgages.length + enfProperty.transactions.length === 1 ? '' : 's'}</span>
-                      )}
-                    </div>
-                    {enfProperty ? (
-                      <>
-                        {enfProperty.currentOwners.length > 0 && (
-                          <div className="enf-kv"><span className="k">Deed owner{enfProperty.currentOwners.length > 1 ? 's' : ''}</span><span className="v">{enfProperty.currentOwners.join(' & ')}</span></div>
-                        )}
-                        {(enfProperty.purchasePrice > 0 || enfProperty.purchaseDate) && (
-                          <div className="enf-kv"><span className="k">Last purchase</span><span className="v">{enfProperty.purchasePrice > 0 ? `$${enfProperty.purchasePrice.toLocaleString()}` : '—'}{enfProperty.purchaseDate ? ` · ${enfProperty.purchaseDate}` : ''}</span></div>
-                        )}
-                        {enfProperty.assessedValue > 0 && (
-                          <div className="enf-kv"><span className="k">Assessed value{enfProperty.assessedYear ? ` (${enfProperty.assessedYear})` : ''}</span><span className="v">${enfProperty.assessedValue.toLocaleString()}</span></div>
-                        )}
-                        {enfProperty.taxAmount > 0 && (
-                          <div className="enf-kv"><span className="k">Property tax{enfProperty.taxYear ? ` (${enfProperty.taxYear})` : ''}</span><span className="v">${enfProperty.taxAmount.toLocaleString()}</span></div>
-                        )}
-                        {enfProperty.openLienCount > 0 && (
-                          <div className="enf-kv"><span className="k">Open liens on record</span><span className="v">{enfProperty.openLienCount}</span></div>
-                        )}
-                        {enfProperty.mortgages.map((m, i) => (
-                          <div key={`m${i}`} className="enf-row">
-                            <div className="enf-row-top">
-                              <span className="enf-row-title">Mortgage{m.date ? ` · ${m.date}` : ''}</span>
-                              {m.amount > 0 && <span className="enf-row-amt">${m.amount.toLocaleString()}</span>}
-                            </div>
-                            <span className="enf-row-sub">
-                              {[m.lender && `Lender: ${m.lender}`, m.loanType && `Type: ${m.loanType}`, m.rateType && `Rate: ${m.rateType}`, m.docNumber && `Doc #${m.docNumber}`].filter(Boolean).join(' · ') || 'Recorded mortgage'}
-                            </span>
-                          </div>
-                        ))}
-                        {enfProperty.transactions.map((t, i) => (
-                          <div key={`t${i}`} className="enf-row">
-                            <div className="enf-row-top">
-                              <span className="enf-row-title">{t.type || 'Sale'}{t.date ? ` · ${t.date}` : ''}</span>
-                              {t.amount > 0 && <span className="enf-row-amt">${t.amount.toLocaleString()}</span>}
-                            </div>
-                            <span className="enf-row-sub">
-                              {[t.buyers.length > 0 && `Buyer: ${t.buyers.join(' & ')}`, t.sellers.length > 0 && `Seller: ${t.sellers.join(' & ')}`, t.docNumber && `Doc #${t.docNumber}`].filter(Boolean).join(' · ') || 'Recorded transaction'}
-                            </span>
-                          </div>
-                        ))}
-                        {enfProperty.mortgages.length === 0 && enfProperty.transactions.length === 0 && (
-                          <div className="enf-empty">
-                            {enfProperty.recorderIncluded
-                              ? 'Deed record found; Enformion\'s recorder section came back EMPTY for this parcel — no mortgages or sale transactions are on file with their data provider (common for new subdivision lots; county recorder coverage varies).'
-                              : 'Deed record found, but Enformion\'s response did not include the Recorder (mortgage & transaction) section at all — ask Enformion support to enable the RecorderRecords include on your API access profile.'}
-                          </div>
-                        )}
-                      </>
-                    ) : enfErrors.property ? (
-                      <div className="enf-err"><AlertCircle size={12} /> {enfErrors.property}</div>
-                    ) : null}
+                {propertyTransactionsLoading && (
+                  <div className="property-records-loading">
+                    <Loader2 size={14} className="spinner" />
+                    <span>Pulling public mortgage and sale history for the exact address…</span>
                   </div>
-                    </>
-                  )}
+                )}
 
-                  <div className="enf-foot">Live from the Enformion Property Search V2 API using your credentials. Public-record coverage varies by county.</div>
+                {propertyTransactionsIdle && (
+                  <div className="property-records-empty property-records-intro">
+                    <div>Retrieve recorded mortgages, deeds, sales, transfers, lenders, and buyer/seller history for this address. Normal parcel searches do not call this paid API.</div>
+                    <button
+                      type="button"
+                      className="owner-skip-btn"
+                      onClick={() => fetchPropertyTransactions(data, searchSeqRef.current)}
+                      title="On-demand lookup that may consume RealEstateAPI.com credits"
+                    >
+                      <Database size={14} />
+                      <span>Pull Mortgage &amp; Sales History</span>
+                    </button>
+                  </div>
+                )}
+
+                {propertyTransactionsError && (
+                  <div className="property-records-error">
+                    <AlertCircle size={14} />
+                    <div>
+                      <div>{propertyTransactionsError}</div>
+                      {/key|configured/i.test(propertyTransactionsError) && (
+                        <button
+                          type="button"
+                          className="property-records-settings-btn"
+                          onClick={() => window.dispatchEvent(new CustomEvent('open-gis-settings'))}
+                        >
+                          Open API Settings
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {propertyTransactions && (
+                  <>
+                    <div className="property-records-summary">
+                      <div className="property-records-kv">
+                        <span className="k">Exact property match</span>
+                        <span className="v">{propertyTransactions.matchedAddress}</span>
+                      </div>
+                      {propertyTransactions.propertyId && (
+                        <div className="property-records-kv">
+                          <span className="k">RealEstateAPI property ID</span>
+                          <span className="v">{propertyTransactions.propertyId}</span>
+                        </div>
+                      )}
+                      {(propertyTransactions.lastSaleDate || propertyTransactions.lastSalePrice) && (
+                        <div className="property-records-kv">
+                          <span className="k">Latest recorded sale</span>
+                          <span className="v">
+                            {[recordDate(propertyTransactions.lastSaleDate), recordCurrency(propertyTransactions.lastSalePrice) || 'Amount not reported'].filter(Boolean).join(' · ')}
+                          </span>
+                        </div>
+                      )}
+                      {propertyTransactions.openMortgageBalance != null && (
+                        <div className="property-records-kv">
+                          <span className="k">Open mortgage balance</span>
+                          <span className="v">{optionalCurrency(propertyTransactions.openMortgageBalance)}</span>
+                        </div>
+                      )}
+                      {propertyTransactions.estimatedMortgageBalance != null
+                        && propertyTransactions.estimatedMortgageBalance !== propertyTransactions.openMortgageBalance && (
+                        <div className="property-records-kv">
+                          <span className="k">Estimated mortgage balance</span>
+                          <span className="v">{optionalCurrency(propertyTransactions.estimatedMortgageBalance)}</span>
+                        </div>
+                      )}
+                      {propertyTransactions.freeClear != null && (
+                        <div className="property-records-kv">
+                          <span className="k">Free and clear indicator</span>
+                          <span className="v">{propertyTransactions.freeClear ? 'Yes' : 'No'}</span>
+                        </div>
+                      )}
+                    </div>
+
+                    {propertyTransactions.mortgages.length > 0 && (
+                      <div className="property-records-section">
+                        <div className="property-records-section-head">
+                          <Landmark size={14} />
+                          <span>Mortgage History</span>
+                          <span className="property-records-count">{propertyTransactions.mortgages.length}</span>
+                        </div>
+                        {propertyTransactions.mortgages.map((mortgage, index) => {
+                          const date = recordDate(mortgage.recordingDate || mortgage.documentDate);
+                          const title = mortgage.open === true
+                            ? 'Open mortgage'
+                            : mortgage.open === false
+                              ? 'Historical mortgage'
+                              : mortgage.transactionType || 'Mortgage';
+                          const rate = mortgage.interestRate
+                            ? `${mortgage.interestRate}%${mortgage.interestRateType ? ` ${mortgage.interestRateType}` : ''}`
+                            : mortgage.interestRateType;
+                          return (
+                            <div key={mortgage.id || `mortgage-${index}`} className="property-records-row">
+                              <div className="property-records-row-top">
+                                <span className="property-records-row-title">{title}{date ? ` · ${date}` : ''}</span>
+                                {recordCurrency(mortgage.amount) && <span className="property-records-amount">{recordCurrency(mortgage.amount)}</span>}
+                              </div>
+                              <span className="property-records-row-sub">
+                                {[
+                                  mortgage.lenderName && `Lender: ${mortgage.lenderName}`,
+                                  mortgage.loanType && `Loan: ${mortgage.loanType}`,
+                                  rate && `Rate: ${rate}`,
+                                  mortgage.deedType && `Instrument: ${mortgage.deedType}`,
+                                  mortgage.granteeName && `Grantee: ${mortgage.granteeName}`,
+                                  mortgage.maturityDate && `Matures: ${recordDate(mortgage.maturityDate)}`,
+                                ].filter(Boolean).join(' · ') || 'Recorded mortgage'}
+                              </span>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+
+                    {propertyTransactions.sales.length > 0 && (
+                      <div className="property-records-section">
+                        <div className="property-records-section-head">
+                          <History size={14} />
+                          <span>Sales &amp; Transfers</span>
+                          <span className="property-records-count">{propertyTransactions.sales.length}</span>
+                        </div>
+                        {propertyTransactions.sales.map((sale, index) => {
+                          const date = recordDate(sale.saleDate || sale.recordingDate);
+                          return (
+                            <div key={`sale-${sale.saleDate || sale.recordingDate || index}-${index}`} className="property-records-row">
+                              <div className="property-records-row-top">
+                                <span className="property-records-row-title">{sale.transactionType || 'Sale / transfer'}{date ? ` · ${date}` : ''}</span>
+                                {recordCurrency(sale.amount)
+                                  ? <span className="property-records-amount">{recordCurrency(sale.amount)}</span>
+                                  : <span className="property-records-amount-unreported">Amount not reported</span>}
+                              </div>
+                              <span className="property-records-row-sub">
+                                {[
+                                  sale.buyerNames && `Buyer: ${sale.buyerNames}`,
+                                  sale.sellerNames && `Seller: ${sale.sellerNames}`,
+                                  sale.documentType && `Instrument: ${sale.documentType}`,
+                                  sale.purchaseMethod && `Method: ${sale.purchaseMethod}`,
+                                  sale.armsLength != null && (sale.armsLength ? 'Arms-length' : 'Non-arms-length / transfer'),
+                                ].filter(Boolean).join(' · ') || 'Recorded transaction'}
+                              </span>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+
+                    {propertyTransactions.mortgages.length === 0 && propertyTransactions.sales.length === 0 && (
+                      <div className="property-records-empty">
+                        RealEstateAPI matched the exact address but returned no mortgage or sale-history records. Recorder coverage and history depth vary by county.
+                      </div>
+                    )}
+                  </>
+                )}
+
+                <div className="property-records-foot">
+                  Source: <a href="https://developer.realestateapi.com/reference/property-detail-api-1" target="_blank" rel="noreferrer">RealEstateAPI.com Property Detail</a>. Public-record aggregation is not a title report; verify legal interests with the county Register of Deeds.
                 </div>
-              )}
+              </div>
 
               {/* Card 2: Land Information */}
               <div className="card registry-card">
