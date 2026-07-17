@@ -311,12 +311,16 @@ interface WebResearchOptions {
   seedUrls?: string[];
 }
 
-const SCRAPE_HEAVY_QUERY_RE = /\b(ordinance|code\s+of\s+ordinances|zoning\s+(map|ordinance|district|lookup)|parcel\s+viewer|gis|planning\s+department|permit\s+fees?|fee\s+schedule|tap\s+fees?|impact\s+fees?|water\s+sewer|utilities|well\s+septic|minimum\s+lot|setbacks?|subdivision|rezoning|registered\s+agent|secretary\s+of\s+state|annual\s+report|bizapedia|corporationwiki|contractor|material\s+prices?|construction\s+costs?)\b/i;
+// Noise domains that are never a source of record for zoning, fees, or pricing.
+// Denylisted (leading '-') so the whole web stays open but the junk is filtered.
+const PERPLEXITY_DENYLIST = ['-reddit.com', '-pinterest.com', '-quora.com', '-x.com', '-twitter.com', '-facebook.com', '-instagram.com', '-tiktok.com', '-youtube.com'];
 
-function wantsCrawleeResearch(queries: string[], opts?: WebResearchOptions): boolean {
-  if (opts?.mode === 'crawlee' || opts?.mode === 'hard') return true;
+function wantsCrawleeResearch(_queries: string[], opts?: WebResearchOptions): boolean {
   if (opts?.mode === 'perplexity' || opts?.mode === 'easy') return false;
-  return queries.some((q) => SCRAPE_HEAVY_QUERY_RE.test(q));
+  // Crawlee now runs for ALL research: scraping the actual page/PDF/ordinance text
+  // gives the model fuller, more accurate source content than search snippets, and
+  // it falls back to snippets automatically when the scraper is unavailable.
+  return true;
 }
 
 async function crawleeScrapeBatch(urls: string[], queries: string[], maxTargets = 8): Promise<CrawleeResult[]> {
@@ -441,7 +445,7 @@ function flattenPplxResults(data: any): PplxResult[] {
  */
 export async function perplexitySearchBatch(
   queries: string[],
-  opts?: { maxResultsPerQuery?: number; maxTokensPerPage?: number; country?: string },
+  opts?: { maxResultsPerQuery?: number; maxTokensPerPage?: number; country?: string; recency?: 'day' | 'week' | 'month' | 'year' },
 ): Promise<PplxResult[]> {
   const key = getPerplexityKey();
   const qs = queries.map((q) => q.trim()).filter(Boolean);
@@ -450,9 +454,15 @@ export async function perplexitySearchBatch(
   for (let i = 0; i < qs.length; i += 5) chunks.push(qs.slice(i, i + 5));
   const bodies = chunks.map((chunk) => ({
     query: chunk.length === 1 ? chunk[0] : chunk,
-    max_results: Math.min(20, Math.max(1, opts?.maxResultsPerQuery ?? 6)),
-    max_tokens_per_page: opts?.maxTokensPerPage ?? 1024,
+    max_results: Math.min(20, Math.max(1, opts?.maxResultsPerQuery ?? 10)),
+    max_tokens_per_page: opts?.maxTokensPerPage ?? 1500,
     country: opts?.country ?? 'US',
+    // Keep the whole web open but denylist the noise, pull the richest snippets,
+    // and only bound recency when a caller explicitly asks (ordinances/fee
+    // schedules are often older yet still adopted, so recency is never blanket).
+    search_domain_filter: PERPLEXITY_DENYLIST,
+    web_search_options: { search_context_size: 'high' },
+    ...(opts?.recency ? { search_recency_filter: opts.recency } : {}),
   }));
   const responses = await Promise.all(bodies.map((b) => perplexitySearchRequest(b, key)));
   const responseGroups = responses.map(flattenPplxResults);
@@ -2496,8 +2506,17 @@ export async function executeLandAnalysis(
     let researched: ZoningResult | null = null;
     let researchError = '';
     try {
+      // Authoritative jurisdiction from U.S. Census boundaries at the parcel point:
+      // tells the model whether this is unincorporated county land or inside a
+      // municipality, so it is not fooled by the postal city (a "Belmont" mailing
+      // address that is actually unincorporated Gaston County -> Gaston R-1, not a
+      // City of Belmont code).
+      const zoningPlace = await incorporatedPlaceAtPoint(lat, lng).catch(() => null);
+      const zoningJurisdictionHint = zoningPlace
+        ? `inside the incorporated limits of ${zoningPlace} (${countyState(countyName)})`
+        : `unincorporated ${countyBaseName(countyName)} County (${countyState(countyName)}) — NOT inside any municipality`;
       researched = await withZoningTimeout(
-        fetchZoningWithGeminiSearch(fullZoningAddress, countyName),
+        fetchZoningWithGeminiSearch(fullZoningAddress, countyName, zoningJurisdictionHint),
         GEMINI_ZONING_TIMEOUT_MS + 5_000,
         null,
       );
@@ -4637,6 +4656,7 @@ function urlsWrittenInZoningAnswer(raw: string): string[] {
 export async function fetchZoningWithGeminiSearch(
   address: string,
   countyName?: string,
+  jurisdiction?: string,
 ): Promise<ZoningResult | null> {
   const fullAddress = normalizeFullAddressForZoning(address);
   const geminiKey = (getUserKeys().gemini || '').trim();
@@ -4652,6 +4672,7 @@ export async function fetchZoningWithGeminiSearch(
       'high',
       'primary',
     ),
+    jurisdiction || '',
   );
   // A structured answer without Google Search citations is not accepted as
   // parcel evidence, even if the model includes plausible-looking URLs.
