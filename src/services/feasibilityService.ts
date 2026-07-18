@@ -1,12 +1,12 @@
 import type { SiteFeasibilityData, SlopeProfile, CompProperty, FloodZoneInfo, WetlandsInfo, ConstructionCostEstimate, CostLineItem, MaterialTakeoff, MaterialTakeoffItem, LandClearingEstimate, TreeRemovalLine, ClearingMethod, UtilitiesEstimate, UtilityLine, PermitFeeLine } from '../types/feasibility';
-import { getZoningServices, normalizeCountyKey } from '../data/ncZoning';
+import { fetchCountyZoningCode, getZoningServices, normalizeCountyKey } from '../data/ncZoning';
 import { getSupabase, isSupabaseConfigured } from './supabaseClient';
 import { fetchOfficialScParcel, mergeOfficialScParcelRecords, officialRecordFromCountyGis, scOwnerNamesMatch, shouldHideStatewideGeometry } from './scParcelVerification';
 import { scCountySource } from '../data/scCountySources';
 import { normalizeSourcedRange } from '../data/sourcedEstimate';
 import { listingZoningEvidenceTier, zoningListingProvider } from '../data/zoningEvidence';
 import { cleanCode } from './zoning/normalization/zoning-normalizer';
-import { fetchGeminiZoningSearchEvidence, normalizeFullAddressForZoning } from './geminiZoningSearch';
+import { fetchGeminiZoningSearchEvidence, normalizeFullAddressForZoning, type OfficialZoningEvidenceHint } from './geminiZoningSearch';
 import { isFullCarolinaPostalAddress, resolveFullCarolinaPostalAddress } from './carolinaAddress';
 import { CensusGeocoder } from './zoning/geocoding/census-geocoder';
 
@@ -2486,10 +2486,10 @@ export async function executeLandAnalysis(
     const mergeSources = (...groups: Array<Array<string | undefined>>) => [
       ...new Set(groups.flat().filter((url): url is string => !!url)),
     ];
-    const applyZoningIdentity = (result: ZoningResult) => {
+    const applyZoningIdentity = (result: ZoningResult, source: SiteFeasibilityData['zoningSource'] = 'web') => {
       zoningCode = cleanCode(result.code) || '';
       zoningDescription = `${result.description} (${evidenceLabelForZoningResult(result)})`;
-      zoningSource = 'web';
+      zoningSource = source;
       zoningSourceUrl = result.sourceUrl;
       zoningSources = mergeSources(zoningSources, result.sources, [result.sourceUrl]);
       zoningVerificationStatus = statusForZoningResult(result);
@@ -2570,53 +2570,118 @@ export async function executeLandAnalysis(
       });
     };
 
-    zoningDescription = `Searching Google with Gemini 3.5 Flash for ${fullZoningAddress}`;
+    zoningDescription = `Checking official parcel zoning for ${fullZoningAddress}`;
     zoningSource = 'web';
     zoningStandardsStatus = 'resolving';
     zoningSetbacksStatus = 'resolving';
     emitZoning();
 
-    onStageChange?.("Searching the full address with Gemini 3.5 Flash...");
-    let researched: ZoningResult | null = null;
-    let researchError = '';
-    try {
-      // Authoritative jurisdiction from U.S. Census boundaries at the parcel point:
-      // tells the model whether this is unincorporated county land or inside a
-      // municipality, so it is not fooled by the postal city (a "Belmont" mailing
-      // address that is actually unincorporated Gaston County -> Gaston R-1, not a
-      // City of Belmont code).
-      const zoningPlace = await incorporatedPlaceAtPoint(lat, lng).catch(() => null);
-      const zoningJurisdictionHint = zoningPlace
-        ? `inside the incorporated limits of ${zoningPlace} (${countyState(countyName)})`
-        : `unincorporated ${countyBaseName(countyName)} County (${countyState(countyName)}) — NOT inside any municipality`;
-      researched = await withZoningTimeout(
-        fetchZoningWithGeminiSearch(fullZoningAddress, countyName, zoningJurisdictionHint),
-        GEMINI_ZONING_TIMEOUT_MS + 5_000,
-        null,
-      );
-    } catch (error) {
+    // Census place boundaries identify the actual zoning authority. A postal
+    // city can still be unincorporated county land, so it is not enough alone.
+    const zoningPlace = await incorporatedPlaceAtPoint(lat, lng).catch(() => null);
+    const zoningJurisdictionHint = zoningPlace
+      ? `inside the incorporated limits of ${zoningPlace} (${countyState(countyName)})`
+      : `unincorporated ${countyBaseName(countyName)} County (${countyState(countyName)}) — NOT inside any municipality`;
+
+    // Query every registered county and municipal polygon at the parcel point.
+    // Static official layers get a short head start so their district can guide
+    // Gemini directly to the matching ordinance instead of making it rediscover
+    // the parcel assignment from search snippets.
+    const officialLookup = fetchCountyZoningCode(countyName, lng, lat, {
+      address: fullZoningAddress,
+      parcelId,
+      allowServerDiscovery: true,
+    }).catch(() => null);
+    let officialZoning = await withZoningTimeout(officialLookup, 8_000, null);
+    const officialCodeHint = officialZoning ? cleanCode(officialZoning.code) : null;
+    const officialSourceHint = officialZoning?.sourceUrl || getZoningServices(countyName)[0]?.url;
+    const officialEvidence: OfficialZoningEvidenceHint | undefined = officialCodeHint ? {
+      code: officialCodeHint,
+      description: officialZoning?.description,
+      sourceUrl: officialSourceHint,
+      jurisdiction: officialZoning?.jurisdiction || zoningPlace || undefined,
+    } : undefined;
+
+    onStageChange?.("Verifying official GIS and researching standards with Gemini 3.5 Flash...");
+    const researchPromise = withZoningTimeout(
+      fetchZoningWithGeminiSearch(fullZoningAddress, countyName, zoningJurisdictionHint, officialEvidence),
+      GEMINI_ZONING_TIMEOUT_MS + 5_000,
+      null,
+    ).then((result) => ({ result, error: '' })).catch((error) => {
       const msg = error instanceof Error ? error.message : String(error);
-      if (msg.toLowerCase().includes('abort') || msg.toLowerCase().includes('timeout')) {
-        researchError = 'Gemini zoning research timed out or was aborted.';
-      } else {
-        researchError = msg;
-      }
+      return {
+        result: null,
+        error: msg.toLowerCase().includes('abort') || msg.toLowerCase().includes('timeout')
+          ? 'Gemini zoning standards research timed out or was aborted.'
+          : msg,
+      };
+    });
+
+    // A dynamic official resolver may need longer than a registered ArcGIS
+    // layer. Let it finish while Gemini is already searching.
+    if (!officialZoning) officialZoning = await withZoningTimeout(officialLookup, 15_000, null);
+
+    let officialResult: ZoningResult | null = null;
+    const officialCode = officialZoning ? cleanCode(officialZoning.code) : null;
+    const officialSourceUrl = officialZoning?.sourceUrl || getZoningServices(countyName)[0]?.url;
+    if (officialZoning && officialCode && officialSourceUrl) {
+      officialResult = {
+        code: officialCode,
+        description: officialZoning.description || `${officialCode} zoning district`,
+        sourceUrl: officialSourceUrl,
+        sources: [officialSourceUrl],
+        jurisdiction: officialZoning.jurisdiction || zoningPlace || `${countyBaseName(countyName)} County`,
+        matchMethod: 'parcel-gis',
+        evidenceTier: 'official',
+      };
+      applyZoningIdentity(officialResult, 'county-gis');
+
+      const fallbackStandards = verifiedOfficialStandards(
+        countyName,
+        officialResult.jurisdiction,
+        officialCode,
+        officialResult.sourceUrl,
+      );
+      if (fallbackStandards) applyResearchStandards({ ...officialResult, standards: fallbackStandards });
+      emitZoning();
     }
 
-    if (researched && cleanCode(researched.code)) {
-      applyZoningIdentity(researched);
-      zoningSource = 'web';
-      applyResearchStandards(researched);
-    } else {
+    const { result: researched, error: researchError } = await researchPromise;
+    const researchedCode = researched ? cleanCode(researched.code) : null;
+    if (researched && researchedCode) {
+      if (!officialResult) {
+        applyZoningIdentity(researched, 'web');
+      } else {
+        zoningSources = mergeSources(zoningSources, researched.sources, [researched.sourceUrl]);
+        zoningTextReport = researched.textReport;
+        zoningJurisdiction = officialResult.jurisdiction || researched.jurisdiction || zoningJurisdiction;
+        if (researchedCode.toUpperCase() !== officialCode?.toUpperCase()) {
+          zoningVerificationStatus = 'conflict';
+          zoningDescription = `${officialResult.description} (official GIS point result; conflicting Gemini result ${researchedCode} was not used)`;
+        }
+      }
+
+      const standardsMatchOfficial = !officialCode || researchedCode.toUpperCase() === officialCode.toUpperCase();
+      if (standardsMatchOfficial && researched.standards) {
+        applyResearchStandards(researched);
+      } else if (!officialResult && !researched.standards) {
+        applyResearchStandards(researched);
+      }
+    } else if (!officialResult) {
       zoningCode = '';
       zoningDescription = researchError
-        || `Gemini 3.5 Flash Google Search did not return a source-backed zoning code for ${fullZoningAddress}.`;
+        || `Neither official point GIS nor Gemini 3.5 Flash returned a source-backed zoning code for ${fullZoningAddress}.`;
       zoningSource = 'web';
       zoningSourceUrl = undefined;
       zoningSources = [];
       zoningVerificationStatus = 'unavailable';
       zoningStandardsStatus = 'unavailable';
       zoningSetbacksStatus = 'unavailable';
+    } else {
+      // A standards-search miss must never erase a verified parcel district.
+      if (zoningStandardsStatus === 'resolving') zoningStandardsStatus = 'unavailable';
+      if (zoningSetbacksStatus === 'resolving') zoningSetbacksStatus = 'unavailable';
+      if (researchError) zoningTextReport = researchError;
     }
   }
 
@@ -4494,6 +4559,36 @@ type ZoningResult = {
   textReport?: string;
 };
 
+/** Small deterministic ordinance fallback for standards we have verified from
+ * an official code source. It is intentionally narrow: parcel assignment still
+ * comes from the live point-in-polygon GIS query, never from this table. */
+function verifiedOfficialStandards(
+  countyName: string,
+  jurisdiction: string | undefined,
+  code: string,
+  parcelSourceUrl = '',
+): ZoningResearchStandards | undefined {
+  const isCityOfYork = /CityofYorkSC_Zoning/i.test(parcelSourceUrl)
+    || /^(?:city of )?york$/i.test((jurisdiction || '').trim());
+  if (
+    countyBaseName(countyName).toLowerCase() === 'york'
+    && isCityOfYork
+    && cleanCode(code)?.toUpperCase() === 'R-7'
+  ) {
+    return {
+      lotType: 'Single-family residential district',
+      maxHeightFt: 35,
+      setbacks: { frontFt: 25, rearFt: 20, sideFt: 10 },
+      minimumLotAreaSqft: 10_000,
+      permittedUses: ['Single-family detached dwelling', 'Two-family dwelling subject to district lot standards'],
+      setbackNotes: ['Minimum lot width is 70 ft for a single-family lot and 80 ft for a two-family lot.'],
+      restrictions: ['A two-family lot requires at least 5,000 sq ft per dwelling unit.'],
+      sourceUrl: 'https://library.municode.com/sc/york/codes/code_of_ordinances?nodeId=APXAZO',
+    };
+  }
+  return undefined;
+}
+
 function cleanEvidenceUrl(value: unknown): string | null {
   if (typeof value !== 'string' || !/^https?:\/\//i.test(value.trim())) return null;
   try {
@@ -4731,6 +4826,7 @@ export async function fetchZoningWithGeminiSearch(
   address: string,
   countyName?: string,
   jurisdiction?: string,
+  officialEvidence?: OfficialZoningEvidenceHint,
 ): Promise<ZoningResult | null> {
   const fullAddress = normalizeFullAddressForZoning(address);
   const geminiKey = (getUserKeys().gemini || '').trim();
@@ -4747,6 +4843,7 @@ export async function fetchZoningWithGeminiSearch(
       'primary',
     ),
     jurisdiction || '',
+    officialEvidence,
   );
   // A structured answer without Google Search citations is not accepted as
   // parcel evidence, even if the model includes plausible-looking URLs.
@@ -6530,11 +6627,160 @@ async function streetViewUrlIfAvailable(lat: number, lng: number, key: string): 
   return null;
 }
 
-/** Gemini Vision: count trees by size + canopy/density from a top-down satellite
- *  crop PLUS (when available) a ground-level street-view to gauge tree size. */
-async function countTreesFromSatellite(imageUrls: string[], acres: number, geminiKey: string): Promise<{ small: number; medium: number; large: number; canopyPct: number | null; density: 'light' | 'medium' | 'heavy' } | null> {
+type TreeVisionResult = {
+  small: number;
+  medium: number;
+  large: number;
+  canopyPct: number | null;
+  density: 'light' | 'medium' | 'heavy';
+  method: 'gemini-vision' | 'satellite-canopy-analysis';
+};
+
+interface SatelliteMaskContext {
+  lat: number;
+  lng: number;
+  zoom: number;
+  boundaryRings?: number[][][];
+}
+
+function mercatorWorldPixel(lng: number, lat: number, zoom: number): [number, number] {
+  const world = 256 * (2 ** zoom);
+  const sin = Math.sin(Math.max(-85.05112878, Math.min(85.05112878, lat)) * Math.PI / 180);
+  return [
+    ((lng + 180) / 360) * world,
+    (0.5 - Math.log((1 + sin) / (1 - sin)) / (4 * Math.PI)) * world,
+  ];
+}
+
+/** Analyze the fetched satellite image locally. The mask follows the real parcel
+ * polygon when available and otherwise uses an acreage-sized circle around the
+ * geocoded point. This makes the card independent of Gemini rate limits. */
+async function estimateTreesFromSatellitePixels(
+  image: { mimeType: string; data: string },
+  acres: number,
+  context: SatelliteMaskContext,
+): Promise<TreeVisionResult | null> {
+  if (typeof document === 'undefined' || typeof Image === 'undefined') return null;
+
+  const bitmap = await new Promise<HTMLImageElement | null>((resolve) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => resolve(null);
+    img.src = `data:${image.mimeType};base64,${image.data}`;
+  });
+  if (!bitmap) return null;
+
+  const size = 280;
+  const canvas = document.createElement('canvas');
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  if (!ctx) return null;
+  ctx.drawImage(bitmap, 0, 0, size, size);
+  const pixels = ctx.getImageData(0, 0, size, size).data;
+
+  const maskCanvas = document.createElement('canvas');
+  maskCanvas.width = size;
+  maskCanvas.height = size;
+  const maskCtx = maskCanvas.getContext('2d', { willReadFrequently: true });
+  if (!maskCtx) return null;
+  maskCtx.fillStyle = '#fff';
+
+  let polygonDrawn = false;
+  const rings = context.boundaryRings || [];
+  if (rings.length) {
+    const [centerX, centerY] = mercatorWorldPixel(context.lng, context.lat, context.zoom);
+    // The Static Maps viewport is 600 logical pixels. It is requested at
+    // scale=2, but then resampled to `size`, so the logical viewport controls
+    // point-to-output-pixel conversion.
+    const outputScale = size / 600;
+    maskCtx.beginPath();
+    for (const ring of rings) {
+      const points = ring
+        .map((coordinate) => {
+          const [worldX, worldY] = mercatorWorldPixel(Number(coordinate[0]), Number(coordinate[1]), context.zoom);
+          return [size / 2 + (worldX - centerX) * outputScale, size / 2 + (worldY - centerY) * outputScale] as const;
+        })
+        .filter(([x, y]) => Number.isFinite(x) && Number.isFinite(y));
+      if (points.length < 3) continue;
+      maskCtx.moveTo(points[0][0], points[0][1]);
+      points.slice(1).forEach(([x, y]) => maskCtx.lineTo(x, y));
+      maskCtx.closePath();
+      polygonDrawn = true;
+    }
+    if (polygonDrawn) maskCtx.fill('evenodd');
+  }
+
+  let mask = maskCtx.getImageData(0, 0, size, size).data;
+  let maskedPixels = 0;
+  for (let i = 3; i < mask.length; i += 4) if (mask[i] > 127) maskedPixels++;
+
+  // Geometry can be absent, stale, or outside the image because of a bad
+  // upstream polygon. Use a correctly scaled acreage circle in that case.
+  if (!polygonDrawn || maskedPixels < 150) {
+    maskCtx.clearRect(0, 0, size, size);
+    const metersPerLogicalPixel = Math.cos(context.lat * Math.PI / 180)
+      * 2 * Math.PI * 6_378_137 / (256 * (2 ** context.zoom));
+    const metersPerSamplePixel = metersPerLogicalPixel * (600 / size);
+    const parcelAreaPixels = acres * 4_046.8564224 / Math.max(0.01, metersPerSamplePixel ** 2);
+    const radius = Math.max(6, Math.min(size * 0.47, Math.sqrt(parcelAreaPixels / Math.PI)));
+    maskCtx.beginPath();
+    maskCtx.arc(size / 2, size / 2, radius, 0, Math.PI * 2);
+    maskCtx.fill();
+    mask = maskCtx.getImageData(0, 0, size, size).data;
+    maskedPixels = 0;
+    for (let i = 3; i < mask.length; i += 4) if (mask[i] > 127) maskedPixels++;
+  }
+  if (!maskedPixels) return null;
+
+  let canopyPixels = 0;
+  const luminanceAt = (pixelIndex: number) => (
+    pixels[pixelIndex] * 0.299 + pixels[pixelIndex + 1] * 0.587 + pixels[pixelIndex + 2] * 0.114
+  );
+  for (let y = 1; y < size - 1; y++) {
+    for (let x = 1; x < size - 1; x++) {
+      const index = (y * size + x) * 4;
+      if (mask[index + 3] <= 127) continue;
+      const r = pixels[index], g = pixels[index + 1], b = pixels[index + 2];
+      const max = Math.max(r, g, b), min = Math.min(r, g, b);
+      const luminance = luminanceAt(index);
+      const right = luminanceAt(index + 4);
+      const below = luminanceAt(index + size * 4);
+      const texture = Math.max(Math.abs(luminance - right), Math.abs(luminance - below));
+      const excessGreen = 2 * g - r - b;
+      const leafy = excessGreen > 12 && g >= r * 0.98 && g >= b * 1.02 && max - min > 12;
+      const darkVegetation = luminance < 108 && g >= r * 0.88 && g >= b * 0.9 && max - min > 9;
+      // Uniform bright green is usually lawn; textured or darker vegetation is
+      // much more likely to be tree canopy in satellite imagery.
+      if ((leafy && (luminance < 158 || texture > 15)) || (darkVegetation && texture > 9)) canopyPixels++;
+    }
+  }
+
+  const canopyPct = Math.max(0, Math.min(100, Math.round((canopyPixels / maskedPixels) * 100)));
+  const density: TreeVisionResult['density'] = canopyPct >= 65 ? 'heavy' : canopyPct >= 25 ? 'medium' : 'light';
+  const treesPerWoodedAcre = density === 'heavy' ? 125 : density === 'medium' ? 100 : 75;
+  const total = Math.max(canopyPct >= 3 ? 1 : 0, Math.round(acres * (canopyPct / 100) * treesPerWoodedAcre));
+  const smallShare = density === 'heavy' ? 0.58 : density === 'medium' ? 0.44 : 0.30;
+  const mediumShare = density === 'heavy' ? 0.34 : density === 'medium' ? 0.40 : 0.45;
+  const small = Math.round(total * smallShare);
+  const medium = Math.round(total * mediumShare);
+  const large = Math.max(0, total - small - medium);
+  return { small, medium, large, canopyPct, density, method: 'satellite-canopy-analysis' };
+}
+
+/** Count trees by size + canopy/density from a top-down satellite crop. The
+ * local parcel-masked analysis is the primary path; Gemini Vision remains only
+ * as a compatibility fallback for runtimes without Canvas support. */
+async function countTreesFromSatellite(
+  imageUrls: string[],
+  acres: number,
+  geminiKey: string,
+  maskContext: SatelliteMaskContext,
+): Promise<TreeVisionResult | null> {
   const imgs = (await Promise.all(imageUrls.map((u) => imageUrlToInline(u)))).filter((x): x is { mimeType: string; data: string } => !!x);
   if (!imgs.length) throw new Error('Couldn\'t load the parcel satellite image (Google Static Maps) — check that the Google Maps key has Static Maps enabled with billing, then tap Retry.');
+  const localEstimate = await estimateTreesFromSatellitePixels(imgs[0], acres, maskContext).catch(() => null);
+  if (localEstimate) return localEstimate;
   const multi = imgs.length > 1;
   const prompt = `You are estimating TREE REMOVAL for a ~${acres.toFixed(2)}-acre raw land parcel.
 ${multi ? 'The FIRST image is a top-down SATELLITE view — use it to COUNT the trees and read canopy. The SECOND image is a ground-level STREET VIEW — use it to gauge tree SIZE/maturity and species.' : 'This is a top-down SATELLITE view of the parcel — count the trees and read canopy.'}
@@ -6570,7 +6816,7 @@ Return ONLY JSON: {"small":<int>,"medium":<int>,"large":<int>,"canopyCoverPct":<
           const primary = (getUserKeys().gemini || '').trim();
           if ((res.status === 400 || res.status === 401 || res.status === 403) && primary && geminiKey !== primary) {
             console.warn(`Gemini key #2 was rejected (HTTP ${res.status}) — running the tree count on the primary key instead.`);
-            return countTreesFromSatellite(imageUrls, acres, primary);
+            return countTreesFromSatellite(imageUrls, acres, primary, maskContext);
           }
         }
         return null;
@@ -6587,7 +6833,7 @@ Return ONLY JSON: {"small":<int>,"medium":<int>,"large":<int>,"canopyCoverPct":<
       const d = String(o.density || '').toLowerCase();
       const density = (d === 'light' || d === 'heavy') ? d : 'medium';
       const c = Number(o.canopyCoverPct);
-      return { small: n(o.small), medium: n(o.medium), large: n(o.large), canopyPct: Number.isFinite(c) ? Math.max(0, Math.min(100, Math.round(c))) : null, density };
+      return { small: n(o.small), medium: n(o.medium), large: n(o.large), canopyPct: Number.isFinite(c) ? Math.max(0, Math.min(100, Math.round(c))) : null, density, method: 'gemini-vision' };
     } catch {
       // network error or per-attempt timeout abort — retry
       if (attempt < LAST) { await new Promise((r) => setTimeout(r, 1500 * (attempt + 1))); continue; }
@@ -6786,9 +7032,18 @@ export async function fetchLandClearingEstimate(reportData: SiteFeasibilityData)
   // Vision + rates pull SIMULTANEOUSLY. Rates are non-fatal (baseline rates
   // cover a miss); the vision call's DISTINCT errors (e.g. the static-map
   // image failed to load) propagate to the card.
-  const ratesPromise = fetchTreeRemovalRates(reportData.countyName, zip, getBackgroundGeminiKey()).catch(() => null);
-  const vision = await countTreesFromSatellite(imageUrls, acres, getBackgroundGeminiKey());
-  if (!vision) throw new Error('The satellite tree count didn\'t answer (a slow or rate-limited moment) — tap Retry.');
+  const ratesLookup = fetchTreeRemovalRates(reportData.countyName, zip, getBackgroundGeminiKey()).catch(() => null);
+  const ratesPromise = Promise.race([
+    ratesLookup,
+    new Promise<null>((resolve) => setTimeout(() => resolve(null), 45_000)),
+  ]);
+  const vision = await countTreesFromSatellite(imageUrls, acres, getBackgroundGeminiKey(), {
+    lat,
+    lng,
+    zoom,
+    boundaryRings: reportData.geometryStatus === 'stale-hidden' ? undefined : reportData.boundaryRings,
+  });
+  if (!vision) throw new Error('The parcel satellite image could not be analyzed. Check that Google Static Maps is enabled, then retry.');
   const rates = await ratesPromise;
 
   const r = rates || emptyTreeRates();
@@ -6844,6 +7099,7 @@ export async function fetchLandClearingEstimate(reportData: SiteFeasibilityData)
     canopyCoverPct: vision.canopyPct,
     density: vision.density,
     treeCount,
+    treeCountMethod: vision.method,
     trees,
     treeRemovalCost,
     treeRemovalCostLow,

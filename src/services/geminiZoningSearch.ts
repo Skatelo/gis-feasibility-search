@@ -6,6 +6,13 @@ export interface GeminiZoningSearchEvidence {
   urls: string[];
 }
 
+export interface OfficialZoningEvidenceHint {
+  code: string;
+  description?: string | null;
+  sourceUrl?: string;
+  jurisdiction?: string;
+}
+
 type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 
 // Zoning search models in priority order. gemini-3-flash-preview grounds as
@@ -100,7 +107,12 @@ export function normalizeFullAddressForZoning(value: string): string {
   return `${expandedState}, United States`;
 }
 
-export function buildGeminiZoningSearchPrompt(address: string, countyName = '', jurisdiction = ''): string {
+export function buildGeminiZoningSearchPrompt(
+  address: string,
+  countyName = '',
+  jurisdiction = '',
+  officialEvidence?: OfficialZoningEvidenceHint,
+): string {
   const fullAddress = normalizeFullAddressForZoning(address);
   const requestedQuery = `What is ${fullAddress} zoning code`;
   const jurisdictionHint = compactText(jurisdiction)
@@ -108,11 +120,14 @@ export function buildGeminiZoningSearchPrompt(address: string, countyName = '', 
     : compactText(countyName)
       ? `The detected county is ${compactText(countyName)}; confirm the actual county or municipal zoning authority from sources.`
       : 'Confirm the county or municipal zoning authority from sources.';
+  const officialHint = officialEvidence?.code
+    ? `An official zoning polygon queried at this parcel point returned district "${compactText(officialEvidence.code)}"${officialEvidence.description ? ` (${compactText(officialEvidence.description)})` : ''}${officialEvidence.jurisdiction ? ` for ${compactText(officialEvidence.jurisdiction)}` : ''}${officialEvidence.sourceUrl ? ` from ${officialEvidence.sourceUrl}` : ''}. Treat this as the parcel-assignment lead, verify it in Google Search, and focus the remaining search on the adopted standards for that exact district. Do not replace it with a listing's different code.`
+    : '';
 
   return `Search Google now for this exact query:
 "${requestedQuery}"
 
-The complete address must remain verbatim in every search used to identify this parcel. ${jurisdictionHint}
+The complete address must remain verbatim in every search used to identify this parcel. ${jurisdictionHint} ${officialHint}
 
 Continue with additional exact-address searches as needed to find the parcel-specific district. Search official county or municipal GIS and planning sources first. Exact-address Zillow, Realtor, and Redfin pages are fallback assignment evidence only. After identifying the district, find the adopted ordinance or official code that publishes its setbacks, restrictions, permitted uses, height, lot area, lot coverage, and floor-area ratio.
 
@@ -203,6 +218,7 @@ export async function fetchGeminiZoningSearchEvidence(
   countyName = '',
   fetcher: FetchLike = fetch,
   jurisdiction = '',
+  officialEvidence?: OfficialZoningEvidenceHint,
 ): Promise<GeminiZoningSearchEvidence> {
   const fullAddress = normalizeFullAddressForZoning(address);
   const key = apiKey.trim();
@@ -210,7 +226,7 @@ export async function fetchGeminiZoningSearchEvidence(
   if (!key) throw new Error('A Gemini API key is required for zoning search.');
 
   const requestedQuery = `What is ${fullAddress} zoning code`;
-  const input = buildGeminiZoningSearchPrompt(fullAddress, countyName, jurisdiction);
+  const input = buildGeminiZoningSearchPrompt(fullAddress, countyName, jurisdiction, officialEvidence);
 
   // Try each model in priority order. A retired/unknown model answers HTTP 404,
   // so we transparently fall back to the next one instead of failing the lookup.

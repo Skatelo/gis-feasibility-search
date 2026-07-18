@@ -41,6 +41,8 @@ test('state-qualified NC and SC county names resolve to their zoning services', 
   assert.match(zoning.getZoningServices('Colleton, SC')[0].url, /Colleton_County_Zoning/);
   assert.match(zoning.getZoningServices('Dorchester, SC')[0].url, /Zoning_PUBLIC/);
   assert.match(zoning.getZoningServices('York, SC')[0].url, /York%20County%20Zoning/);
+  assert.equal(zoning.getZoningServices('York, SC').length, 6);
+  assert.match(zoning.getZoningServices('York, SC')[2].url, /CityofYorkSC_Zoning/);
   assert.match(zoning.getZoningServices('Oconee, SC')[0].url, /ZoningMap/);
   assert.match(zoning.getZoningServices('Sumter, SC')[0].url, /UDO_Zoning/);
   assert.match(zoning.getZoningServices('Anderson, SC')[1].url, /cityofandersonsc\.com/);
@@ -356,6 +358,38 @@ test('official SC FeatureServers are queried at the exact property point', async
   }
 });
 
+test('City of York addresses resolve through the official municipal layer', async () => {
+  const originalFetch = globalThis.fetch;
+  const requests = [];
+  globalThis.fetch = async (url, options = {}) => {
+    const value = String(url);
+    requests.push({ url: value, options });
+    const features = value.includes('/CityofYorkSC_Zoning/FeatureServer/5/query?')
+      ? [{ attributes: { Zoning: 'R-7' } }]
+      : [];
+    return new Response(JSON.stringify({ features }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  };
+  try {
+    const result = await zoning.fetchCountyZoningCode(
+      'York, SC',
+      -81.245469336813,
+      35.000406812466,
+      { allowServerDiscovery: false },
+    );
+    assert.equal(result.code, 'R-7');
+    assert.match(result.sourceUrl, /CityofYorkSC_Zoning/);
+    const cityRequest = requests.find((request) => request.url.includes('/CityofYorkSC_Zoning/FeatureServer/5/query?'));
+    assert.ok(cityRequest);
+    assert.match(cityRequest.url, /geometry=-81\.245469336813%2C35\.000406812466/);
+    assert.ok(requests.every((request) => request.options.cache === 'no-store'));
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('combined official zoning labels are split into a code and description', async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (url, options) => {
@@ -503,7 +537,7 @@ test('Gemini zoning search uses the complete address and a fresh grounded Intera
   assert.deepEqual(result.searchQueries, [`What is ${fullAddress} zoning code`]);
 });
 
-test('property zoning uses only Gemini 3.5 Flash Google Search in the allowances card', () => {
+test('property zoning keeps official point GIS identity and uses Gemini 3.5 Flash for standards', () => {
   const stage = serviceSource.slice(
     serviceSource.indexOf('// STAGE 3 - zoning.'),
     serviceSource.indexOf('// STAGE 4'),
@@ -518,12 +552,16 @@ test('property zoning uses only Gemini 3.5 Flash Google Search in the allowances
   assert.match(stage, /resolveFullCarolinaPostalAddress\(/);
   assert.match(stage, /normalizeFullAddressForZoning\(zoningQueryAddress \|\| addressString\)/);
   assert.match(stage, /fetchZoningWithGeminiSearch\(fullZoningAddress, countyName/);
+  assert.match(stage, /fetchCountyZoningCode\(countyName, lng, lat/);
+  assert.match(stage, /applyZoningIdentity\(officialResult, 'county-gis'\)/);
+  assert.match(stage, /A standards-search miss must never erase a verified parcel district/);
+  assert.match(stage, /verifiedOfficialStandards\(\s*countyName/);
   assert.match(stage, /emitZoning\(\)/);
   assert.match(stage, /zoningStandardsStatus = 'resolving'/);
   assert.match(stage, /cleanCode\(result\.code\) \|\| ''/);
   assert.match(stage, /zoningSetbackNotes/);
   assert.match(stage, /zoningRestrictions/);
-  assert.doesNotMatch(stage, /lookupOfficialZoning|fetchCountyZoningCode|fetchZoningViaWebSearch|perplexity|crawlee|custom search/i);
+  assert.doesNotMatch(stage, /lookupOfficialZoning|fetchZoningViaWebSearch|perplexity|crawlee|custom search/i);
   assert.match(geminiPipeline, /fetchGeminiZoningSearchEvidence\(/);
   assert.match(geminiPipeline, /evidence\.urls\.length/);
   assert.doesNotMatch(geminiPipeline, /perplexity|crawlee|fetchCountyZoningCode|custom search/i);
@@ -537,7 +575,7 @@ test('property zoning uses only Gemini 3.5 Flash Google Search in the allowances
   assert.doesNotMatch(geminiSearchSource, /customsearch\/v1|url_context|searchParams\.set\('cx'/i);
   assert.doesNotMatch(settingsSource, /googleCustomSearch|Programmable Search Engine ID/);
   assert.match(componentSource, /Zoning & Allowances/);
-  assert.match(componentSource, /Searching the full address with Gemini 3\.5 Flash/);
+  assert.match(componentSource, /Checking official GIS and researching standards with Gemini 3\.5 Flash/);
   assert.match(componentSource, /Setback rules and exceptions/);
   assert.match(componentSource, /Published zoning restrictions/);
   assert.match(componentSource, /STANDARDS:[\s\S]*LOADING/);

@@ -326,10 +326,31 @@ const SC_ZONING_OVERRIDES: Record<string, CountyZoningConfig> = {
     zoning_mapserver_url: "https://services1.arcgis.com/2AGLxyiJoNiVHKwq/arcgis/rest/services/York%20County%20Zoning%20(regions)/FeatureServer",
     zoning_field_mapping: "zone", description_field: null, zoning_layers: "show:0",
     zoning_query_field: "zone", zoning_renderable: F,
-    extra_zoning: [{
-      url: "https://services1.arcgis.com/2AGLxyiJoNiVHKwq/arcgis/rest/services/Rock%20Hill%20Zoning/FeatureServer",
-      layers: "show:0", query_field: "ZONE", renderable: F,
-    }],
+    // York County's layer intentionally excludes incorporated municipalities.
+    // Query every official municipal layer at the same parcel point so a City
+    // of York address does not fall through to AI research with no district.
+    extra_zoning: [
+      {
+        url: "https://services1.arcgis.com/2AGLxyiJoNiVHKwq/arcgis/rest/services/Rock%20Hill%20Zoning/FeatureServer",
+        layers: "show:0", query_field: "ZONE", renderable: F,
+      },
+      {
+        url: "https://services8.arcgis.com/h9JHFVWvWofKfQhH/arcgis/rest/services/CityofYorkSC_Zoning/FeatureServer",
+        layers: "show:5", query_field: "Zoning", renderable: F,
+      },
+      {
+        url: "https://services8.arcgis.com/h9JHFVWvWofKfQhH/arcgis/rest/services/TownofCloverSC_Zoning/FeatureServer",
+        layers: "show:0", query_field: "Zoning", renderable: F,
+      },
+      {
+        url: "https://services8.arcgis.com/h9JHFVWvWofKfQhH/arcgis/rest/services/TownofFortMillSC_Zoning/FeatureServer",
+        layers: "show:4", query_field: "ZONING", renderable: F,
+      },
+      {
+        url: "https://services8.arcgis.com/h9JHFVWvWofKfQhH/arcgis/rest/services/CityofTegaCaySC_Zoning/FeatureServer",
+        layers: "show:2", query_field: "ZoningCode", renderable: F,
+      },
+    ],
     use_state_fallback: F,
   },
   "greenville,_sc": {

@@ -4151,21 +4151,21 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                       Zoning Classification
                       <span style={{ display: 'block', fontSize: '9px', color: 'var(--text-muted)', fontWeight: 600, letterSpacing: '0.03em' }}>
                         {data.zoningVerificationStatus === 'resolving'
-                          ? 'GOOGLE CUSTOM SEARCH + GEMINI 3.5 FLASH'
+                          ? 'OFFICIAL GIS + GEMINI 3.5 FLASH'
                           : data.zoningVerificationStatus === 'official-gis'
                           ? 'VERIFIED: OFFICIAL GIS'
                           : data.zoningVerificationStatus === 'official-research'
-                            ? 'VERIFIED: CUSTOM SEARCH OFFICIAL SOURCE'
+                            ? 'VERIFIED: GEMINI OFFICIAL SOURCE'
                             : data.zoningVerificationStatus === 'corroborated-research'
-                              ? 'CUSTOM SEARCH: CORROBORATED LISTINGS'
+                              ? 'GEMINI: CORROBORATED LISTINGS'
                               : data.zoningVerificationStatus === 'listing-research'
-                                ? 'CUSTOM SEARCH: PROPERTY LISTING'
+                                ? 'GEMINI: PROPERTY LISTING'
                                 : data.zoningVerificationStatus === 'statewide-reported'
                                   ? 'REPORTED: STATEWIDE PARCEL'
                                   : data.zoningVerificationStatus === 'planning-designation'
                                     ? 'OFFICIAL PLANNING DESIGNATION'
                                     : data.zoningVerificationStatus === 'review-required'
-                                      ? 'CUSTOM SEARCH RESULT NEEDS REVIEW'
+                                      ? 'GEMINI RESULT NEEDS REVIEW'
                                       : data.zoningVerificationStatus === 'conflict'
                                         ? 'CONFLICT: GIS RETAINED'
                                         : 'NOT VERIFIED'}
@@ -4218,7 +4218,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                 <SourceLinks
                   label="Zoning evidence sources"
                   sources={[...(data.zoningSources || []), ...(data.zoningSourceUrl ? [data.zoningSourceUrl] : [])]}
-                  emptyText="Gemini Google Search did not return a source URL for this address."
+                  emptyText="No source URL was returned for this address."
                 />
 
                 {data.gridics ? (
@@ -4428,7 +4428,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                 ) : data.zoningStandardsStatus === 'resolving' ? (
                   <div style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '12px 0', color: 'var(--text-muted)', fontSize: '0.8rem' }}>
                     <Loader2 size={14} className="spinner" />
-                    <span>Searching the full address with Gemini 3.5 Flash...</span>
+                    <span>Checking official GIS and researching standards with Gemini 3.5 Flash...</span>
                   </div>
                 ) : (
                   <div className="cost-disclaimer">Gemini Google Search did not return source-backed setbacks or allowance values for this address.</div>
@@ -4890,6 +4890,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                         <div className="clearing-hero-meta">
                           <span className="clearing-treecount">~{landClearing.treeCount.toLocaleString()} trees to remove</span>
                           {landClearing.canopyCoverPct != null && <span className="clearing-canopy">~{landClearing.canopyCoverPct}% tree canopy · {landClearing.density}</span>}
+                          <span className="clearing-canopy">{landClearing.treeCountMethod === 'satellite-canopy-analysis' ? 'parcel-masked satellite analysis' : 'Gemini vision analysis'}</span>
                           <span className="clearing-acres">{landClearing.acres.toLocaleString()} acres · {landClearing.realTimePricing ? `live sourced ${landClearing.pricingScope || 'regional'} estimate` : 'pricing unavailable'}</span>
                         </div>
                       </div>
@@ -4947,7 +4948,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
 
                       <SourceLinks label="Imagery sources" sources={landClearing.imagerySources} />
                       <SourceLinks label="Pricing sources" sources={landClearing.pricingSources} emptyText="No current pricing source was verified; no dollar estimate is shown." />
-                      <div className="cost-disclaimer">Tree count and canopy are AI interpretations of the cited imagery. {landClearing.realTimePricing ? 'Displayed ranges are synthesized from the cited current local or Carolinas regional pricing pages; they are budget estimates, not quotes.' : 'No unsourced fallback price is displayed.'} A ground assessment and contractor bid are still required.</div>
+                      <div className="cost-disclaimer">Tree count and canopy are estimates from the cited satellite imagery{landClearing.treeCountMethod === 'satellite-canopy-analysis' ? ' using the parcel boundary and local image analysis' : ' using Gemini Vision'}. {landClearing.realTimePricing ? 'Displayed ranges are synthesized from the cited current local or Carolinas regional pricing pages; they are budget estimates, not quotes.' : 'No unsourced fallback price is displayed.'} A ground assessment and contractor bid are still required.</div>
                     </>
                   ) : null}
                 </div>
