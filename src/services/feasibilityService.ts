@@ -277,7 +277,13 @@ function queueGemini<T>(task: () => Promise<T>, priority: GeminiPriority = 'low'
   //    key #2 all at once and trip its per-minute quota (429). Running them
   //    one-at-a-time keeps the second key under its limit.
   const background = laneKind === 'background' && hasSecondGeminiKey();
-  const serialize = priority === 'idle' || (background && priority !== 'high');
+  // Serialize background section lookups (cost, takeoff, tree count, utilities)
+  // one-at-a-time even on a SINGLE key: otherwise they burst the shared key all
+  // at once and trip its per-minute quota (429), which is what made the tree
+  // count / utilities intermittently fail with "didn't answer". With a 2nd key
+  // they serialize in its own lane; with one key, in the primary lane. User-facing
+  // 'high' work (report/chat/zoning) still fires immediately and in parallel.
+  const serialize = priority === 'idle' || (laneKind === 'background' && priority !== 'high');
   if (!serialize) return task();
   const lane = geminiLanes[background ? 1 : 0];
   return new Promise<T>((resolve, reject) => {
@@ -1612,7 +1618,7 @@ export async function detectNcCounty(address: string, googleKey: string): Promis
  * layer. Returns the parcel's situs address (or a reverse-geocoded one for vacant
  * land) and county so the normal analysis can run from it. Null if not found.
  */
-export async function lookupParcelById(pin: string, googleKey: string): Promise<{ address: string; county: string; lat?: number; lng?: number } | null> {
+async function lookupNcParcelById(pin: string, googleKey: string): Promise<{ address: string; county: string; lat?: number; lng?: number } | null> {
   const clean = pin.trim().replace(/'/g, "''");
   if (clean.length < 3) return null;
   const where = `UPPER(parno) = '${clean.toUpperCase()}'`;
@@ -1655,6 +1661,51 @@ export async function lookupParcelById(pin: string, googleKey: string): Promise<
     }
     return county ? { address: `${county} County parcel ${a.parno}`, county, lat, lng } : null;
   } catch { return null; }
+}
+
+/** SC parcel-ID lookup: the statewide SC layer is keyed by T_Map_Number (not the
+ *  NC `parno`) and carries no situs address, so we reverse-geocode the parcel
+ *  centroid for a display address and map the UPPERCASE county to the config key. */
+async function lookupScParcelById(pin: string, googleKey: string): Promise<{ address: string; county: string; lat?: number; lng?: number } | null> {
+  const clean = pin.trim().replace(/'/g, "''");
+  if (clean.length < 3) return null;
+  const where = `UPPER(T_Map_Number) = '${clean.toUpperCase()}'`;
+  const url = `${SC_STATEWIDE_PARCEL_LAYER}/query?where=${encodeURIComponent(where)}` +
+    `&outFields=${encodeURIComponent('T_Map_Number,County')}&returnGeometry=true&outSR=4326&resultRecordCount=1&f=json`;
+  try {
+    const res = await fetchWithTimeout(url, 15000, { cache: 'no-store' });
+    if (!res.ok) return null;
+    const feat = (await res.json())?.features?.[0];
+    if (!feat) return null;
+    const rawCounty = String(feat.attributes?.County || '').trim();
+    const proper = SC_COUNTY_NAMES.find((n) => n.toLowerCase() === rawCounty.toLowerCase()) || rawCounty;
+    const county = proper ? `${proper}, SC` : '';
+    let lat: number | undefined, lng: number | undefined;
+    const ring: number[][] | undefined = feat.geometry?.rings?.[0];
+    if (ring?.length) { const c = ringCentroid(ring); if (c) { lng = c[0]; lat = c[1]; } }
+    if (typeof lat === 'number' && typeof lng === 'number' && googleKey) {
+      try {
+        const gr = await fetchWithTimeout(`https://maps.googleapis.com/maps/api/geocode/json?latlng=${lat},${lng}&key=${googleKey}`, 8000, { cache: 'no-store' });
+        if (gr.ok) {
+          const gj = await gr.json();
+          const best = gj.results?.find((r: any) => r.types?.some((t: string) => ['street_address', 'premise'].includes(t))) || gj.results?.[0];
+          const addr = (best?.formatted_address || '').replace(/,?\s*USA$/i, '').trim();
+          if (addr) return { address: addr, county, lat, lng };
+        }
+      } catch { /* fall through */ }
+    }
+    return county ? { address: `${proper} County, SC parcel ${clean}`, county, lat, lng } : null;
+  } catch { return null; }
+}
+
+/** Parcel-ID lookup across BOTH states. NC (parno) and SC (T_Map_Number) live on
+ *  different services, so query both in parallel and return whichever resolves. */
+export async function lookupParcelById(pin: string, googleKey: string): Promise<{ address: string; county: string; lat?: number; lng?: number } | null> {
+  const [nc, sc] = await Promise.all([
+    lookupNcParcelById(pin, googleKey).catch(() => null),
+    lookupScParcelById(pin, googleKey).catch(() => null),
+  ]);
+  return nc || sc;
 }
 
 /**
