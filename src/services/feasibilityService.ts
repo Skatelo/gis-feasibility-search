@@ -166,10 +166,33 @@ export async function ncAddressSuggestions(query: string, max = 5): Promise<stri
  *  Zoning & Allowances card. */
 const GEMINI_ZONING_TIMEOUT_MS = 120_000;
 
-/** fetch() with an abort timeout so a hung GIS server fails fast instead of stalling the UI. */
+/** Cellular / slow-link headroom. Fixed timeouts that are fine on Wi-Fi trip on
+ *  cellular (higher latency, packet loss, tower handoffs), so on a slow or mobile
+ *  connection every request gets proportionally more time before it aborts. Wi-Fi
+ *  and desktop are unchanged (factor 1). Uses the Network Information API where it
+ *  exists (Android/Chrome); iOS Safari doesn't expose it, so a real phone still
+ *  gets headroom via the mobile UA check. */
+function connectionSlowdownFactor(): number {
+  try {
+    const conn = typeof navigator !== 'undefined' ? (navigator as any).connection : undefined;
+    if (conn) {
+      if (conn.saveData) return 2.5;
+      const et = String(conn.effectiveType || '').toLowerCase();
+      if (et === 'slow-2g' || et === '2g') return 3;
+      if (et === '3g') return 2.5;
+      if (et === '4g') return isMobileDevice() ? 1.6 : 1; // 4g phones still drop on handoffs
+    }
+  } catch { /* Network Information API unavailable */ }
+  return isMobileDevice() ? 1.6 : 1;
+}
+
+/** fetch() with an abort timeout so a hung server fails fast instead of stalling
+ *  the UI. The timeout is scaled up on slow/cellular links so a legitimately slow
+ *  mobile response isn't aborted as if it were a hang. */
 async function fetchWithTimeout(url: string, ms = 20000, init?: RequestInit): Promise<Response> {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(new DOMException('Request timed out', 'TimeoutError')), ms);
+  const scaledMs = Math.round(ms * connectionSlowdownFactor());
+  const timer = setTimeout(() => controller.abort(new DOMException('Request timed out', 'TimeoutError')), scaledMs);
   try {
     return await fetch(url, { ...init, signal: controller.signal });
   } finally {
