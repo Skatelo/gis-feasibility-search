@@ -139,6 +139,9 @@ export interface LandClearingEstimate {
   canopyCoverPct: number | null;   // AI tree-canopy cover (0–100)
   density: 'light' | 'medium' | 'heavy';
   treeCount: number;               // total trees to remove
+  /** How the imagery count was produced. The local canopy model avoids a
+   *  network/model timeout while still analyzing the cited satellite image. */
+  treeCountMethod: 'gemini-vision' | 'satellite-canopy-analysis';
   trees: TreeRemovalLine[];        // by size
   treeRemovalCost: number;         // Σ trees[].cost
   treeRemovalCostLow: number;

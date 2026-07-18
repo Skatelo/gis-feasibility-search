@@ -48,5 +48,9 @@ test('estimate policy requires sources and excludes alternative utility scenario
   assert.match(serviceSource, /coverageStatus: missing\.length === 0 \? 'complete' : 'partial'/);
   assert.match(serviceSource, /const responseGroups = responses\.map\(flattenPplxResults\)/);
   assert.match(serviceSource, /maxScrapeTargets: Math\.min\(12, Math\.max\(8, searchQueries\.length\)\)/);
+  assert.match(serviceSource, /estimateTreesFromSatellitePixels/);
+  assert.match(serviceSource, /treeCountMethod: vision\.method/);
+  assert.match(serviceSource, /reportData\.geometryStatus === 'stale-hidden' \? undefined : reportData\.boundaryRings/);
+  assert.match(serviceSource, /new Promise<null>\(\(resolve\) => setTimeout\(\(\) => resolve\(null\), 45_000\)\)/);
   assert.doesNotMatch(serviceSource, /UTIL_ESTIMATE|TREE_RATE_FALLBACK|CLEARING_FALLBACK/);
 });
