@@ -2562,8 +2562,12 @@ export async function executeLandAnalysis(
     };
     const withZoningTimeout = <T,>(promise: Promise<T>, timeoutMs: number, fallback: T): Promise<T> => {
       let timer: ReturnType<typeof setTimeout> | undefined;
+      // Scale the cap on slow/cellular links so it stays consistent with the
+      // connection-aware fetch timeouts. Otherwise the outer race fires while the
+      // (scaled) inner request is still running and the district comes back empty.
+      const scaledMs = Math.round(timeoutMs * connectionSlowdownFactor());
       const timeout = new Promise<T>((resolve) => {
-        timer = setTimeout(() => resolve(fallback), timeoutMs);
+        timer = setTimeout(() => resolve(fallback), scaledMs);
       });
       return Promise.race([promise, timeout]).finally(() => {
         if (timer) clearTimeout(timer);
@@ -2619,7 +2623,7 @@ export async function executeLandAnalysis(
 
     // A dynamic official resolver may need longer than a registered ArcGIS
     // layer. Let it finish while Gemini is already searching.
-    if (!officialZoning) officialZoning = await withZoningTimeout(officialLookup, 15_000, null);
+    if (!officialZoning) officialZoning = await withZoningTimeout(officialLookup, 25_000, null);
 
     let officialResult: ZoningResult | null = null;
     const officialCode = officialZoning ? cleanCode(officialZoning.code) : null;
