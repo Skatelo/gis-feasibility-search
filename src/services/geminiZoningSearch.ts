@@ -17,9 +17,9 @@ type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Respo
 
 // Zoning search models in priority order. gemini-3-flash-preview grounds as
 // accurately as the flagship (same district across repeated tests) but answers
-// ~2x faster; gemini-3.5-flash is the stable fallback if the preview model is
+// ~2x faster; gemini-3.6-flash is the stable fallback if the preview model is
 // ever retired (a retired model answers HTTP 404, which triggers the fallback).
-export const GEMINI_ZONING_MODELS = ['gemini-3-flash-preview', 'gemini-3.5-flash'] as const;
+export const GEMINI_ZONING_MODELS = ['gemini-3-flash-preview', 'gemini-3.6-flash'] as const;
 export const GEMINI_ZONING_MODEL = GEMINI_ZONING_MODELS[0];
 
 // Zoning district identification needs the model's full agentic search depth.

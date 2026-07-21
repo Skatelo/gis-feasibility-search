@@ -4119,7 +4119,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                   <h3 className="registry-card-header" style={{ margin: 0 }}>Zoning & Allowances</h3>
                   <span
                     title={data.zoningStandardsStatus === 'resolving'
-                      ? 'Gemini 3.5 Flash is searching Google for full-address zoning evidence and source-backed standards.'
+                      ? 'Gemini 3.6 Flash is searching Google for full-address zoning evidence and source-backed standards.'
                       : data.zoningStandardsStatus === 'official'
                       ? 'Dimensional standards were read from the cited adopted ordinance.'
                       : data.zoningStandardsStatus === 'mixed'
@@ -4151,7 +4151,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                       Zoning Classification
                       <span style={{ display: 'block', fontSize: '9px', color: 'var(--text-muted)', fontWeight: 600, letterSpacing: '0.03em' }}>
                         {data.zoningVerificationStatus === 'resolving'
-                          ? 'OFFICIAL GIS + GEMINI 3.5 FLASH'
+                          ? 'OFFICIAL GIS + GEMINI 3.6 FLASH'
                           : data.zoningVerificationStatus === 'official-gis'
                           ? 'VERIFIED: OFFICIAL GIS'
                           : data.zoningVerificationStatus === 'official-research'
@@ -4428,7 +4428,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                 ) : data.zoningStandardsStatus === 'resolving' ? (
                   <div style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '12px 0', color: 'var(--text-muted)', fontSize: '0.8rem' }}>
                     <Loader2 size={14} className="spinner" />
-                    <span>Checking official GIS and researching standards with Gemini 3.5 Flash...</span>
+                    <span>Checking official GIS and researching standards with Gemini 3.6 Flash...</span>
                   </div>
                 ) : (
                   <div className="cost-disclaimer">Gemini Google Search did not return source-backed setbacks or allowance values for this address.</div>
@@ -5183,7 +5183,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                       : officialGis
                         ? 'Show the exact-parcel result from the official GIS point-query service; this service does not publish raster map export'
                       : webZoning
-                        ? `Zoning resolved by Gemini 3.5 Flash with Google Search grounding`
+                        ? `Zoning resolved by Gemini 3.6 Flash with Google Search grounding`
                         : `${data.countyName} County does not publish a zoning GIS service`;
                     return (
                       <button
@@ -5273,9 +5273,9 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                   <div className="gemini-header-text">
                     <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
                       <span className="gemini-title">Land Assistant</span>
-                      <span className="gemini-model-badge">3.5 Flash</span>
+                      <span className="gemini-model-badge">3.6 Flash</span>
                     </div>
-                    <span className="gemini-subtitle">Gemini 3.5 Flash — Google Search grounded</span>
+                    <span className="gemini-subtitle">Gemini 3.6 Flash — Google Search grounded</span>
                   </div>
                   <div className="chat-header-actions">
                     <button type="button" className="chat-header-btn" title="New chat" onClick={startNewChat}>
