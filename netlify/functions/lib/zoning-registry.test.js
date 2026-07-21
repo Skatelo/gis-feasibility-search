@@ -537,7 +537,7 @@ test('Gemini zoning search uses the complete address and a fresh grounded Intera
   assert.deepEqual(result.searchQueries, [`What is ${fullAddress} zoning code`]);
 });
 
-test('property zoning keeps official point GIS identity and uses Gemini 3.5 Flash for standards', () => {
+test('property zoning keeps official point GIS identity and uses Gemini 3.6 Flash for standards', () => {
   const stage = serviceSource.slice(
     serviceSource.indexOf('// STAGE 3 - zoning.'),
     serviceSource.indexOf('// STAGE 4'),
@@ -565,7 +565,7 @@ test('property zoning keeps official point GIS identity and uses Gemini 3.5 Flas
   assert.match(geminiPipeline, /fetchGeminiZoningSearchEvidence\(/);
   assert.match(geminiPipeline, /evidence\.urls\.length/);
   assert.doesNotMatch(geminiPipeline, /perplexity|crawlee|fetchCountyZoningCode|custom search/i);
-  assert.match(geminiSearchSource, /gemini-3\.5-flash/);
+  assert.match(geminiSearchSource, /gemini-3\.6-flash/);
   assert.match(geminiSearchSource, /v1beta\/interactions/);
   assert.match(geminiSearchSource, /tools: \[\{ type: 'google_search' \}\]/);
   assert.match(geminiSearchSource, /thinking_level: GEMINI_ZONING_THINKING_LEVEL/);
@@ -575,7 +575,7 @@ test('property zoning keeps official point GIS identity and uses Gemini 3.5 Flas
   assert.doesNotMatch(geminiSearchSource, /customsearch\/v1|url_context|searchParams\.set\('cx'/i);
   assert.doesNotMatch(settingsSource, /googleCustomSearch|Programmable Search Engine ID/);
   assert.match(componentSource, /Zoning & Allowances/);
-  assert.match(componentSource, /Checking official GIS and researching standards with Gemini 3\.5 Flash/);
+  assert.match(componentSource, /Checking official GIS and researching standards with Gemini 3\.6 Flash/);
   assert.match(componentSource, /Setback rules and exceptions/);
   assert.match(componentSource, /Published zoning restrictions/);
   assert.match(componentSource, /STANDARDS:[\s\S]*LOADING/);

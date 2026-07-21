@@ -10,7 +10,7 @@ A high-performance real estate feasibility screening dashboard built with React,
   - **Gaston County** (Gastonia/Mount Holly)
   - **Cabarrus County** (Concord/Kannapolis)
 * **Topography & Elevation Metrics**: Integrates with OpenTopography (Copernicus COP30 DEM) to gauge site slope and buildability classification (Buildable vs. Non-Buildable).
-* **Zoning & Allowances**: sends the complete NC or SC address to Gemini 3.5 Flash with Google Search grounding to return a source-backed district, setbacks, restrictions, and allowances.
+* **Zoning & Allowances**: sends the complete NC or SC address to Gemini 3.6 Flash with Google Search grounding to return a source-backed district, setbacks, restrictions, and allowances.
 * **Hybrid Live Web Data**: the Perplexity Search API handles non-zoning ranked searches and source discovery; a bounded Crawlee scraper reads harder utility, fee, cost, and report sources plus linked PDF, DOCX, XLSX, CSV, JSON, XML, and text documents.
 * **Comparable Sold Listings**: Scrapes verified sold properties from Realtor.com via Google Search grounding to calculateDeveloped After Repair Value (ARV).
 * **Mortgage & Sales Transactions**: Runs an explicit, on-demand RealEstateAPI.com Property Detail lookup for the exact NC or SC address and displays recorded mortgage and sale history in the left report column.
@@ -50,7 +50,7 @@ Configure `REALESTATEAPI_KEY` as a Netlify server environment variable, or add a
 
 ## Zoning Search
 
-The in-report **Zoning & Allowances** section uses Gemini 3.5 Flash with its built-in Google Search grounding tool. Each lookup includes the complete street, city, state name, ZIP code, and `United States`; the request uses `cache: "no-store"`. The grounded response must include source citations before the app accepts a district or its adopted standards.
+The in-report **Zoning & Allowances** section uses Gemini 3.6 Flash with its built-in Google Search grounding tool. Each lookup includes the complete street, city, state name, ZIP code, and `United States`; the request uses `cache: "no-store"`. The grounded response must include source citations before the app accepts a district or its adopted standards.
 
 Configure the Gemini API key in **Account & API Settings**. No separate search credential or search-engine configuration is required.
 

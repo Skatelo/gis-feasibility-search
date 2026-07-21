@@ -238,7 +238,7 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
                   {showGeminiKey ? <EyeOff size={16} /> : <Eye size={16} />}
                 </button>
               </div>
-              <p className="field-help">Gemini 3.5 Flash uses Google Search grounding to find full-address zoning codes, setbacks, restrictions, and source links. It also powers comp exterior-photo Vision, cost analysis, and the Advanced chatbot. Comp records themselves come only from RealtyAPI.</p>
+              <p className="field-help">Gemini 3.6 Flash uses Google Search grounding to find full-address zoning codes, setbacks, restrictions, and source links. It also powers comp exterior-photo Vision, cost analysis, and the Advanced chatbot. Comp records themselves come only from RealtyAPI.</p>
             </div>
 
             {/* Gemini Key #2 — optional second quota lane for background lookups */}
@@ -290,7 +290,7 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
                   {showPerplexityKey ? <EyeOff size={16} /> : <Eye size={16} />}
                 </button>
               </div>
-              <p className="field-help">Optional non-zoning research for utilities, fees, costs, and reports. Zoning never uses Perplexity or Crawlee; it uses Gemini 3.5 Flash with Google Search grounding only.</p>
+              <p className="field-help">Optional non-zoning research for utilities, fees, costs, and reports. Zoning never uses Perplexity or Crawlee; it uses Gemini 3.6 Flash with Google Search grounding only.</p>
             </div>
 
             {/* Mapbox — satellite base map for the parcel aerial view */}
@@ -439,7 +439,7 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
                   {showDeepSeekKey ? <EyeOff size={16} /> : <Eye size={16} />}
                 </button>
               </div>
-              <p className="field-help">Optional. Enables the Gemini + DeepSeek fusion report; zoning now uses Gemini 3.5 Flash. Get a key at platform.deepseek.com.</p>
+              <p className="field-help">Optional. Enables the Gemini + DeepSeek fusion report; zoning now uses Gemini 3.6 Flash. Get a key at platform.deepseek.com.</p>
             </div>
 
             {/* RentCast API Key (enriches buyer/deal sale prices) */}

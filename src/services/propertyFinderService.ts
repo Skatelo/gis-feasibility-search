@@ -119,7 +119,7 @@ export interface PropertyResult {
   builderInterest?: 'high' | 'medium' | 'low';
 }
 
-const GEMINI_VISION_MODEL = 'gemini-3.5-flash';
+const GEMINI_VISION_MODEL = 'gemini-3.6-flash';
 
 // ---------------------------------------------------------------------------
 // Imagery acquisition

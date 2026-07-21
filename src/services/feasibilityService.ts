@@ -2443,7 +2443,7 @@ export async function executeLandAnalysis(
   });
 
   // STAGE 3 - zoning. Search the complete postal address with Google Custom
-  // Search, then let Gemini 3.5 Flash read only those result URLs and populate
+  // Search, then let Gemini 3.6 Flash read only those result URLs and populate
   // the existing Zoning & Allowances card.
   let resolvedPostalAddress = baseResult.inputAddress;
   {
@@ -2606,7 +2606,7 @@ export async function executeLandAnalysis(
       jurisdiction: officialZoning?.jurisdiction || zoningPlace || undefined,
     } : undefined;
 
-    onStageChange?.("Verifying official GIS and researching standards with Gemini 3.5 Flash...");
+    onStageChange?.("Verifying official GIS and researching standards with Gemini 3.6 Flash...");
     const researchPromise = withZoningTimeout(
       fetchZoningWithGeminiSearch(fullZoningAddress, countyName, zoningJurisdictionHint, officialEvidence),
       GEMINI_ZONING_TIMEOUT_MS + 5_000,
@@ -2674,7 +2674,7 @@ export async function executeLandAnalysis(
     } else if (!officialResult) {
       zoningCode = '';
       zoningDescription = researchError
-        || `Neither official point GIS nor Gemini 3.5 Flash returned a source-backed zoning code for ${fullZoningAddress}.`;
+        || `Neither official point GIS nor Gemini 3.6 Flash returned a source-backed zoning code for ${fullZoningAddress}.`;
       zoningSource = 'web';
       zoningSourceUrl = undefined;
       zoningSources = [];
@@ -3093,7 +3093,7 @@ async function skipTraceLLCViaGemini(
 ): Promise<LlcSkipTrace | null> {
   const geminiApiKey = getUserKeys().gemini || '';
   if (!geminiApiKey) return null;
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=${geminiApiKey}`;
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key=${geminiApiKey}`;
 
   const name = anchor?.canonicalName || query;
   const registry = state === 'NC' ? 'the NC Secretary of State (sosnc.gov)' : `the ${state} Secretary of State business registry`;
@@ -4824,7 +4824,7 @@ function urlsWrittenInZoningAnswer(raw: string): string[] {
     .filter((url): url is string => !!url))];
 }
 
-/** Gemini 3.5 Flash searches the complete address with its built-in Google
+/** Gemini 3.6 Flash searches the complete address with its built-in Google
  * Search tool and returns the district plus source-backed allowances. */
 export async function fetchZoningWithGeminiSearch(
   address: string,
@@ -5891,7 +5891,7 @@ async function imageUrlToInline(url: string): Promise<{ mimeType: string; data: 
  *  a listing's images, or -1 if none. null on failure. */
 async function geminiPickExteriorIndex(images: { mimeType: string; data: string }[], geminiKey: string): Promise<number | null> {
   try {
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=${geminiKey}`;
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key=${geminiKey}`;
     const parts: any[] = [{
       text: `These ${images.length} images (indexed 0 to ${images.length - 1}, in order) are photos from ONE home listing. Reply with ONLY the single integer index of the image that best shows the BUILDING'S EXTERIOR — the whole house/structure seen from OUTSIDE (front facade preferred). It must NOT be an interior room (kitchen, bath, bedroom, living room), an aerial/satellite view, a map, a floor plan, a sign, a logo, or any cartoon/graphic. If NONE clearly shows a building exterior, reply -1. Reply with just the number.`,
     }];
@@ -6231,7 +6231,7 @@ async function groundedGeminiText(geminiKey: string, prompt: string, systemText:
     generationConfig: { thinkingConfig: { thinkingLevel: 'low' } },
     ...(usePerplexity ? {} : { tools: [{ google_search: {} }] }),
   });
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=${geminiKey}`;
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key=${geminiKey}`;
   // 3 attempts with backoff on THIS key only. Background lookups stay on the
   // background key (#2) and the report/chat/zoning on the primary key — the two
   // keys keep their own quota lanes and never fall through to each other.
@@ -6796,9 +6796,9 @@ For dense continuous forest, ESTIMATE counts from typical spacing (~80-150 trees
 Return ONLY JSON: {"small":<int>,"medium":<int>,"large":<int>,"canopyCoverPct":<0-100>,"density":"light|medium|heavy"}`;
   const parts: any[] = [{ text: prompt }];
   imgs.forEach((img) => parts.push({ inline_data: { mime_type: img.mimeType, data: img.data } }));
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=${geminiKey}`;
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key=${geminiKey}`;
   // Counting trees from an image is pure visual classification, so thinking is
-  // turned OFF (thinkingBudget: 0). gemini-3.5-flash defaults to `medium`
+  // turned OFF (thinkingBudget: 0). gemini-3.6-flash defaults to `medium`
   // thinking, which only added latency AND sometimes consumed the whole response
   // so no JSON came back ("the satellite tree count didn't answer"). With thinking
   // off the model returns clean JSON in ~1.5s (vs ~4-5s) on every attempt.
@@ -7658,8 +7658,8 @@ export interface ChatMessage {
 }
 
 // ---------------------------------------------------------------------------
-// Fusion engine (mixture-of-agents): Gemini 3.5 Flash and DeepSeek V4 Pro
-// answer the SAME prompt in PARALLEL, then Gemini 3.5 Flash acts as JUDGE and
+// Fusion engine (mixture-of-agents): Gemini 3.6 Flash and DeepSeek V4 Pro
+// answer the SAME prompt in PARALLEL, then Gemini 3.6 Flash acts as JUDGE and
 // STREAMS the synthesized final answer. Falls back to single-model Gemini
 // streaming when no DeepSeek key is configured or DeepSeek is unavailable.
 // ---------------------------------------------------------------------------
@@ -7852,7 +7852,7 @@ async function webSearchViaGemini(query: string, geminiKey: string): Promise<str
       return '(no results found)';
     } catch { /* fall through to grounding */ }
   }
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=${geminiKey}`;
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key=${geminiKey}`;
   const body = JSON.stringify({
     contents: [{ role: 'user', parts: [{ text: `Search the live web and report the most CURRENT, specific facts for: "${query}". Give concrete numbers/dates and a source URL for each finding. Be concise — a few bullet lines, no preamble.` }] }],
     tools: [{ google_search: {} }],
@@ -8119,7 +8119,7 @@ After the report, answer follow-up questions conversationally from the stored co
 ${redfinTable || `- ${marketStatsLine}`}
 
 ### 3. Zoning & Estimated Density Allowances
-- Zoning Classification (Gemini 3.5 Flash with official GIS and grounded sources): ${reportData.zoningCode} (${reportData.zoningDescription})
+- Zoning Classification (Gemini 3.6 Flash with official GIS and grounded sources): ${reportData.zoningCode} (${reportData.zoningDescription})
 - Development Capacity: ${reportData.gridics ? `Max Building Footprint: ${reportData.gridics.maxBuildingFootprintSqft.toLocaleString()} SF, Max Height: ${reportData.gridics.maxHeightFt} ft, Floor Area Ratio (FAR): ${reportData.gridics.floorAreaRatio}` : 'Official zoning-map review required before calculating development capacity.'}
 - Dimensional Setbacks: ${reportData.gridics ? `Front: ${reportData.gridics.setbacks.frontFt} ft | Rear: ${reportData.gridics.setbacks.rearFt} ft | Side: ${reportData.gridics.setbacks.sideFt} ft` : 'Confirm on the cited official zoning or planning source.'}
 - Setback Rules/Exceptions: ${reportData.zoningSetbackNotes?.length ? reportData.zoningSetbackNotes.join(' | ') : 'No additional source-backed setback notes published.'}
@@ -8200,10 +8200,10 @@ ${reportData.comps && reportData.comps.length > 0
     });
   }
 
-  const GEN_BASE = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash`;
+  const GEN_BASE = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash`;
   // With the Perplexity research pack in context, the google_search tool is
   // dropped — the report synthesizes from the pack (faster, no grounding quota).
-  // A HIGH maxOutputTokens is essential: Gemini 3.5 Flash spends "thinking" tokens
+  // A HIGH maxOutputTokens is essential: Gemini 3.6 Flash spends "thinking" tokens
   // from the same output budget, so without a generous cap a long 25-section
   // report can exhaust it on reasoning and return an EMPTY candidate
   // ("No response generated."). 32k leaves room for thinking + the full report.
@@ -8219,8 +8219,8 @@ ${reportData.comps && reportData.comps.length > 0
     ...(researchUrls.length ? {} : { tools: [{ google_search: {} }] }),
   };
 
-  // FUSION: when a DeepSeek key is configured, Gemini 3.5 Flash and DeepSeek V4
-  // Pro draft the SAME task IN PARALLEL, then Gemini 3.5 Flash JUDGES and streams
+  // FUSION: when a DeepSeek key is configured, Gemini 3.6 Flash and DeepSeek V4
+  // Pro draft the SAME task IN PARALLEL, then Gemini 3.6 Flash JUDGES and streams
   // the synthesized answer. Without a DeepSeek key, stream a single Gemini answer.
   const deepSeekKey = getDeepSeekKey();
   const lastUser = [...messages].reverse().find((m) => m.role === 'user')?.content || '';
@@ -8304,7 +8304,7 @@ ${reportData.comps && reportData.comps.length > 0
     ]);
     // If BOTH drafts failed, there's nothing to fuse — stream the base report.
     if (!gDraft && !dDraft) return finish(await streamResilient(baseBody));
-    const judgeInstruction = `Two independent senior analysts each produced the DRAFT below for the SAME task. Acting as the JUDGE, synthesize the single best response that fully follows the Operating Standards:\n- Merge the strongest, most evidence-grounded content from both drafts.\n- Resolve any conflict in favor of cited/verified evidence; where they disagree and neither is verifiable, label it Likely or Unknown.\n- Keep the required section structure and the Verified / Likely / Unknown labels.\n- Output ONLY the final report. Do NOT mention drafts, judging, or model names.\n\n===== DRAFT A (Google Gemini 3.5 Flash) =====\n${gDraft || '(unavailable)'}\n\n===== DRAFT B (DeepSeek V4 Pro) =====\n${dDraft || '(DeepSeek draft unavailable — rely on Draft A and the data packet)'}`;
+    const judgeInstruction = `Two independent senior analysts each produced the DRAFT below for the SAME task. Acting as the JUDGE, synthesize the single best response that fully follows the Operating Standards:\n- Merge the strongest, most evidence-grounded content from both drafts.\n- Resolve any conflict in favor of cited/verified evidence; where they disagree and neither is verifiable, label it Likely or Unknown.\n- Keep the required section structure and the Verified / Likely / Unknown labels.\n- Output ONLY the final report. Do NOT mention drafts, judging, or model names.\n\n===== DRAFT A (Google Gemini 3.6 Flash) =====\n${gDraft || '(unavailable)'}\n\n===== DRAFT B (DeepSeek V4 Pro) =====\n${dDraft || '(DeepSeek draft unavailable — rely on Draft A and the data packet)'}`;
     const judgeBody = { ...baseBody, contents: [...contents, { role: 'user', parts: [{ text: judgeInstruction }] }] };
     // Judge first; if it fails before emitting, fall back to the plain base stream.
     return finish(await streamResilient(judgeBody, baseBody));
@@ -8351,7 +8351,7 @@ PARCEL: ${reportData.inputAddress} · ${parcelCountyLabel} · ${acres} acres · 
     parts.push({ text: `${textPrefix}${m.content}`.trim() || '(see attached files)' });
     return { role: m.role === 'user' ? 'user' : 'model', parts };
   });
-  const GEN_BASE = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash`;
+  const GEN_BASE = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash`;
   // PERPLEXITY MODE: search the user's question live (question + localized
   // variant, batched in one request) and answer from those sources instead of
   // the google_search tool.
