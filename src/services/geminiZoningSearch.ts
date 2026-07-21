@@ -15,11 +15,12 @@ export interface OfficialZoningEvidenceHint {
 
 type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 
-// Zoning search models in priority order. gemini-3-flash-preview grounds as
-// accurately as the flagship (same district across repeated tests) but answers
-// ~2x faster; gemini-3.6-flash is the stable fallback if the preview model is
-// ever retired (a retired model answers HTTP 404, which triggers the fallback).
-export const GEMINI_ZONING_MODELS = ['gemini-3-flash-preview', 'gemini-3.6-flash'] as const;
+// Zoning search models in priority order. gemini-3.6-flash (GA) is the primary
+// zoning model. gemini-3-flash-preview is kept as the fallback — in past tests it
+// grounded as accurately as the flagship (same district across repeated runs) at
+// ~2x the speed, so it's a solid backup if 3.6 is ever unavailable (a retired or
+// unknown model answers HTTP 404, which triggers the fallback).
+export const GEMINI_ZONING_MODELS = ['gemini-3.6-flash', 'gemini-3-flash-preview'] as const;
 export const GEMINI_ZONING_MODEL = GEMINI_ZONING_MODELS[0];
 
 // Zoning district identification needs the model's full agentic search depth.
