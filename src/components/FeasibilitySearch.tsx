@@ -12,8 +12,9 @@ import { listConversations, saveConversation, deleteConversation as deleteConvo,
 import type { ChatConversation } from '../services/chatStore';
 import { getSearchHistory, addSearchHistory } from '../services/searchHistoryStore';
 import { ReportsDrawer } from './ReportsDrawer';
-import type { SiteFeasibilityData, ConstructionCostEstimate, CostLineItem, MaterialTakeoff, LandClearingEstimate, UtilitiesEstimate } from '../types/feasibility';
+import type { SiteFeasibilityData, CompProperty, ConstructionCostEstimate, CostLineItem, MaterialTakeoff, LandClearingEstimate, UtilitiesEstimate } from '../types/feasibility';
 import { cleanCode } from '../services/zoning/normalization/zoning-normalizer';
+import { compCoverageTypesForAllowedTypes, getRollingCompDateWindow } from '../services/comps/comp-types';
 
 /** Group cost line items by category, preserving first-seen order. (Avoids the
  *  global Map — lucide-react's `Map` icon is imported in this file.) */
@@ -82,6 +83,54 @@ const SourceLinks: FC<{ label: string; sources?: string[]; emptyText?: string }>
           {(() => { try { return new URL(url).hostname.replace(/^www\./, ''); } catch { return 'source'; } })()}
         </a>
       )) : <span style={{ fontSize: '0.72rem', color: 'var(--warning, #d97706)' }}>{emptyText || 'No supporting source was verified.'}</span>}
+    </div>
+  );
+};
+
+const CompPhoto: FC<{ comp: CompProperty; index: number; googleMapsKey: string }> = ({ comp, index, googleMapsKey }) => {
+  const listingPhotos = [...new Set([comp.imageUrl, ...(comp.photoUrls || [])].filter((url): url is string => !!url))];
+  const streetViewLocation = comp.coords
+    ? `${comp.coords.lat},${comp.coords.lng}`
+    : comp.address;
+  const streetViewUrl = googleMapsKey && streetViewLocation
+    ? `https://maps.googleapis.com/maps/api/streetview?size=1200x600&location=${encodeURIComponent(streetViewLocation)}&fov=90&pitch=0&source=outdoor&return_error_code=true&key=${encodeURIComponent(googleMapsKey)}`
+    : '';
+  const sources = [
+    ...listingPhotos.map((url) => ({ url, label: 'Listing photo' })),
+    ...(streetViewUrl ? [{ url: streetViewUrl, label: 'Google Street View fallback' }] : []),
+  ];
+  const [sourceIndex, setSourceIndex] = useState(0);
+
+  const source = sources[sourceIndex];
+  if (!source) {
+    return (
+      <div style={{
+        display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px',
+        width: '100%', aspectRatio: '16 / 9', minHeight: '130px', borderRadius: '4px',
+        border: '1px dashed var(--bg-card-border)', background: 'var(--bg-main, #f1f5f9)',
+        color: 'var(--text-muted)', fontSize: '0.72rem',
+      }}>
+        <ImageOff size={14} /> No listing or Street View image available
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ position: 'relative', width: '100%', aspectRatio: '16 / 9', maxHeight: '420px', borderRadius: '4px', overflow: 'hidden', border: '1px solid var(--bg-card-border)', background: '#0f172a' }}>
+      <img
+        src={source.url}
+        onError={() => setSourceIndex((current) => current + 1)}
+        alt={`Comp ${index + 1}: ${comp.address}`}
+        loading="lazy"
+        style={{ width: '100%', height: '100%', objectFit: 'contain', display: 'block' }}
+      />
+      <span style={{
+        position: 'absolute', left: '8px', bottom: '8px', padding: '3px 6px',
+        borderRadius: '4px', background: 'rgba(15, 23, 42, 0.84)', color: '#fff',
+        fontSize: '0.65rem', fontWeight: 700,
+      }}>
+        {source.label}
+      </span>
     </div>
   );
 };
@@ -781,7 +830,6 @@ export const FeasibilitySearch: FC = () => {
   // Comps display/search filters
   const [compRadius, setCompRadius] = useState(5);          // max DRIVING-mile radius (3 / 5 / 10) — re-fetches
   const [compTypeFilter, setCompTypeFilter] = useState('all'); // property-type display filter
-  const [compsShowAll, setCompsShowAll] = useState(false);  // show 10 vs. all
   const [compsRefetching, setCompsRefetching] = useState(false);
   const [compsError, setCompsError] = useState('');         // radius re-run failure (card shows the reason)
   const [copiedId, setCopiedId] = useState<string | null>(null);
@@ -1092,7 +1140,6 @@ export const FeasibilitySearch: FC = () => {
   const changeCompRadius = async (newRadius: number) => {
     if (compsRefetching) return; // one run at a time
     setCompRadius(newRadius);
-    setCompsShowAll(false);
     setCompsError('');
     const d = data;
     if (!d || !d.coordinates) return;
@@ -1116,7 +1163,7 @@ export const FeasibilitySearch: FC = () => {
         d.zoningRestrictions || [],
       );
       if (seq !== searchSeqRef.current) return; // a new search superseded this
-      setData((prev) => (prev ? { ...prev, comps: run.comps, compRunSummary: run.summary } : prev));
+      setData((prev) => (prev ? { ...prev, comps: run.comps, compRunSummary: run.summary, compDateWindow: run.dateWindow } : prev));
     } catch (e: any) {
       console.warn('Comp radius re-fetch failed:', e);
       if (seq === searchSeqRef.current) setCompsError(`The ${newRadius}-mile comps run failed (${e?.message || 'network/API error'}) — the previous comp set is still shown. Tap a radius to retry.`);
@@ -3011,7 +3058,6 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
     setReportPending(false);
     setCompRadius(compPrefs.radiusMiles);
     setCompTypeFilter(compPrefs.propertyType);
-    setCompsShowAll(false);
     setCompsRefetching(false);
     setCompsError('');
     resetChatUiState();
@@ -3164,9 +3210,11 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
   // this district permits (data.compAllowedTypes) are offered, defaulting to
   // "All allowed" (a mix of every permitted type).
   const allComps = data?.comps || [];
+  const compDateWindow = data?.compDateWindow || getRollingCompDateWindow();
+  const compPhotoGoogleKey = getUserKeys().googleMaps || '';
   const compAllowedTypes = (data?.compAllowedTypes || []).filter((t) => COMP_TYPE_LABELS_MAP[t]);
   const compResultTypes = [...new Set(allComps.map((comp) => comp.compType || compTypeBucket(comp.propertyType)).filter((type) => COMP_TYPE_LABELS_MAP[type]))];
-  const compCoverageTypes = [...new Set([...compAllowedTypes, ...compResultTypes])];
+  const compCoverageTypes = [...new Set([...compCoverageTypesForAllowedTypes(compAllowedTypes), ...compResultTypes])];
   const COMP_TYPE_OPTIONS: { value: string; label: string }[] = [
     { value: 'all', label: compAllowedTypes.length ? 'All allowed' : 'All types' },
     ...compCoverageTypes.map((t) => ({ value: t, label: COMP_TYPE_LABELS_MAP[t] })),
@@ -3175,7 +3223,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
   const filteredComps = effectiveCompTypeFilter === 'all'
     ? allComps
     : allComps.filter((comp) => (comp.compType || compTypeBucket(comp.propertyType)) === effectiveCompTypeFilter);
-  const visibleComps = compsShowAll ? filteredComps : filteredComps.slice(0, 10);
+  const visibleComps = filteredComps;
   const compCoverageRow = compCoverageTypes.length > 0 ? (
     <div style={{ marginBottom: '0.65rem' }}>
       <div className="comp-filter-label" style={{ marginBottom: '6px' }}>Zoning-matched sold categories</div>
@@ -4554,7 +4602,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                     <span>
                       {['review-required', 'planning-designation', 'unavailable'].includes(String(data.zoningVerificationStatus))
                         ? (data.compRunSummary || 'RealtyAPI comps are waiting for a source-backed zoning classification so property-use categories are not mixed.')
-                        : `No qualifying comps found: no new-construction sales (built 2025–2026) matching this parcel's zoning use closed within the last 12 months inside the ${compRadius} driving-mile radius (RealtyAPI: Realtor, Redfin, Zillow). The chat bubble has the run breakdown. Try a wider radius:`}
+                        : `No qualifying comps found: no zoning-matched sale built ${compDateWindow.minYearBuilt}-${compDateWindow.maxYearBuilt} closed from ${recordDate(compDateWindow.soldSinceDate)} through ${recordDate(compDateWindow.asOfDate)} inside the ${compRadius} driving-mile radius (RealtyAPI: Realtor, Redfin, Zillow). Every zoning-permitted category was searched. Try a wider radius:`}
                     </span>
                   </div>
                   {compCoverageRow}
@@ -4600,7 +4648,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                     )}
                   </div>
                   <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginBottom: '0.6rem', fontStyle: 'italic', borderBottom: '1px dashed var(--bg-card-border)', paddingBottom: '0.5rem' }}>
-                    Criteria: New construction (built 2025–2026) matching the parcel's source-backed zoning uses, closed within 12 months, no sqft limits, within {compRadius} driving miles. Sold records: RealtyAPI Realtor, Redfin, and Zillow. Gemini is used only to select an exterior listing photo.
+                    As of {recordDate(compDateWindow.asOfDate)}: new construction built {compDateWindow.minYearBuilt}-{compDateWindow.maxYearBuilt}, matching the parcel's source-backed zoning uses, closed since {recordDate(compDateWindow.soldSinceDate)}, no sqft limits, within {compRadius} driving miles. Sold records: RealtyAPI Realtor, Redfin, and Zillow. Gemini only selects an exterior listing photo.
                   </div>
                   {compCoverageRow}
                   {/* Comp filters: max radius (EVERY click re-runs a fresh comps
@@ -4627,7 +4675,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                       <select
                         className="comp-filter-select"
                         value={effectiveCompTypeFilter}
-                        onChange={(e) => { setCompTypeFilter(e.target.value); setCompsShowAll(false); }}
+                        onChange={(e) => setCompTypeFilter(e.target.value)}
                       >
                         {COMP_TYPE_OPTIONS.map((o) => (
                           <option key={o.value} value={o.value}>{o.label}</option>
@@ -4660,7 +4708,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                         return map[s.toLowerCase()] || s.replace(/\b\w/g, (c) => c.toUpperCase());
                       };
                       return visibleComps.map((comp, idx) => (
-                      <div key={idx} className="comp-item" style={{
+                      <div key={`${comp.address}|${comp.saleDate}|${comp.price}`} className="comp-item" style={{
                         padding: '10px',
                         borderRadius: '6px',
                         border: '1px solid var(--bg-card-border)',
@@ -4669,33 +4717,12 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                         flexDirection: 'column',
                         gap: '6px'
                       }}>
-                        {/* The ACTUAL listing photo from the Realtor/Redfin/Zillow feed.
-                            No Google Street View/satellite fallback — show a neutral
-                            placeholder instead when a comp's source has no photo. */}
-                        {comp.imageUrl ? (
-                          <img
-                            src={comp.imageUrl}
-                            onError={(e) => {
-                              const img = e.currentTarget;
-                              img.style.display = 'none';
-                              if (img.nextElementSibling instanceof HTMLElement) img.nextElementSibling.style.display = 'flex';
-                            }}
-                            alt={`Comp ${idx + 1}: ${comp.address}`}
-                            loading="lazy"
-                            /* Full photo, never cropped: natural width/height (object-fit
-                               contain) inside a fixed-ratio frame so nothing is cut off. */
-                            style={{ width: '100%', height: 'auto', maxHeight: '420px', objectFit: 'contain', display: 'block', borderRadius: '4px', border: '1px solid var(--bg-card-border)', background: '#0f172a' }}
-                          />
-                        ) : null}
-                        <div style={{
-                          display: comp.imageUrl ? 'none' : 'flex',
-                          alignItems: 'center', justifyContent: 'center', gap: '6px',
-                          width: '100%', height: '130px', borderRadius: '4px',
-                          border: '1px dashed var(--bg-card-border)', background: 'var(--bg-main, #f1f5f9)',
-                          color: 'var(--text-muted)', fontSize: '0.72rem',
-                        }}>
-                          <ImageOff size={14} /> No listing photo for this comp
-                        </div>
+                        <CompPhoto
+                          key={`${comp.address}|${comp.saleDate}|${comp.imageUrl || ''}|${comp.photoUrls?.length || 0}`}
+                          comp={comp}
+                          index={idx}
+                          googleMapsKey={compPhotoGoogleKey}
+                        />
                         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                           <span style={{ 
                             fontSize: '11px', 
@@ -4731,7 +4758,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                             Driving: <strong>{comp.distanceMiles.toFixed(1)} mi</strong> ({comp.durationMins.toFixed(0)} mins)
                             {comp.straightLineMiles != null && <span style={{ color: 'var(--text-muted)' }}> · {comp.straightLineMiles.toFixed(1)} mi straight</span>}
                           </span>
-                          <span>Sold: <strong>{comp.saleDate}</strong></span>
+                          <span>Sold: <strong>{recordDate(comp.saleDate)}</strong></span>
                         </div>
                         {(comp.sqft || comp.pricePerSqft || comp.yearBuilt || comp.propertyType) && (
                           <div style={{ display: 'flex', justifyContent: 'space-between', flexWrap: 'wrap', gap: '4px 10px', fontSize: '0.72rem', color: 'var(--text-secondary)', paddingLeft: '24px', borderTop: '1px dashed rgba(0,0,0,0.05)', paddingTop: '4px' }}>
@@ -4769,15 +4796,6 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                       ));
                     })()}
                   </div>
-                  {filteredComps.length > 10 && (
-                    <button
-                      type="button"
-                      className="comps-viewall-btn"
-                      onClick={() => setCompsShowAll((v) => !v)}
-                    >
-                      {compsShowAll ? 'Show less' : `View all ${filteredComps.length} comps`}
-                    </button>
-                  )}
                   </>
                   )}
                 </div>

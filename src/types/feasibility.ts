@@ -42,6 +42,17 @@ export type ResidentialCompType =
   | 'multi-family'
   | 'multi-structure';
 
+export interface CompDateWindow {
+  /** Local calendar date when the fresh comp search ran (YYYY-MM-DD). */
+  asOfDate: string;
+  /** Inclusive rolling twelve-month cutoff (YYYY-MM-DD). */
+  soldSinceDate: string;
+  /** Previous calendar year, used as the dynamic new-construction floor. */
+  minYearBuilt: number;
+  /** Current calendar year, used as the dynamic new-construction ceiling. */
+  maxYearBuilt: number;
+}
+
 export interface CompProperty {
   address: string;
   price: number;
@@ -317,6 +328,8 @@ export interface SiteFeasibilityData {
   zoningPermittedUses?: string[];
   /** Residential building types this zoning permits — drives the comps filter/chips. */
   compAllowedTypes?: ResidentialCompType[];
+  /** Exact rolling date/year criteria used for this fresh comp run. */
+  compDateWindow?: CompDateWindow;
   gridics?: GridicsData;
   isSimulated?: boolean;
 
