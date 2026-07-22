@@ -116,6 +116,59 @@ test('normalizes a full Carolina address and parses mortgage plus sale history',
   assert.equal(result.freeClear, false);
 });
 
+test('accepts an exact-match property record when sparse REAPI data omits its address object', () => {
+  const sparse = {
+    statusCode: 200,
+    data: {
+      propertyId: 'sc-rural-42',
+      lastSale: {
+        saleDate: '2022-04-01',
+        saleAmount: 127500,
+        buyerNames: 'RURAL BUYER',
+        sellerNames: 'RURAL SELLER',
+      },
+    },
+  };
+  const result = propertyApi.parseRealEstatePropertyTransactions(
+    sparse,
+    '116 Wright Sims Road, Union SC 29379',
+  );
+
+  assert.equal(result.propertyId, 'sc-rural-42');
+  assert.equal(result.matchedAddress, '116 Wright Sims Road, Union SC 29379');
+  assert.equal(result.sales[0].amount, 127500);
+});
+
+test('unwraps nested arrays and accepts a string property address', () => {
+  const nested = {
+    data: {
+      data: [{
+        id: 'nested-21',
+        propertyInfo: { address: '21 Magnolia St, York, SC 29745' },
+        saleHistory: [{ saleDate: '2020-06-15', saleAmount: 185000 }],
+      }],
+    },
+  };
+  const result = propertyApi.parseRealEstatePropertyTransactions(
+    nested,
+    '21 Magnolia Street, York, SC 29745',
+  );
+
+  assert.equal(result.propertyId, 'nested-21');
+  assert.equal(result.matchedAddress, '21 Magnolia St, York, SC 29745');
+  assert.equal(result.sales[0].amount, 185000);
+});
+
+test('rejects an empty successful envelope instead of claiming an address match', () => {
+  assert.throws(
+    () => propertyApi.parseRealEstatePropertyTransactions(
+      { statusCode: 200, data: {} },
+      '21 Magnolia Street, York, SC 29745',
+    ),
+    /no property record/i,
+  );
+});
+
 test('resolves a street-only GIS address from the selected parcel point', async () => {
   const calls = [];
   const fetcher = async (url, init) => {
@@ -204,6 +257,66 @@ test('each button lookup makes a fresh no-store exact-match request', async () =
   }
 });
 
+test('retries a formatted-address miss with exact structured address parts', async () => {
+  const calls = [];
+  const fetcher = async (url, init) => {
+    calls.push({ url: String(url), init });
+    const body = JSON.parse(init.body);
+    if (body.address) {
+      return new Response(JSON.stringify({ statusMessage: 'Not Found' }), {
+        status: 404,
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+    return new Response(JSON.stringify(FIXTURE), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
+  };
+
+  const result = await propertyApi.fetchRealEstatePropertyTransactions(
+    '12901 Lanecrest Road, Midland, NC 28107',
+    'test-key',
+    fetcher,
+  );
+
+  assert.equal(result.propertyId, '8195564');
+  assert.equal(calls.length, 2);
+  assert.equal(JSON.parse(calls[0].init.body).address, '12901 Lanecrest Road, Midland NC 28107');
+  assert.deepEqual(JSON.parse(calls[1].init.body), {
+    house: '12901',
+    street: 'Lanecrest Road',
+    city: 'Midland',
+    state: 'NC',
+    zip: '28107',
+    exact_match: true,
+    comps: false,
+  });
+  assert.ok(calls.every((call) => call.init.cache === 'no-store'));
+});
+
+test('retries when a successful formatted lookup contains no usable property record', async () => {
+  const calls = [];
+  const fetcher = async (_url, init) => {
+    calls.push(init);
+    const body = JSON.parse(init.body);
+    return new Response(JSON.stringify(body.address ? { statusCode: 200, data: {} } : FIXTURE), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
+  };
+
+  const result = await propertyApi.fetchRealEstatePropertyTransactions(
+    '12901 Lanecrest Road, Midland, NC 28107',
+    'test-key',
+    fetcher,
+  );
+
+  assert.equal(result.propertyId, '8195564');
+  assert.equal(calls.length, 2);
+  assert.ok(JSON.parse(calls[1].body).house, 'second request uses structured address fields');
+});
+
 test('Netlify proxy forwards only the exact address request and API key', async () => {
   const originalFetch = globalThis.fetch;
   let captured;
@@ -231,6 +344,46 @@ test('Netlify proxy forwards only the exact address request and API key', async 
     assert.equal(captured.init.cache, 'no-store');
     assert.deepEqual(JSON.parse(captured.init.body), {
       address: '12901 Lanecrest Road, Midland NC 28107',
+      exact_match: true,
+      comps: false,
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('Netlify proxy forwards the structured-address retry without client overrides', async () => {
+  const originalFetch = globalThis.fetch;
+  let captured;
+  globalThis.fetch = async (url, init) => {
+    captured = { url: String(url), init };
+    return new Response(JSON.stringify(FIXTURE), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
+  };
+
+  try {
+    const response = await handler({
+      httpMethod: 'POST',
+      headers: { 'x-api-key': 'server-test-key' },
+      body: JSON.stringify({
+        house: '12901',
+        street: 'Lanecrest Road',
+        city: 'Midland',
+        state: 'NC',
+        zip: '28107',
+        exact_match: false,
+        comps: true,
+      }),
+    });
+    assert.equal(response.statusCode, 200);
+    assert.deepEqual(JSON.parse(captured.init.body), {
+      house: '12901',
+      street: 'Lanecrest Road',
+      city: 'Midland',
+      state: 'NC',
+      zip: '28107',
       exact_match: true,
       comps: false,
     });

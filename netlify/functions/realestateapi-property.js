@@ -17,6 +17,32 @@ const json = (statusCode, body) => ({
   body: JSON.stringify(body),
 });
 
+function addressParts(address) {
+  const locality = address.match(/^(.+),\s*([^,]+?)\s+(NC|SC)\s+(\d{5})(?:-\d{4})?$/i);
+  if (!locality) return null;
+  const streetLine = locality[1].trim();
+  const streetMatch = streetLine.match(/^(\d+[A-Za-z]?(?:[-/]\d+[A-Za-z]?)?)\s+(.+)$/);
+  if (!streetMatch) return null;
+
+  let street = streetMatch[2].trim();
+  let unit;
+  const unitMatch = street.match(/(?:\s+|,\s*)(?:Apt|Apartment|Unit|Suite|Ste|#)\s*([A-Za-z0-9-]+)$/i);
+  if (unitMatch) {
+    unit = unitMatch[1];
+    street = street.slice(0, unitMatch.index).replace(/,+$/, '').trim();
+  }
+  if (!street) return null;
+
+  return {
+    house: streetMatch[1],
+    street,
+    city: locality[2].trim(),
+    state: locality[3].toUpperCase(),
+    zip: locality[4],
+    ...(unit ? { unit } : {}),
+  };
+}
+
 async function fetchWithAbort(url, init, timeoutMs = 8500) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -38,7 +64,12 @@ export const handler = async (event) => {
     return json(400, { error: 'Invalid JSON body.' });
   }
 
-  const address = String(input.address || '')
+  const hasAddressParts = ['house', 'street', 'city', 'state', 'zip']
+    .every((field) => String(input[field] || '').trim());
+  const componentAddress = hasAddressParts
+    ? `${input.house} ${input.street}${input.unit ? ` Unit ${input.unit}` : ''}, ${input.city} ${input.state} ${input.zip}`
+    : '';
+  const address = String(input.address || componentAddress)
     .replace(/\s+/g, ' ')
     .trim()
     .replace(/,+$/, '')
@@ -50,6 +81,10 @@ export const handler = async (event) => {
     .trim();
   if (!address || !/\b(?:NC|SC)\b/i.test(address)) {
     return json(400, { error: 'A full North Carolina or South Carolina address is required.' });
+  }
+  const parts = hasAddressParts ? addressParts(address) : null;
+  if (hasAddressParts && !parts) {
+    return json(400, { error: 'The full property address could not be split into house, street, city, state, and ZIP.' });
   }
 
   const requestHeaders = event.headers || {};
@@ -71,7 +106,7 @@ export const handler = async (event) => {
         'x-api-key': key,
       },
       body: JSON.stringify({
-        address,
+        ...(parts || { address }),
         exact_match: true,
         comps: false,
       }),
