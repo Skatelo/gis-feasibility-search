@@ -164,7 +164,7 @@ export async function ncAddressSuggestions(query: string, max = 5): Promise<stri
  *  report), so it needs the same generous budget as report generation. The old
  *  35s cap aborted mid-search and surfaced as "Request timed out" in the
  *  Zoning & Allowances card. */
-const GEMINI_ZONING_TIMEOUT_MS = 120_000;
+const GEMINI_ZONING_TIMEOUT_MS = 150_000;
 
 /** Cellular / slow-link headroom. Fixed timeouts that are fine on Wi-Fi trip on
  *  cellular (higher latency, packet loss, tower handoffs), so on a slow or mobile
@@ -2607,17 +2607,23 @@ export async function executeLandAnalysis(
     } : undefined;
 
     onStageChange?.("Verifying official GIS and researching standards with Gemini 3.6 Flash...");
-    const researchPromise = withZoningTimeout(
+    // Reject (rather than silently resolve null) on timeout so the REAL reason
+    // surfaces to the user instead of a generic "nothing found" message. A busy
+    // request queue used to let the old null-fallback fire while the district was
+    // still coming back, which read as a hard failure. Budget scales on slow links.
+    const researchBudgetMs = Math.round((GEMINI_ZONING_TIMEOUT_MS + 30_000) * connectionSlowdownFactor());
+    const researchPromise = Promise.race([
       fetchZoningWithGeminiSearch(fullZoningAddress, countyName, zoningJurisdictionHint, officialEvidence),
-      GEMINI_ZONING_TIMEOUT_MS + 5_000,
-      null,
-    ).then((result) => ({ result, error: '' })).catch((error) => {
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error('Gemini zoning research timed out')), researchBudgetMs),
+      ),
+    ]).then((result) => ({ result, error: '' })).catch((error) => {
       const msg = error instanceof Error ? error.message : String(error);
       return {
         result: null,
-        error: msg.toLowerCase().includes('abort') || msg.toLowerCase().includes('timeout')
-          ? 'Gemini zoning standards research timed out or was aborted.'
-          : msg,
+        error: /abort|timeout|timed out/i.test(msg)
+          ? `Gemini zoning research timed out for ${fullZoningAddress} — the model took too long or the request queue was busy. Try again in a moment.`
+          : `Gemini zoning research failed: ${msg}`,
       };
     });
 
@@ -2674,7 +2680,7 @@ export async function executeLandAnalysis(
     } else if (!officialResult) {
       zoningCode = '';
       zoningDescription = researchError
-        || `Neither official point GIS nor Gemini 3.6 Flash returned a source-backed zoning code for ${fullZoningAddress}.`;
+        || `Gemini 3.6 Flash responded but returned no source-backed zoning district for ${fullZoningAddress}, and no official GIS polygon was found at this parcel point — the address may be outside mapped coverage.`;
       zoningSource = 'web';
       zoningSourceUrl = undefined;
       zoningSources = [];
@@ -4849,12 +4855,16 @@ export async function fetchZoningWithGeminiSearch(
     jurisdiction || '',
     officialEvidence,
   );
-  // A structured answer without Google Search citations is not accepted as
-  // parcel evidence, even if the model includes plausible-looking URLs.
-  if (!evidence.urls.length) return null;
+  // A structured answer needs at least one source — either a grounded Google
+  // Search citation OR a source URL written into the answer text. Only reject
+  // when BOTH are absent (a genuinely unsourced answer is not parcel evidence).
+  // Some model/response variants return citations in the answer body rather than
+  // as structured annotations; discarding those silently made zoning fail.
+  const answerUrls = urlsWrittenInZoningAnswer(evidence.raw);
+  if (!evidence.urls.length && !answerUrls.length) return null;
   const discoveredUrls = [...new Set([
     ...evidence.urls,
-    ...urlsWrittenInZoningAnswer(evidence.raw),
+    ...answerUrls,
   ])];
   return parseZoningResult(evidence.raw, discoveredUrls, countyName || '');
 }
