@@ -1,4 +1,4 @@
-import type { ResidentialCompType } from '../../types/feasibility';
+import type { CompDateWindow, ResidentialCompType } from '../../types/feasibility';
 
 export type CompSearchFamily = 'single-family' | 'townhouse' | 'condo' | 'multi-family' | 'mobile';
 export type ClassifiedCompType = ResidentialCompType | 'land' | 'unknown';
@@ -47,6 +47,14 @@ const MOBILE_RE = /\b(?:manufactured\s+(?:home|housing|dwelling)|mobile\s+home|h
 const MULTI_STRUCTURE_RE = /\b(?:multiple|more\s+than\s+one|two\s+or\s+more|several)\s+(?:principal\s+)?(?:residential\s+)?(?:buildings|structures|homes|houses|residences|dwellings)\b|\b(?:residential\s+compound|cottage\s+court|multi[-\s]?building\s+residential|multiple[-\s]?structure\s+residential)\b/i;
 const LAND_RE = /\b(?:vacant\s+land|raw\s+land|residential\s+lot|land|acreage)\b/i;
 
+const STREET_SUFFIXES: Record<string, string> = {
+  street: 'st', avenue: 'ave', av: 'ave', drive: 'dr', road: 'rd', lane: 'ln', court: 'ct',
+  circle: 'cir', boulevard: 'blvd', place: 'pl', terrace: 'ter', trail: 'trl', parkway: 'pkwy',
+  highway: 'hwy', cove: 'cv', crossing: 'xing', square: 'sq', drives: 'dr', roads: 'rd',
+};
+
+const UNIT_RE = /(?:\b(?:apt|apartment|unit|ste|suite|lot)\s*#?\s*([a-z0-9-]+)\b|#\s*([a-z0-9-]+)\b)/i;
+
 function clean(value: unknown): string {
   return String(value ?? '').replace(/[_/]+/g, ' ').replace(/\s+/g, ' ').trim();
 }
@@ -63,6 +71,66 @@ function typeFromUnitCount(unitCount: number | undefined): ResidentialCompType |
   if (unitCount === 4) return 'quadplex';
   if (unitCount != null && unitCount >= 5) return 'multi-family';
   return undefined;
+}
+
+function localIsoDate(date: Date): string {
+  return [
+    String(date.getFullYear()).padStart(4, '0'),
+    String(date.getMonth() + 1).padStart(2, '0'),
+    String(date.getDate()).padStart(2, '0'),
+  ].join('-');
+}
+
+/** Fresh rolling criteria: on July 13, 2027, include sales since July 13, 2026
+ * and new builds from calendar years 2026-2027. */
+export function getRollingCompDateWindow(now = new Date()): CompDateWindow {
+  const asOf = Number.isNaN(now.getTime()) ? new Date() : new Date(now.getTime());
+  const maxYearBuilt = asOf.getFullYear();
+  const minYearBuilt = maxYearBuilt - 1;
+  const priorMonthLastDay = new Date(minYearBuilt, asOf.getMonth() + 1, 0).getDate();
+  const soldSince = new Date(
+    minYearBuilt,
+    asOf.getMonth(),
+    Math.min(asOf.getDate(), priorMonthLastDay),
+  );
+
+  return {
+    asOfDate: localIsoDate(asOf),
+    soldSinceDate: localIsoDate(soldSince),
+    minYearBuilt,
+    maxYearBuilt,
+  };
+}
+
+/** Canonical full-address key that standardizes unit designators without
+ * discarding the unit number. This prevents condo/townhome units from merging. */
+export function compAddressMatchKey(address: string): string {
+  return String(address)
+    .toLowerCase()
+    .replace(/\b(?:apartment|apt|ste|suite)\b/g, 'unit')
+    .replace(/\bunit\s*#?\s*([a-z0-9-]+)/g, ' unit $1')
+    .replace(/#\s*([a-z0-9-]+)/g, ' unit $1')
+    .replace(/[^a-z0-9]/g, '');
+}
+
+export interface CompAddressIdentity {
+  streetCore: string;
+  unit: string;
+}
+
+/** Number + normalized street name plus a separately preserved unit identity. */
+export function compAddressIdentity(address: string): CompAddressIdentity {
+  const parts = String(address).toLowerCase().trim().split(',').map((part) => part.trim());
+  let street = parts[0] || '';
+  if (parts[1] && UNIT_RE.test(parts[1])) street += ` ${parts[1]}`;
+  const unitMatch = street.match(UNIT_RE);
+  const unit = String(unitMatch?.[1] || unitMatch?.[2] || '').replace(/[^a-z0-9]/g, '');
+  street = street.replace(UNIT_RE, ' ');
+  street = street.replace(/\b[a-z]+\b/g, (word) => STREET_SUFFIXES[word] || word);
+  return {
+    streetCore: street.replace(/[^a-z0-9]/g, ''),
+    unit,
+  };
 }
 
 export function residentialCompTypeLabel(type: ResidentialCompType): string {
@@ -160,6 +228,18 @@ export function compSearchFamiliesForAllowedTypes(types: ResidentialCompType[]):
   }
   const order: CompSearchFamily[] = ['single-family', 'mobile', 'townhouse', 'condo', 'multi-family'];
   return order.filter((family) => families.has(family));
+}
+
+/** Exact result categories audited in the UI/summary. A broad multifamily
+ * allowance can return source-confirmed duplex, triplex, and quadplex records. */
+export function compCoverageTypesForAllowedTypes(types: ResidentialCompType[]): ResidentialCompType[] {
+  const coverage = new Set(types);
+  if (coverage.has('multi-family')) {
+    coverage.add('duplex');
+    coverage.add('triplex');
+    coverage.add('quadplex');
+  }
+  return RESIDENTIAL_COMP_TYPE_ORDER.filter((type) => coverage.has(type));
 }
 
 /**
