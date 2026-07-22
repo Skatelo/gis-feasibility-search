@@ -102,28 +102,67 @@ function dateValue(value: unknown): string | undefined {
 }
 
 function responseData(payload: unknown): Record<string, unknown> {
-  const root = objectValue(payload);
-  const data = root.data;
-  if (Array.isArray(data)) return objectValue(data[0]);
-  if (data && typeof data === 'object') {
-    const nested = objectValue(data);
-    return nested.data && typeof nested.data === 'object'
-      ? objectValue(nested.data)
-      : nested;
+  let current: unknown = payload;
+  for (let depth = 0; depth < 5; depth += 1) {
+    if (Array.isArray(current)) {
+      current = current.find((entry) => Object.keys(objectValue(entry)).length > 0) || {};
+      continue;
+    }
+    const record = objectValue(current);
+    const nested = record.data ?? record.property ?? record.result;
+    if (!nested || nested === current || (typeof nested !== 'object' && !Array.isArray(nested))) {
+      return record;
+    }
+    current = nested;
   }
-  if (root.property && typeof root.property === 'object') return objectValue(root.property);
-  if (root.result && typeof root.result === 'object') return objectValue(root.result);
-  return root;
+  return objectValue(current);
 }
 
 function addressLabel(address: Record<string, unknown>): string {
-  const label = textValue(address.label);
+  const label = typeof address.label === 'string' ? textValue(address.label) : undefined;
   if (label) return label;
-  const street = textValue(address.address)
+  const street = (typeof address.address === 'string' ? textValue(address.address) : undefined)
     || [textValue(address.house), textValue(address.street), textValue(address.streetType)].filter(Boolean).join(' ');
   const city = textValue(address.city);
   const stateZip = [textValue(address.state), textValue(address.zip)].filter(Boolean).join(' ');
   return [street, city, stateZip].filter(Boolean).join(', ');
+}
+
+function addressObject(value: unknown): Record<string, unknown> {
+  if (typeof value === 'string') return { label: value };
+  return objectValue(value);
+}
+
+function propertyAddress(root: Record<string, unknown>): Record<string, unknown> {
+  const propertyInfo = objectValue(root.propertyInfo || root.property_info);
+  const property = objectValue(root.property);
+  const candidates: unknown[] = [
+    propertyInfo.address,
+    root.address,
+    root.propertyAddress,
+    root.property_address,
+    root.siteAddress,
+    property.address,
+  ];
+  for (const candidate of candidates) {
+    const record = addressObject(candidate);
+    if (addressLabel(record)) return record;
+  }
+
+  // Some sparse land and recorder records flatten the situs parts onto
+  // propertyInfo instead of returning propertyInfo.address.
+  if (addressLabel(propertyInfo)) return propertyInfo;
+  return {};
+}
+
+function hasPropertyRecord(root: Record<string, unknown>): boolean {
+  if (textValue(root.id || root.propertyId || root.property_id)) return true;
+  if (Object.keys(objectValue(root.propertyInfo || root.property_info)).length > 0) return true;
+  if (Object.keys(objectValue(root.lotInfo || root.lot_info)).length > 0) return true;
+  if (Object.keys(objectValue(root.lastSale || root.last_sale)).length > 0) return true;
+  if (arrayValue(root.saleHistory || root.sale_history).length > 0) return true;
+  if (arrayValue(root.currentMortgages || root.current_mortgages).length > 0) return true;
+  return arrayValue(root.mortgageHistory || root.mortgage_history).length > 0;
 }
 
 function expectedAddressParts(address: string): { house?: string; state?: string; zip?: string } {
@@ -137,11 +176,14 @@ function expectedAddressParts(address: string): { house?: string; state?: string
 
 function assertExactAddress(requestedAddress: string, matchedAddress: Record<string, unknown>): void {
   const expected = expectedAddressParts(requestedAddress);
+  const label = addressLabel(matchedAddress);
   const actual = {
     house: textValue(matchedAddress.house)?.toUpperCase()
-      || addressLabel(matchedAddress).match(/^\s*(\d+[A-Za-z]?)/)?.[1]?.toUpperCase(),
-    state: textValue(matchedAddress.state)?.toUpperCase(),
-    zip: textValue(matchedAddress.zip)?.match(/^\d{5}/)?.[0],
+      || label.match(/^\s*(\d+[A-Za-z]?)/)?.[1]?.toUpperCase(),
+    state: textValue(matchedAddress.state)?.toUpperCase()
+      || label.match(/\b(NC|SC)\b/i)?.[1]?.toUpperCase(),
+    zip: textValue(matchedAddress.zip)?.match(/^\d{5}/)?.[0]
+      || label.match(/\b(\d{5})(?:-\d{4})?\b/)?.[1],
   };
   const conflicts = (['house', 'state', 'zip'] as const)
     .filter((field) => expected[field] && actual[field] && expected[field] !== actual[field]);
@@ -218,19 +260,60 @@ export function normalizeRealEstateApiAddress(value: string): string {
     .trim();
 }
 
+interface RealEstateApiAddressParts {
+  house: string;
+  street: string;
+  city: string;
+  state: string;
+  zip: string;
+  unit?: string;
+}
+
+function realEstateApiAddressParts(address: string): RealEstateApiAddressParts | null {
+  const normalized = normalizeRealEstateApiAddress(address);
+  const locality = normalized.match(/^(.+),\s*([^,]+?)\s+(NC|SC)\s+(\d{5})(?:-\d{4})?$/i);
+  if (!locality) return null;
+  const streetLine = locality[1].trim();
+  const streetMatch = streetLine.match(/^(\d+[A-Za-z]?(?:[-/]\d+[A-Za-z]?)?)\s+(.+)$/);
+  if (!streetMatch) return null;
+
+  let street = streetMatch[2].trim();
+  let unit: string | undefined;
+  const unitMatch = street.match(/(?:\s+|,\s*)(?:Apt|Apartment|Unit|Suite|Ste|#)\s*([A-Za-z0-9-]+)$/i);
+  if (unitMatch) {
+    unit = unitMatch[1];
+    street = street.slice(0, unitMatch.index).replace(/,+$/, '').trim();
+  }
+  if (!street) return null;
+
+  return {
+    house: streetMatch[1],
+    street,
+    city: locality[2].trim(),
+    state: locality[3].toUpperCase(),
+    zip: locality[4],
+    ...(unit ? { unit } : {}),
+  };
+}
+
 export function parseRealEstatePropertyTransactions(
   payload: unknown,
   requestedAddress: string,
   fetchedAt = new Date().toISOString(),
 ): RealEstatePropertyTransactions {
   const root = responseData(payload);
-  const propertyInfo = objectValue(root.propertyInfo);
-  const matchedAddressObject = objectValue(propertyInfo.address || root.address);
-  const matchedAddress = addressLabel(matchedAddressObject);
-  if (!matchedAddress) {
-    throw new RealEstateApiError('RealEstateAPI did not return an exact property address.', 404);
+  const matchedAddressObject = propertyAddress(root);
+  const returnedAddress = addressLabel(matchedAddressObject);
+  if (returnedAddress) {
+    assertExactAddress(requestedAddress, matchedAddressObject);
+  } else if (!hasPropertyRecord(root)) {
+    throw new RealEstateApiError('RealEstateAPI returned no property record for this address.', 404);
   }
-  assertExactAddress(requestedAddress, matchedAddressObject);
+  // A successful exact_match response can omit propertyInfo.address for sparse
+  // land/recorder records. In that case the requested address is the only safe
+  // display label; the record itself still carries the REAPI property ID and/or
+  // transaction data proving that the endpoint resolved a property.
+  const matchedAddress = returnedAddress || normalizeRealEstateApiAddress(requestedAddress);
 
   const historicalMortgages = arrayValue(root.mortgageHistory).map((record) => mortgageRecord(record));
   const currentMortgages = arrayValue(root.currentMortgages).map((record) => mortgageRecord(record, true));
@@ -314,28 +397,52 @@ export async function fetchRealEstatePropertyTransactions(
     'Content-Type': 'application/json',
   };
   if (apiKey.trim()) headers['x-api-key'] = apiKey.trim();
-  const init: RequestInit = {
-    method: 'POST',
-    cache: 'no-store',
-    headers,
-    body: JSON.stringify({
-      address: normalizedAddress,
-      exact_match: true,
-      comps: false,
-    }),
+  const addressParts = realEstateApiAddressParts(normalizedAddress);
+  const request = async (requestBody: { address: string } | RealEstateApiAddressParts) => {
+    const init: RequestInit = {
+      method: 'POST',
+      cache: 'no-store',
+      headers,
+      body: JSON.stringify({
+        ...requestBody,
+        exact_match: true,
+        comps: false,
+      }),
+    };
+
+    let response = await fetcher(REAL_ESTATE_API_PROPERTY_DETAIL_PROXY, init);
+    let result = await readResponse(response);
+    const contentType = response.headers.get('content-type') || '';
+    const proxyMissing = !contentType.includes('json') && /^\s*</.test(result.raw);
+    if (proxyMissing && apiKey.trim()) {
+      response = await fetcher(REAL_ESTATE_API_PROPERTY_DETAIL_URL, {
+        ...init,
+      });
+      result = await readResponse(response);
+    }
+    return { response, result };
   };
 
-  let response = await fetcher(REAL_ESTATE_API_PROPERTY_DETAIL_PROXY, init);
-  let result = await readResponse(response);
-  const contentType = response.headers.get('content-type') || '';
-  const proxyMissing = !contentType.includes('json') && /^\s*</.test(result.raw);
-  if (proxyMissing && apiKey.trim()) {
-    response = await fetcher(REAL_ESTATE_API_PROPERTY_DETAIL_URL, init);
-    result = await readResponse(response);
+  let lookup = await request({ address: normalizedAddress });
+  if (lookup.response.ok) {
+    try {
+      return parseRealEstatePropertyTransactions(lookup.result.payload, normalizedAddress);
+    } catch (error) {
+      if (!(error instanceof RealEstateApiError) || error.status !== 404 || !addressParts) throw error;
+    }
+  } else if (!addressParts || (lookup.response.status !== 400 && lookup.response.status !== 404)) {
+    throw new RealEstateApiError(
+      errorMessage(lookup.response.status, lookup.result.payload, lookup.result.raw),
+      lookup.response.status,
+    );
   }
 
-  if (!response.ok) {
-    throw new RealEstateApiError(errorMessage(response.status, result.payload, result.raw), response.status);
+  lookup = await request(addressParts);
+  if (!lookup.response.ok) {
+    throw new RealEstateApiError(
+      errorMessage(lookup.response.status, lookup.result.payload, lookup.result.raw),
+      lookup.response.status,
+    );
   }
-  return parseRealEstatePropertyTransactions(result.payload, normalizedAddress);
+  return parseRealEstatePropertyTransactions(lookup.result.payload, normalizedAddress);
 }
