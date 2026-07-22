@@ -31,6 +31,17 @@ export interface SlopeProfile {
   verdict: 'BUILDABLE' | 'REQUIRES ENGINEERING' | 'NON-BUILDABLE';
 }
 
+export type ResidentialCompType =
+  | 'single-family'
+  | 'mobile'
+  | 'townhouse'
+  | 'condo'
+  | 'duplex'
+  | 'triplex'
+  | 'quadplex'
+  | 'multi-family'
+  | 'multi-structure';
+
 export interface CompProperty {
   address: string;
   price: number;
@@ -41,6 +52,16 @@ export interface CompProperty {
   coords?: { lat: number; lng: number };
   yearBuilt?: number;
   propertyType?: string;
+  /** Exact zoning-aware residential form used to include this sold record. */
+  compType?: ResidentialCompType;
+  /** Published dwelling-unit count when RealtyAPI exposes it. */
+  unitCount?: number;
+  /** Published count of separate residential structures, when available. */
+  structureCount?: number;
+  /** Source-backed explanation for the exact type classification. */
+  typeEvidence?: string;
+  /** Why this property form is included under the subject parcel's zoning. */
+  zoningMatchReason?: string;
   /** Living area in square feet. */
   sqft?: number;
   /** Sold price per square foot (rounded). */
@@ -295,7 +316,7 @@ export interface SiteFeasibilityData {
   zoningMaxLotCoveragePct?: number;
   zoningPermittedUses?: string[];
   /** Residential building types this zoning permits — drives the comps filter/chips. */
-  compAllowedTypes?: string[];
+  compAllowedTypes?: ResidentialCompType[];
   gridics?: GridicsData;
   isSimulated?: boolean;
 
