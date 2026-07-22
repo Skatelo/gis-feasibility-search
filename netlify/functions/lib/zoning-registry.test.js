@@ -17,6 +17,7 @@ const evidenceCompiled = ts.transpileModule(evidenceSource, {
 }).outputText;
 const evidence = await import(`data:text/javascript;base64,${Buffer.from(evidenceCompiled).toString('base64')}`);
 const serviceSource = await readFile(new URL('../../../src/services/feasibilityService.ts', import.meta.url), 'utf8');
+const compTypeSource = await readFile(new URL('../../../src/services/comps/comp-types.ts', import.meta.url), 'utf8');
 const componentSource = await readFile(new URL('../../../src/components/FeasibilitySearch.tsx', import.meta.url), 'utf8');
 const appSource = await readFile(new URL('../../../src/App.tsx', import.meta.url), 'utf8');
 const settingsSource = await readFile(new URL('../../../src/components/SettingsDrawer.tsx', import.meta.url), 'utf8');
@@ -611,8 +612,20 @@ test('comps use RealtyAPI records filtered by zoning while retaining Gemini Visi
   );
 
   assert.match(pipeline, /fetchRealtyApiSoldComps/);
-  assert.match(pipeline, /zoningAllowedBuildingTypes\(permittedUses, zoningCode, zoningDesc\)/);
+  assert.match(pipeline, /zoningAllowedBuildingTypes\(permittedUses, zoningCode, zoningDesc, zoningRestrictions\)/);
+  assert.match(pipeline, /enrichCompTypesFromDetails/);
+  assert.match(pipeline, /isFinalCompTypeAllowed/);
   assert.match(pipeline, /selectExteriorComps\(result, getBackgroundGeminiKey\(\)\)/);
   assert.doesNotMatch(pipeline, /fetchGoogleMlsComps|runGeminiCompQuery|google_search|ENABLE_GOOGLE_MLS_COMPS/);
-  assert.match(serviceSource, /matchesAllowedTypes\(c\.propertyType, allowedTypes\)/);
+  assert.match(serviceSource, /REALTY_API_HOSTS\.realtor\}\/details\/byid/);
+  assert.match(serviceSource, /REALTY_API_HOSTS\.redfin\}\/detailsbyid/);
+  assert.match(serviceSource, /cache: 'no-store'/);
+  assert.match(compTypeSource, /'duplex'/);
+  assert.match(compTypeSource, /'triplex'/);
+  assert.match(compTypeSource, /'quadplex'/);
+  assert.match(compTypeSource, /'multi-structure'/);
+  assert.match(componentSource, /Zoning-matched sold categories/);
+  assert.match(componentSource, /comp\.unitCount/);
+  assert.match(componentSource, /comp\.structureCount/);
+  assert.match(geminiSearchSource, /multiple principal residential buildings or dwellings on one lot/);
 });

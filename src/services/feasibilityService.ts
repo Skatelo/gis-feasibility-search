@@ -1,4 +1,4 @@
-import type { SiteFeasibilityData, SlopeProfile, CompProperty, FloodZoneInfo, WetlandsInfo, ConstructionCostEstimate, CostLineItem, MaterialTakeoff, MaterialTakeoffItem, LandClearingEstimate, TreeRemovalLine, ClearingMethod, UtilitiesEstimate, UtilityLine, PermitFeeLine } from '../types/feasibility';
+import type { SiteFeasibilityData, SlopeProfile, CompProperty, ResidentialCompType, FloodZoneInfo, WetlandsInfo, ConstructionCostEstimate, CostLineItem, MaterialTakeoff, MaterialTakeoffItem, LandClearingEstimate, TreeRemovalLine, ClearingMethod, UtilitiesEstimate, UtilityLine, PermitFeeLine } from '../types/feasibility';
 import { fetchCountyZoningCode, getZoningServices, normalizeCountyKey } from '../data/ncZoning';
 import { getSupabase, isSupabaseConfigured } from './supabaseClient';
 import { fetchOfficialScParcel, mergeOfficialScParcelRecords, officialRecordFromCountyGis, scOwnerNamesMatch, shouldHideStatewideGeometry } from './scParcelVerification';
@@ -9,6 +9,17 @@ import { cleanCode } from './zoning/normalization/zoning-normalizer';
 import { fetchGeminiZoningSearchEvidence, normalizeFullAddressForZoning, type OfficialZoningEvidenceHint } from './geminiZoningSearch';
 import { isFullCarolinaPostalAddress, resolveFullCarolinaPostalAddress } from './carolinaAddress';
 import { CensusGeocoder } from './zoning/geocoding/census-geocoder';
+import {
+  classifyCompBuildingType,
+  compClassificationSpecificity,
+  compSearchFamiliesForAllowedTypes,
+  isFinalCompTypeAllowed,
+  isSearchCompatibleCompType,
+  residentialCompTypeLabel,
+  zoningAllowedBuildingTypes as deriveZoningAllowedBuildingTypes,
+  type ClassifiedCompType,
+  type CompSearchFamily,
+} from './comps/comp-types';
 
 export interface UserKeys {
   googleMaps?: string;
@@ -54,7 +65,7 @@ export function getUserKeys(): UserKeys {
 export interface CompPrefs {
   /** Max DRIVING-mile radius for the comp search (3 / 5 / 10). */
   radiusMiles: number;
-  /** Default property-type display filter: all | single-family | townhouse | condo | multi-family. */
+  /** Default display filter; accepts every ResidentialCompType plus "all". */
   propertyType: string;
 }
 const COMP_PREFS_KEY = 'gis_comp_prefs';
@@ -2738,16 +2749,16 @@ export async function executeLandAnalysis(
     compRadiusMiles,
     zoningSupportsComps,
     zoningPermittedUses || [],
+    zoningRestrictions || [],
   );
-  onPartial?.({ comps: compRun.comps, compRunSummary: compRun.summary });
+  const compAllowedTypes = zoningAllowedBuildingTypes(zoningPermittedUses, zoningCode, zoningDescription, zoningRestrictions);
+  onPartial?.({ comps: compRun.comps, compRunSummary: compRun.summary, compAllowedTypes });
 
   const slopeProfile = await slopeEmitted;
   const [floodZone, wetlands] = await Promise.all([
     floodZonePromise.catch(() => undefined),
     wetlandsPromise.catch(() => undefined),
   ]);
-
-  const compAllowedTypes = zoningAllowedBuildingTypes(zoningPermittedUses, zoningCode, zoningDescription);
 
   return {
     ...baseResult,
@@ -4445,7 +4456,7 @@ export function getUseCategory(zoningCode: string, zoningDesc: string): 'residen
 
 /** Canonical residential comp building types. Office/commercial is intentionally
  *  excluded — the Verified Market Comps are residential sold records only. */
-export type CompBuildingType = 'single-family' | 'townhome' | 'condo' | 'multi-family' | 'mobile';
+export type CompBuildingType = ResidentialCompType;
 
 /** Residential building types a district permits, derived from the zoning
  *  research's permittedUses (code/description as a fallback). Drives which comp
@@ -4454,45 +4465,9 @@ export function zoningAllowedBuildingTypes(
   permittedUses: string[] | undefined,
   zoningCode: string,
   zoningDesc: string,
+  restrictions: string[] = [],
 ): CompBuildingType[] {
-  const hay = [...(permittedUses || []), zoningDesc || ''].join(' | ').toLowerCase();
-  const set = new Set<CompBuildingType>();
-  if (/\b(single[-\s]?family|one[-\s]?family|sfr|detached|site[-\s]?built)\b/.test(hay)) set.add('single-family');
-  if (/\b(town[-\s]?home|town[-\s]?house|row[-\s]?house|attached dwelling|attached single)\b/.test(hay)) set.add('townhome');
-  if (/\bcondo(minium)?\b/.test(hay)) set.add('condo');
-  if (/\b(duplex|triplex|quad(ra|ru)?plex|four[-\s]?plex|two[-\s]?family|three[-\s]?family|four[-\s]?family|multi[-\s]?family|multifamily|apartment)\b/.test(hay)) set.add('multi-family');
-  if (/\b(manufactured home|manufactured hous|mobile home|hud[-\s]?code)\b/.test(hay)) set.add('mobile');
-  if (set.size === 0) {
-    const cat = getPermittedCategory(zoningCode, zoningDesc);
-    if (cat === 'multifamily') { set.add('townhome'); set.add('condo'); set.add('multi-family'); }
-    else if (cat === 'residential') { set.add('single-family'); }
-    // 'commercial' -> no residential comp types (office/commercial excluded by design).
-  }
-  const order: CompBuildingType[] = ['single-family', 'townhome', 'condo', 'multi-family', 'mobile'];
-  return order.filter((t) => set.has(t));
-}
-
-/** Map a comp's pretty property-type label to a canonical building-type bucket. */
-function compBuildingTypeOf(prettyType: string | undefined): CompBuildingType | 'land' | 'unknown' {
-  switch (prettyType) {
-    case 'Single-Family': return 'single-family';
-    case 'Townhome': return 'townhome';
-    case 'Condo': return 'condo';
-    case 'Multi-Family':
-    case 'Co-op': return 'multi-family';
-    case 'Mobile/Manufactured': return 'mobile';
-    case 'Land': return 'land';
-    default: return 'unknown';
-  }
-}
-
-/** Does a comp fit the building types this zoning permits? Land is never a comp;
- *  an unknown type is kept (per-platform type filters already narrowed it). */
-function matchesAllowedTypes(prettyType: string | undefined, allowed: CompBuildingType[]): boolean {
-  const bucket = compBuildingTypeOf(prettyType);
-  if (bucket === 'land') return false;
-  if (bucket === 'unknown') return true;
-  return allowed.includes(bucket);
+  return deriveZoningAllowedBuildingTypes(permittedUses, zoningCode, zoningDesc, restrictions);
 }
 
 async function geocodeAddress(address: string, apiKey: string): Promise<{ lat: number; lng: number } | null> {
@@ -4789,7 +4764,7 @@ function parseZoningResult(text: string, evidenceUrls: string[] = [], countyName
     const standardsObj = obj?.standards && typeof obj.standards === 'object' ? obj.standards : {};
     let standards: ZoningResearchStandards | undefined;
     if (ordinanceSource && evidenceUrlAllowed(ordinanceSource, evidenceUrls, countyName)) {
-      const permittedUses = boundedStringList(obj?.permittedUses ?? standardsObj?.permittedUses, 10, 180);
+      const permittedUses = boundedStringList(obj?.permittedUses ?? standardsObj?.permittedUses, 24, 180);
       const setbackNotes = boundedStringList(standardsObj?.setbackNotes ?? obj?.setbackNotes, 8, 260);
       const restrictions = boundedStringList(standardsObj?.restrictions ?? obj?.restrictions, 12, 300);
       standards = {
@@ -5115,32 +5090,36 @@ export function getMapboxToken(): string {
 // OpenAPI spec). Land / lots are deliberately excluded — comps are completed
 // HOMES only, never vacant land. Zillow's homeType tokens aren't documented, so
 // it is left unrestricted and filtered client-side by matchesZoningUse() instead.
-function realtorPropertyTypes(types: CompBuildingType[]): string {
-  const map: Record<CompBuildingType, string> = { 'single-family': 'House', 'townhome': 'Townhome', 'condo': 'Condo', 'multi-family': 'Multi_Family', 'mobile': 'Manufactured' };
-  const out = [...new Set(types.map((t) => map[t]).filter(Boolean))];
-  return out.length ? out.join(',') : 'House';
+function realtorPropertyType(type: CompSearchFamily): string {
+  const map: Record<CompSearchFamily, string> = {
+    'single-family': 'House',
+    townhouse: 'Townhome',
+    condo: 'Condo',
+    'multi-family': 'Multi_Family',
+    mobile: 'Mobile',
+  };
+  return map[type];
 }
-function redfinHomeTypes(types: CompBuildingType[]): string {
-  const map: Record<CompBuildingType, string> = { 'single-family': 'House', 'townhome': 'townhouse', 'condo': 'condo', 'multi-family': 'Multi family', 'mobile': 'Mobile/Manufactured' };
-  const out = [...new Set(types.map((t) => map[t]).filter(Boolean))];
-  return out.length ? out.join(',') : 'House';
+function redfinHomeType(type: CompSearchFamily): string {
+  const map: Record<CompSearchFamily, string> = {
+    'single-family': 'House',
+    townhouse: 'townhouse',
+    condo: 'condo',
+    'multi-family': 'Multi family',
+    mobile: 'Mobile',
+  };
+  return map[type];
 }
 
 /** Clean, human-readable property-type label (Single-Family / Townhome / Condo / Multi-Family / ...). */
 function prettyPropertyType(t: any): string | undefined {
-  const s = String(t ?? "").toLowerCase();
-  if (!s.trim()) return undefined;
-  if (/single|sfr|detached|\bhouse\b|\bhome\b/.test(s)) return "Single-Family";
-  if (/town/.test(s)) return "Townhome";
-  if (/condo/.test(s)) return "Condo";
-  if (/multi|duplex|triplex|fourplex|apartment/.test(s)) return "Multi-Family";
-  if (/co.?op/.test(s)) return "Co-op";
-  if (/mobile|manufactured/.test(s)) return "Mobile/Manufactured";
-  if (/\b(land|lot|acre)\b/.test(s)) return "Land";
-  return undefined;
+  const classified = classifyCompBuildingType({ propertyType: t });
+  if (classified.type === 'land') return 'Land';
+  return classified.label;
 }
 
-// Comp property-type matching now uses zoningAllowedBuildingTypes + matchesAllowedTypes (above).
+// Comp property-type matching uses the source-backed taxonomy in
+// services/comps/comp-types.ts.
 
 /** Closed/SOLD only — reject under-contract, pending, coming-soon, for-sale, active listings. */
 function isClosedSale(listingStatus: any, saleDate: string, price: number): boolean {
@@ -5280,14 +5259,49 @@ function findPhotoUrl(raw: any): string | undefined {
   return findPhotoUrls(raw, 1)[0];
 }
 
-function normalizeRealtyListing(raw: any, platform: 'realtor' | 'redfin' | 'zillow'): any | null {
+const COMP_CLASSIFICATION_PATH_RE = /(?:descriptiontext|marketingremark|publicremarks?|listingremarks?|propertytype(?:name)?|propertysubtype|hometype|buildingtype|structuretype|architecturalstyle|dwellingtype|usecode|usetype)/i;
+
+/** Pull only property-form text from a source response. This intentionally
+ * ignores generic descriptions (schools, agents, neighborhoods) so phrases such
+ * as "multi-family students" cannot misclassify a listing. */
+function collectCompClassificationText(node: any, path = '', out: string[] = [], depth = 0): string[] {
+  if (node == null || depth > 10 || out.length >= 40) return out;
+  if (Array.isArray(node)) {
+    for (const value of node.slice(0, 12)) collectCompClassificationText(value, path, out, depth + 1);
+    return out;
+  }
+  if (typeof node !== 'object') return out;
+  for (const [key, value] of Object.entries(node)) {
+    const nextPath = path ? `${path}.${key}` : key;
+    const normalizedPath = _norm(nextPath);
+    if (COMP_CLASSIFICATION_PATH_RE.test(normalizedPath) && (typeof value === 'string' || typeof value === 'number')) {
+      const text = String(value).replace(/\s+/g, ' ').trim();
+      if (text && text.length <= 4000 && !out.includes(text)) out.push(text);
+    }
+    if (value && typeof value === 'object') collectCompClassificationText(value, nextPath, out, depth + 1);
+  }
+  return out;
+}
+
+function compPublishedCount(raw: any, keyPattern: RegExp): number | undefined {
+  const value = deepFind(raw, keyPattern, _isNum, 10);
+  if (value === undefined) return undefined;
+  const number = Math.round(_toNum(value));
+  return Number.isInteger(number) && number > 0 ? number : undefined;
+}
+
+function normalizeRealtyListing(
+  raw: any,
+  platform: 'realtor' | 'redfin' | 'zillow',
+  requestedFamily?: CompSearchFamily,
+): any | null {
   if (!raw || typeof raw !== "object") return null;
 
   let price: number | undefined, saleDate = "", yearBuilt: number | undefined,
       sqft: number | undefined, propertyType: string | undefined,
       coords: { lat: number; lng: number } | undefined,
       address: string | undefined, zip: string | undefined,
-      url: string | undefined, propertyId: any, rawStatus: any;
+      url: string | undefined, propertyId: any, listingId: any, rawStatus: any;
 
   if (platform === "realtor") {
     const a = raw.address || {};
@@ -5303,6 +5317,7 @@ function normalizeRealtyListing(raw: any, platform: 'realtor' | 'redfin' | 'zill
     zip = a.postal_code != null ? String(a.postal_code) : undefined;
     url = raw.href ?? raw.permalink;
     propertyId = raw.property_id;
+    listingId = raw.listing_id;
   } else if (platform === "redfin") {
     const h = raw.homeData ?? raw;
     const ai = h.addressInfo ?? {};
@@ -5319,6 +5334,7 @@ function normalizeRealtyListing(raw: any, platform: 'realtor' | 'redfin' | 'zill
     zip = ai.zip != null ? String(ai.zip) : undefined;
     url = h.url ? `https://www.redfin.com${h.url}` : undefined;
     propertyId = h.propertyId ?? h.mlsId;
+    listingId = h.listingId;
   } else { // zillow
     const pr = raw.property ?? raw;
     const loc = pr.location ?? {};
@@ -5347,6 +5363,7 @@ function normalizeRealtyListing(raw: any, platform: 'realtor' | 'redfin' | 'zill
       ? `https://www.zillow.com/homedetails/${_zslug ? _zslug + "/" : ""}${pr.zpid}_zpid/`
       : (pr.hdpView?.hdpUrl ? `https://www.zillow.com${pr.hdpView.hdpUrl}` : undefined);
     propertyId = pr.zpid;
+    listingId = pr.listingId ?? pr.listing_id;
   }
 
   // Generic fallbacks for anything a platform omitted or relocated.
@@ -5358,13 +5375,31 @@ function normalizeRealtyListing(raw: any, platform: 'realtor' | 'redfin' | 'zill
   if (!_isStr(address)) { const ln = deepFind(raw, /(formattedstreetline|streetaddress|^line$|^address$|fulladdress)/, _isStr); if (ln) address = String(ln); }
   if (!_isStr(address)) return null; // no address -> unusable as a comp
 
+  const unitCount = compPublishedCount(raw, /^(units|unitcount|numberofunits|totalunits|dwellingunits)$/);
+  const structureCount = compPublishedCount(raw, /^(structurecount|numberofstructures|buildingcount|numberofbuildings|residentialbuildingcount)$/);
+  const classificationText = collectCompClassificationText(raw).join(' | ');
+  const classification = classifyCompBuildingType({
+    propertyType,
+    sourceText: classificationText,
+    unitCount,
+    structureCount,
+    fallbackType: requestedFamily,
+  });
+  const compType = classification.type !== 'land' && classification.type !== 'unknown'
+    ? classification.type
+    : undefined;
+
   return {
     address: String(address).replace(/\s+/g, " ").trim(),
     price: price === undefined ? 0 : Math.round(price),
     saleDate,
     yearBuilt,
     sqft: sqft && sqft > 0 ? Math.round(sqft) : undefined,
-    propertyType: prettyPropertyType(propertyType),
+    propertyType: classification.type === 'land' ? 'Land' : classification.label ?? prettyPropertyType(propertyType),
+    compType,
+    unitCount: classification.unitCount,
+    structureCount: classification.structureCount,
+    typeEvidence: classification.evidence,
     coords,
     zip,
     imageUrl: findPhotoUrl(raw),
@@ -5373,6 +5408,12 @@ function normalizeRealtyListing(raw: any, platform: 'realtor' | 'redfin' | 'zill
     listingStatus: _isStr(rawStatus) ? rawStatus : (rawStatus != null ? String(rawStatus) : undefined),
     newConstructionFlag: false, // set true by the caller (year-filtered query)
     propertyId: propertyId != null ? String(propertyId) : undefined,
+    listingId: listingId != null ? String(listingId) : undefined,
+    detailRefs: propertyId != null ? [{
+      platform,
+      propertyId: String(propertyId),
+      listingId: listingId != null ? String(listingId) : undefined,
+    }] : [],
     sourceName: REALTY_SOURCE_LABELS[platform],
     platform,
     detailConfirmed: true,
@@ -5423,6 +5464,7 @@ async function fetchRealtyPlatform(
   lat: number,
   lng: number,
   radiusMiles: number,
+  requestedFamily: CompSearchFamily | undefined,
   allowedTypes: CompBuildingType[],
   oneYearAgo: Date,
   key: string,
@@ -5442,7 +5484,7 @@ async function fetchRealtyPlatform(
     if (platform === "zillow") {
       q.set("listingStatus", "Sold");
       q.set("soldInLast", "12_months");
-      q.set("yearBuiltRange", `min:${MIN_COMP_YEAR_BUILT}`);
+      q.set("yearBuiltRange", `min:${MIN_COMP_YEAR_BUILT},max:${MAX_COMP_YEAR_BUILT}`);
       // Zillow ignores the year filter, so sort newest-built FIRST and page until
       // builds drop below the window — captures ALL 2025-2026 sales in range
       // instead of only those that happen to sort early by listing date.
@@ -5452,28 +5494,45 @@ async function fetchRealtyPlatform(
       q.set("sortOrder", "Most_Recently_Sold");
       q.set("resultCount", "200");
       if (platform === "realtor") {
-        q.set("propertyType", realtorPropertyTypes(allowedTypes));
-        q.set("yearBuiltRange", `min:${MIN_COMP_YEAR_BUILT}`);
+        if (requestedFamily) q.set("propertyType", realtorPropertyType(requestedFamily));
+        q.set("yearBuiltRange", `min:${MIN_COMP_YEAR_BUILT},max:${MAX_COMP_YEAR_BUILT}`);
       } else {
-        q.set("homeType", redfinHomeTypes(allowedTypes));
+        if (requestedFamily) q.set("homeType", redfinHomeType(requestedFamily));
         q.set("soldWithin", "Last_1_Year");
         q.set("minYearBuilt", String(MIN_COMP_YEAR_BUILT));
         q.set("maxYearBuilt", String(MAX_COMP_YEAR_BUILT));
       }
     }
 
-    let json: any;
-    try {
-      const res = await fetchWithTimeout(`${REALTY_API_HOSTS[platform]}/search/bycoordinates?${q.toString()}`, 20000, { headers });
-      if (!res.ok) {
+    let json: any = null;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const res = await fetchWithTimeout(`${REALTY_API_HOSTS[platform]}/search/bycoordinates?${q.toString()}`, 20000, {
+          headers,
+          cache: 'no-store',
+        });
+        if (res.ok) {
+          json = await res.json();
+          break;
+        }
+        const transient = res.status === 408 || res.status === 429 || res.status >= 500;
+        if (attempt === 0 && transient) {
+          onStageChange?.(`Retrying ${platform} ${requestedFamily || 'residential'} sold records...`);
+          await new Promise((resolve) => setTimeout(resolve, 700));
+          continue;
+        }
         console.warn(`RealtyAPI ${platform} sold search returned HTTP ${res.status} on page ${page}.`);
-        break; // auth/credit/other error — stop this platform, let the others run
+        break;
+      } catch (e) {
+        if (attempt === 0) {
+          onStageChange?.(`Retrying ${platform} ${requestedFamily || 'residential'} sold records...`);
+          await new Promise((resolve) => setTimeout(resolve, 700));
+          continue;
+        }
+        console.warn(`RealtyAPI ${platform} sold search failed on page ${page}:`, e);
       }
-      json = await res.json();
-    } catch (e) {
-      console.warn(`RealtyAPI ${platform} sold search failed on page ${page}:`, e);
-      break;
     }
+    if (json == null) break;
 
     const listings = extractRealtyListings(json);
     if (page === 1) {
@@ -5487,7 +5546,7 @@ async function fetchRealtyPlatform(
     let pageOldest = Infinity;
     let pageMaxYear = -Infinity;
     for (const raw of listings) {
-      const c = normalizeRealtyListing(raw, platform);
+      const c = normalizeRealtyListing(raw, platform, requestedFamily);
       if (!c) continue;
       const t = c.saleDate ? new Date(c.saleDate).getTime() : NaN;
       if (Number.isFinite(t)) pageOldest = Math.min(pageOldest, t);
@@ -5496,16 +5555,16 @@ async function fetchRealtyPlatform(
       // payload), so mark every returned record as new construction; when a
       // platform DOES expose the year, enforce the 2025-2026 window.
       if (c.yearBuilt != null && (c.yearBuilt < MIN_COMP_YEAR_BUILT || c.yearBuilt > MAX_COMP_YEAR_BUILT)) continue;
-      c.newConstructionFlag = true;
+      c.newConstructionFlag = platform !== 'zillow';
       // CLOSED SALES ONLY — drop under-contract / pending / coming-soon / active
       // (Zillow ignores the Sold filter and leaks them), require sold price + date.
       if (!isClosedSale(c.listingStatus, c.saleDate, c.price)) continue;
-      // Match the subject's COUNTY ZONING use (residential -> single-family;
-      // multifamily -> townhome/condo/multi-family). Also drops land/lots.
-      if (!matchesAllowedTypes(c.propertyType, allowedTypes)) continue;
+      // Keep a broad Multi_Family candidate long enough to resolve its exact
+      // unit count from the detail endpoint; the exact zoning gate runs later.
+      if (!isSearchCompatibleCompType(c.compType ?? 'unknown', allowedTypes)) continue;
       out.push(c);
     }
-    onStageChange?.(`Scanning ${platform} sold records... page ${page} (${out.length} found)`);
+    onStageChange?.(`Scanning ${platform} ${requestedFamily || 'all residential'} sold records... page ${page} (${out.length} found)`);
 
     if (!realtyHasNextPage(json)) break;
     if (platform === "zillow") {
@@ -5529,6 +5588,23 @@ async function fetchRealtyPlatform(
  * yearBuilt, sqft, coords, propertyType, status, sourceName, detailConfirmed,
  * url, zip, propertyId).
  */
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  limit: number,
+  worker: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let nextIndex = 0;
+  const run = async () => {
+    while (nextIndex < items.length) {
+      const index = nextIndex++;
+      results[index] = await worker(items[index], index);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(Math.max(1, limit), items.length) }, run));
+  return results;
+}
+
 async function fetchRealtyApiSoldComps(
   lat: number,
   lng: number,
@@ -5546,21 +5622,36 @@ async function fetchRealtyApiSoldComps(
   const RADIUS_MILES = radiusMiles;
   onStageChange?.("Scanning RealtyAPI sold records (Realtor, Redfin, Zillow)...");
 
-  const platforms: ('realtor' | 'redfin' | 'zillow')[] = ["realtor", "redfin", "zillow"];
-  const perPlatform = await Promise.all(
-    platforms.map((pf) =>
-      fetchRealtyPlatform(pf, lat, lng, RADIUS_MILES, allowedTypes, oneYearAgo, key, onStageChange).catch((e) => {
-        console.warn(`RealtyAPI ${pf} platform failed:`, e);
-        return [] as any[];
-      }),
-    ),
+  const searchFamilies = compSearchFamiliesForAllowedTypes(allowedTypes);
+  const jobs: { platform: 'realtor' | 'redfin' | 'zillow'; family?: CompSearchFamily }[] = [
+    ...searchFamilies.map((family) => ({ platform: 'realtor' as const, family })),
+    ...searchFamilies.map((family) => ({ platform: 'redfin' as const, family })),
+    // Zillow's current search wrapper does not publish a stable home-type enum;
+    // run it once and apply the strict source-type gate client-side.
+    { platform: 'zillow' as const },
+  ];
+  const perJob = await mapWithConcurrency(jobs, 4, async (job) =>
+    fetchRealtyPlatform(
+      job.platform,
+      lat,
+      lng,
+      RADIUS_MILES,
+      job.family,
+      allowedTypes,
+      oneYearAgo,
+      key,
+      onStageChange,
+    ).catch((error) => {
+      console.warn(`RealtyAPI ${job.platform}/${job.family || 'all'} search failed:`, error);
+      return [] as any[];
+    }),
   );
 
   // Merge across platforms by normalized street key. Realtor wins ties, then
   // Redfin, then Zillow — but any platform fills in fields the winner is missing.
   const order: Record<string, number> = { realtor: 0, redfin: 1, zillow: 2 };
   const byKey = new Map<string, any>();
-  for (const list of perPlatform) {
+  for (const list of perJob) {
     for (const c of list) {
       const k = normalizeStreetKey(c.address);
       if (!k) continue;
@@ -5568,6 +5659,13 @@ async function fetchRealtyApiSoldComps(
       if (!prev) { byKey.set(k, c); continue; }
       const winner = order[c.platform] <= order[prev.platform] ? c : prev;
       const filler = winner === c ? prev : c;
+      const richerType = compClassificationSpecificity(c.compType ?? 'unknown') > compClassificationSpecificity(prev.compType ?? 'unknown')
+        ? c
+        : prev;
+      const detailRefs = [...(winner.detailRefs || []), ...(filler.detailRefs || [])]
+        .filter((ref: any, index: number, all: any[]) => all.findIndex((candidate) =>
+          candidate.platform === ref.platform && candidate.propertyId === ref.propertyId && candidate.listingId === ref.listingId
+        ) === index);
       byKey.set(k, {
         ...filler, ...winner,
         sqft: winner.sqft ?? filler.sqft,
@@ -5575,13 +5673,123 @@ async function fetchRealtyApiSoldComps(
         yearBuilt: winner.yearBuilt ?? filler.yearBuilt,
         url: winner.url ?? filler.url,
         zip: winner.zip ?? filler.zip,
+        compType: richerType.compType,
+        propertyType: richerType.propertyType,
+        unitCount: richerType.unitCount,
+        structureCount: richerType.structureCount,
+        typeEvidence: richerType.typeEvidence,
+        detailRefs,
       });
     }
   }
   const merged = Array.from(byKey.values());
-  const counts = perPlatform.map((l, i) => `${platforms[i]} ${l.length}`).join(", ");
+  const counts = perJob.map((list, index) => `${jobs[index].platform}/${jobs[index].family || 'all'} ${list.length}`).join(", ");
   console.log(`RealtyAPI sold records: ${counts} -> ${merged.length} unique after cross-platform merge.`);
   return merged;
+}
+
+type RealtyDetailRef = {
+  platform: 'realtor' | 'redfin' | 'zillow';
+  propertyId: string;
+  listingId?: string;
+};
+
+async function fetchRealtyDetail(ref: RealtyDetailRef, key: string): Promise<any | null> {
+  let url = '';
+  if (ref.platform === 'realtor') {
+    url = `${REALTY_API_HOSTS.realtor}/details/byid?property_id=${encodeURIComponent(ref.propertyId)}`;
+    if (ref.listingId) url += `&listing_id=${encodeURIComponent(ref.listingId)}`;
+  } else if (ref.platform === 'redfin' && ref.listingId) {
+    url = `${REALTY_API_HOSTS.redfin}/detailsbyid?property_id=${encodeURIComponent(ref.propertyId)}&listing_id=${encodeURIComponent(ref.listingId)}`;
+  } else {
+    return null;
+  }
+
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const response = await fetchWithTimeout(url, 18000, {
+        headers: { 'x-realtyapi-key': key },
+        cache: 'no-store',
+      });
+      if (response.ok) return response.json();
+      if (attempt === 0 && (response.status === 429 || response.status >= 500)) {
+        await new Promise((resolve) => setTimeout(resolve, 700));
+        continue;
+      }
+      return null;
+    } catch {
+      if (attempt === 0) {
+        await new Promise((resolve) => setTimeout(resolve, 700));
+        continue;
+      }
+    }
+  }
+  return null;
+}
+
+function familyFallbackForComp(type: ClassifiedCompType): CompSearchFamily | undefined {
+  if (type === 'single-family' || type === 'mobile' || type === 'townhouse' || type === 'condo' || type === 'multi-family') return type;
+  if (type === 'duplex' || type === 'triplex' || type === 'quadplex') return 'multi-family';
+  return undefined;
+}
+
+function applyCompDetailClassification(comp: any, detail: any): any {
+  const unitCount = compPublishedCount(detail, /^(units|unitcount|numberofunits|totalunits|dwellingunits)$/) ?? comp.unitCount;
+  const structureCount = compPublishedCount(detail, /^(structurecount|numberofstructures|buildingcount|numberofbuildings|residentialbuildingcount)$/) ?? comp.structureCount;
+  const sourceText = collectCompClassificationText(detail).join(' | ');
+  const classification = classifyCompBuildingType({
+    propertyType: comp.propertyType,
+    sourceText,
+    unitCount,
+    structureCount,
+    fallbackType: familyFallbackForComp(comp.compType ?? 'unknown'),
+  });
+  if (compClassificationSpecificity(classification.type) < compClassificationSpecificity(comp.compType ?? 'unknown')) return comp;
+  if (classification.type === 'land' || classification.type === 'unknown') return comp;
+  return {
+    ...comp,
+    compType: classification.type,
+    propertyType: classification.label,
+    unitCount: classification.unitCount,
+    structureCount: classification.structureCount,
+    typeEvidence: classification.evidence,
+  };
+}
+
+/** Resolve broad Multi_Family records to duplex/triplex/quadplex/5+ units and,
+ * when the ordinance allows it, inspect house records for multiple structures. */
+async function enrichCompTypesFromDetails(
+  comps: any[],
+  allowedTypes: CompBuildingType[],
+  key: string,
+  onStageChange?: (stage: string) => void,
+): Promise<any[]> {
+  if (!key || comps.length === 0) return comps;
+  const needsSmallMultifamily = allowedTypes.some((type) => ['duplex', 'triplex', 'quadplex'].includes(type));
+  const needsMultipleStructures = allowedTypes.includes('multi-structure');
+  if (!needsSmallMultifamily && !needsMultipleStructures) return comps;
+
+  const targets = comps.filter((comp) =>
+    (needsSmallMultifamily && comp.compType === 'multi-family') ||
+    (needsMultipleStructures && (comp.compType === 'single-family' || comp.compType === 'multi-family'))
+  );
+  if (targets.length === 0) return comps;
+  onStageChange?.(`Confirming dwelling-unit and structure counts for ${targets.length} zoning-matched candidate${targets.length === 1 ? '' : 's'}...`);
+
+  const enriched = await mapWithConcurrency(targets, 4, async (comp) => {
+    let current = comp;
+    const refs = (Array.isArray(comp.detailRefs) ? comp.detailRefs : []) as RealtyDetailRef[];
+    for (const ref of refs) {
+      const detail = await fetchRealtyDetail(ref, key);
+      if (!detail) continue;
+      current = applyCompDetailClassification(current, detail);
+      if (compClassificationSpecificity(current.compType ?? 'unknown') >= 3) break;
+    }
+    return current;
+  });
+
+  const byAddress = new Map(enriched.map((comp) => [normalizeStreetKey(comp.address), comp]));
+  return comps.map((comp) => byAddress.get(normalizeStreetKey(comp.address)) ?? comp);
 }
 
 /** Google Distance Matrix via REST (driving, imperial), chunked at 25 destinations. */
@@ -5631,12 +5839,16 @@ function buildCompRunSummary(opts: {
   candidateCount: number;
   scrapedCount?: number;
   inRadiusCount?: number;
+  radiusMiles: number;
+  allowedTypes: ResidentialCompType[];
 }): string {
-  const { subjectAddress, comps, radiusExpanded, skippedZips, locations, candidateCount, scrapedCount, inRadiusCount } = opts;
+  const { subjectAddress, comps, radiusExpanded, skippedZips, locations, candidateCount, scrapedCount, inRadiusCount, radiusMiles, allowedTypes } = opts;
   const lines: string[] = [];
   lines.push(`## 🏘️ New-Construction Sold Comp Run — ${subjectAddress}`);
   lines.push('');
-  lines.push(`Criteria: New construction (built 2025–2026) matching the subject's COUNTY ZONING use category, sold last 12 months, no sqft limits, within 5 driving miles (every qualifying CLOSED sale in range, closest first). Sources: RealtyAPI closed-sale records — Realtor, Redfin & Zillow (coordinate radius scan; under-contract/pending excluded). Distances: Google Distance Matrix driving miles (straight-line in parentheses).`);
+  lines.push(`Criteria: New construction (built 2025–2026) matching the subject's source-backed zoning uses, sold last 12 months, no sqft limits, within ${radiusMiles} driving miles (every qualifying CLOSED sale in range, closest first). Sources: RealtyAPI closed-sale records — Realtor, Redfin & Zillow (coordinate radius scan; under-contract/pending excluded). Distances: Google Distance Matrix driving miles (straight-line in parentheses).`);
+  lines.push('');
+  lines.push(`Zoning-permitted residential forms searched: ${allowedTypes.map(residentialCompTypeLabel).join(', ')}.`);
   lines.push('');
   lines.push(`Searched: ${locations.join(' · ')}${skippedZips.length ? ` (skipped dead ZIPs: ${skippedZips.join(', ')})` : ''} — ${scrapedCount ?? candidateCount} sold listings collected → ${candidateCount} met the new-construction spec${inRadiusCount != null ? ` → ${inRadiusCount} inside the driving radius` : ''}.`);
   lines.push('');
@@ -5656,7 +5868,7 @@ function buildCompRunSummary(opts: {
     const why = candidateCount === 0
       ? `None of the collected sold listings were built 2025–2026 — there may simply be no new-construction resales in this area yet.`
       : (inRadiusCount ?? 0) === 0
-        ? `${candidateCount} new-construction sale${candidateCount === 1 ? '' : 's'} matched the spec, but none closed within 5 driving miles of the subject.`
+        ? `${candidateCount} new-construction sale${candidateCount === 1 ? '' : 's'} matched the spec, but none closed within ${radiusMiles} driving miles of the subject.`
         : `Comps inside the radius could not be confirmed.`;
     lines.push(`**No qualifying new-construction comps for this run.** ${why} Use the county tax-assessor values as the only valuation reference.`);
     return lines.join('\n');
@@ -5669,6 +5881,8 @@ function buildCompRunSummary(opts: {
     const ppsf = c.pricePerSqft ? ` · $${c.pricePerSqft.toLocaleString()}/sqft` : '';
     const sqft = c.sqft ? ` · ${c.sqft.toLocaleString()} sqft` : '';
     lines.push(`- Sold: **$${c.price.toLocaleString()}** on ${c.saleDate}${sqft}${ppsf} · ${c.propertyType || 'Home'} · Built ${c.yearBuilt ?? 'N/A'}`);
+    if (c.typeEvidence) lines.push(`- Type evidence: ${c.typeEvidence}`);
+    if (c.zoningMatchReason) lines.push(`- Zoning match: ${c.zoningMatchReason}`);
     lines.push(`- ${c.verifiedNote || 'Source: RealtyAPI closed-sale record'}`);
     if (c.priceDiscrepancy) lines.push(`- Price discrepancy: ${c.priceDiscrepancy}`);
     lines.push('');
@@ -5746,7 +5960,7 @@ async function persistCompRun(run: {
         url: c.url ?? null,
         verified_note: c.verifiedNote ?? null,
         price_discrepancy: c.priceDiscrepancy ?? null,
-        sources: 'RealtyAPI (Realtor/Redfin/Zillow) + Public MLS (Google Search)',
+        sources: 'RealtyAPI (Realtor/Redfin/Zillow)',
       }));
       const { error: e2 } = await supabase.from('comp_listings').insert(rows);
       if (e2) throw e2;
@@ -5767,25 +5981,19 @@ export interface CompRunResult {
 // GUARANTEE it is the true closing price we cross-check each Zillow comp against
 // its MLS price history (/pricehistory) and use the "Sold" event matching the
 // comp's sale date. Confirmed prices get a badge; mismatches are corrected to
-// the MLS figure and flagged. Cached per zpid (7-day TTL) so repeats are free.
+// the MLS figure and flagged. Every lookup is fresh so repeated address searches
+// cannot reuse an older sold-price response.
 // ---------------------------------------------------------------------------
-const ZPH_CACHE_PREFIX = "gisfs:zph:v1:";
-const ZPH_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const MAX_ZILLOW_VERIFY = 40;   // closest-N Zillow comps to MLS-verify per run (cost/latency guard)
 const ZVERIFY_BATCH = 8;        // concurrent price-history lookups
 
-/** A zpid's SOLD price-history events ({date,price}) from Zillow MLS data, cached. */
+/** A zpid's SOLD price-history events ({date,price}) from Zillow MLS data. */
 async function fetchZillowSoldEvents(zpid: string, key: string): Promise<{ date: string; price: number }[] | null> {
-  const ck = ZPH_CACHE_PREFIX + zpid;
   try {
-    const raw = localStorage.getItem(ck);
-    if (raw) {
-      const v = JSON.parse(raw);
-      if (v && Array.isArray(v.e) && Date.now() - (v.t || 0) < ZPH_CACHE_TTL_MS) return v.e;
-    }
-  } catch { /* ignore */ }
-  try {
-    const res = await fetchWithTimeout(`${REALTY_API_HOSTS.zillow}/pricehistory?byzpid=${encodeURIComponent(zpid)}`, 15000, { headers: { "x-realtyapi-key": key } });
+    const res = await fetchWithTimeout(`${REALTY_API_HOSTS.zillow}/pricehistory?byzpid=${encodeURIComponent(zpid)}`, 15000, {
+      headers: { "x-realtyapi-key": key },
+      cache: 'no-store',
+    });
     if (!res.ok) return null;
     const data = await res.json();
     const hist: any[] = Array.isArray(data?.priceHistory) ? data.priceHistory
@@ -5794,7 +6002,6 @@ async function fetchZillowSoldEvents(zpid: string, key: string): Promise<{ date:
       .filter((h) => /sold/i.test(String(h?.event)))
       .map((h) => ({ date: String(h?.date || "").slice(0, 10), price: rNum(h?.price) ?? 0 }))
       .filter((e) => e.price > 0);
-    try { localStorage.setItem(ck, JSON.stringify({ t: Date.now(), e: events })); } catch { /* ignore */ }
     return events;
   } catch {
     return null;
@@ -5850,7 +6057,7 @@ async function verifyZillowCompPrices(
 
 /**
  * Best-effort: fetch the REAL listing photo for comps that don't have one yet
- * (typically the Google-search-sourced comps). For each photoless comp with
+ * (typically a RealtyAPI record whose search payload omitted photos). For each photoless comp with
  * coordinates, runs a tiny-radius RealtyAPI SOLD search at its point and matches
  * by street to pull THAT property's primary photo. Bounded + parallel; mutates
  * comp.imageUrl in place. Never throws.
@@ -5865,7 +6072,10 @@ async function backfillCompPhotos(comps: CompProperty[], key: string): Promise<v
       const q = new URLSearchParams({ latitude: String(c.coords!.lat), longitude: String(c.coords!.lng), radius: '0.2', page: '1' });
       if (platform === 'zillow') { q.set('listingStatus', 'Sold'); q.set('soldInLast', '12_months'); }
       else { q.set('searchType', 'Sold'); q.set('sortOrder', 'Most_Recently_Sold'); q.set('resultCount', '25'); }
-      const res = await fetchWithTimeout(`${REALTY_API_HOSTS[platform]}/search/bycoordinates?${q.toString()}`, 12000, { headers: { 'x-realtyapi-key': key } });
+      const res = await fetchWithTimeout(`${REALTY_API_HOSTS[platform]}/search/bycoordinates?${q.toString()}`, 12000, {
+        headers: { 'x-realtyapi-key': key },
+        cache: 'no-store',
+      });
       if (!res.ok) return undefined;
       const want = normalizeStreetKey(c.address);
       for (const raw of extractRealtyListings(await res.json())) {
@@ -5955,6 +6165,7 @@ export async function fetchGoogleDistanceMatrixComps(
   maxRadiusMiles = 5,
   zoningVerified = true,
   permittedUses: string[] = [],
+  zoningRestrictions: string[] = [],
 ): Promise<CompRunResult> {
   onStageChange?.("Searching sold listings...");
 
@@ -5978,7 +6189,7 @@ export async function fetchGoogleDistanceMatrixComps(
   const MIN_DIST_MILES = 0;
 
   // Permitted use category (drives the Realtor search property type).
-  const allowedTypes = zoningAllowedBuildingTypes(permittedUses, zoningCode, zoningDesc);
+  const allowedTypes = zoningAllowedBuildingTypes(permittedUses, zoningCode, zoningDesc, zoningRestrictions);
   if (allowedTypes.length === 0) {
     return { comps: [], summary: "No residential comps run: this parcel's zoning is office/commercial, so residential sold records do not apply." };
   }
@@ -6056,7 +6267,7 @@ export async function fetchGoogleDistanceMatrixComps(
   if (zip && !skippedZips.includes(zip)) {
     updateZipHealth(zip, candidates.some((c: any) => c.zip === zip));
   }
-  // Order by PROXIMITY (closest first) so the full 5-mile set is built from the
+  // Order by PROXIMITY (closest first) so the full selected-radius set is built from the
   // inside out — never lazily truncated to just the nearest few. Candidates
   // without coordinates sort last (geocoded below). Keep a generous closest-N.
   candidates.sort((a: any, b: any) => {
@@ -6085,10 +6296,13 @@ export async function fetchGoogleDistanceMatrixComps(
   // Cheap straight-line pre-prune (allow ~10% slack over the driving-mile radius).
   const STRAIGHT_PRUNE_MILES = EXPANDED_RADIUS_MILES + Math.max(0.5, EXPANDED_RADIUS_MILES * 0.1);
   const prunedCands: any[] = resolved.filter((c): c is any => c !== null && straightMiles(c) <= STRAIGHT_PRUNE_MILES);
+  const enrichedCands = await enrichCompTypesFromDetails(prunedCands, allowedTypes, getRealtyApiKey(), onStageChange);
+  const zoningMatchedCands = enrichedCands.filter((comp) => isFinalCompTypeAllowed(comp.compType ?? 'unknown', allowedTypes));
+  console.log(`Exact zoning-use filter: ${enrichedCands.length} candidates -> ${zoningMatchedCands.length} permitted property forms.`);
   // Collapse the SAME home listed across Realtor/Redfin/Zillow (different address
   // text but the same property) so the comp set has no duplicates.
-  const finalCands: any[] = dedupeComps(prunedCands);
-  if (finalCands.length < prunedCands.length) {
+  const finalCands: any[] = dedupeComps(zoningMatchedCands);
+  if (finalCands.length < zoningMatchedCands.length) {
     console.log(`Deduped comps: ${prunedCands.length} → ${finalCands.length} unique properties.`);
   }
 
@@ -6124,6 +6338,11 @@ export async function fetchGoogleDistanceMatrixComps(
       saleDate: c.saleDate,
       yearBuilt: c.yearBuilt,
       propertyType: c.propertyType,
+      compType: c.compType,
+      unitCount: c.unitCount,
+      structureCount: c.structureCount,
+      typeEvidence: c.typeEvidence,
+      zoningMatchReason: `${residentialCompTypeLabel(c.compType)} is included by the parcel's source-backed zoning use profile.`,
       coords: c.coords,
       sqft: c.sqft,
       url: c.url,
@@ -6141,8 +6360,8 @@ export async function fetchGoogleDistanceMatrixComps(
     };
   });
 
-  // STEP 6c — include EVERY qualifying comp from the closest out to the FULL 5
-  // driving miles (no lazy 3-mile cap), ordered nearest-first.
+  // STEP 6c — include EVERY qualifying comp from the closest out to the full
+  // selected driving radius, ordered nearest-first.
   const chosen = compsAll
     .filter((c) => c.distanceMiles >= MIN_DIST_MILES && c.distanceMiles <= EXPANDED_RADIUS_MILES)
     .sort((a, b) => a.distanceMiles - b.distanceMiles);
@@ -6152,8 +6371,8 @@ export async function fetchGoogleDistanceMatrixComps(
   // correct/confirm their sold prices before they're shown or used.
   await verifyZillowCompPrices(chosen, getRealtyApiKey(), onStageChange);
 
-  // STEP 7 — source attribution. Realtor records confirmed on their detail
-  // record get a verified badge; Google-sourced comps carry a confirm note.
+  // STEP 7 — source attribution. Provider records confirmed on their detail
+  // endpoint get a verified badge; search-only records carry a confirm note.
   const verified = chosen.map((c: any) => ({
     ...c,
     verified: !!c.detailConfirmed,
@@ -6169,7 +6388,7 @@ export async function fetchGoogleDistanceMatrixComps(
     .map((c: any) => ({ ...c, pricePerSqft: c.sqft ? Math.round(c.price / c.sqft) : undefined }))
     .sort((a: any, b: any) => a.distanceMiles - b.distanceMiles)
     .map((c: any) => {
-      const { propertyId, propertyHistory, status, sourceName, newConstructionFlag, detailConfirmed, priceConfirmed, ...rest } = c;
+      const { propertyId, listingId, detailRefs, propertyHistory, status, sourceName, newConstructionFlag, detailConfirmed, priceConfirmed, platform, ...rest } = c;
       return rest as CompProperty;
     });
 
@@ -6182,6 +6401,8 @@ export async function fetchGoogleDistanceMatrixComps(
     candidateCount: candidates.length,
     scrapedCount: compAddresses.length,
     inRadiusCount: chosen.length,
+    radiusMiles: EXPANDED_RADIUS_MILES,
+    allowedTypes,
   });
 
   // Persist the run + listings to Supabase (best-effort, non-blocking).
@@ -6196,8 +6417,8 @@ export async function fetchGoogleDistanceMatrixComps(
     summary,
   });
 
-  // Backfill REAL listing photos for any comp that still lacks one (e.g. the
-  // Google-search comps) so every comp has a property photo set. Best-effort.
+  // Backfill REAL listing photos for any comp whose RealtyAPI search record
+  // omitted them. Best-effort.
   onStageChange?.('Fetching listing photos…');
   await backfillCompPhotos(result, getRealtyApiKey());
 
@@ -7974,6 +8195,11 @@ export async function chatWithGemini(
     throw new Error("Gemini API key is required. Please configure it in Account Settings.");
   }
 
+  const reportCompRadius = getCompPrefs().radiusMiles;
+  const reportAllowedCompForms = reportData.compAllowedTypes?.length
+    ? reportData.compAllowedTypes.map(residentialCompTypeLabel).join(', ')
+    : 'the source-backed residential uses published for the parcel';
+
   const systemPrompt = `
 # AI Land Feasibility Report — Operating Standards
 
@@ -8006,7 +8232,8 @@ You operate as a senior land acquisition analyst, entitlement consultant, and re
 
 ## Comparable Sales — use ONLY the verified comps provided
 - The verified SOLD comps are supplied in the data packet. Use ONLY those exact homes. Never invent comps, never substitute older homes, never use vacant-land/raw-lot/active/pending listings, and never cite list prices or Zestimates.
-- Criteria already applied to that set: closed within the last 12 months; new construction (built the current or previous year); single-family matching the subject's zoning use; within 1-5 driving miles (never beyond 5 unless too few sales exist); closest first.
+- Criteria already applied to that set: closed within the last 12 months; new construction (built the current or previous year); exact property form matching the subject's zoning uses (${reportAllowedCompForms}); within ${reportCompRadius} driving miles; closest first.
+- Keep single-family, mobile/manufactured, townhouse, condo, duplex, triplex, quadplex, 5+ unit multifamily, and multiple-residential-structure sales distinct. Never relabel a broad multifamily record as a duplex, triplex, or quadplex without published unit-count or subtype evidence.
 - For EACH comp present: address, sale price, sale date, year built, living-area sqft, lot size (or "Unknown"), distance from subject, price/sqft, and one line on why it qualifies.
 - If the provided comp list is EMPTY, say so plainly and base valuation on vacant-land sales (Google Search) plus the assessor reference; do not fabricate comps.
 
@@ -8137,10 +8364,11 @@ ${redfinTable || `- ${marketStatsLine}`}
 - Adopted Standards Source: ${reportData.zoningStandardsSourceUrl || reportData.zoningSourceUrl || 'Use the official jurisdiction map linked in the zoning card.'}
 - Net buildable envelope: ${reportData.gridics ? `${reportData.gridics.netBuildableAreaSqft.toLocaleString()} SF` : 'Calculate after official district confirmation.'}
 
-### 4. SOLD New-Construction Comps (built 2025–2026, zoning-use-matched, CLOSED sales only, no sqft limits, sold ≤12 months, within 5 driving miles, RealtyAPI: Realtor + Redfin + Zillow). Each comp lists its property type.
+### 4. SOLD New-Construction Comps (built 2025–2026, zoning-use-matched, CLOSED sales only, no sqft limits, sold ≤12 months, within ${reportCompRadius} driving miles, RealtyAPI: Realtor + Redfin + Zillow)
+- Zoning-permitted residential forms searched: ${reportAllowedCompForms}
 ${reportData.comps && reportData.comps.length > 0
-  ? reportData.comps.map((comp, idx) => `- Comp ${idx + 1}: ${comp.address} | ${comp.propertyType || 'Home'} | Built ${comp.yearBuilt ?? 'N/A'} | ${comp.sqft ? `${comp.sqft.toLocaleString()} sqft | ` : ''}Sold ${comp.saleDate || 'N/A'} for $${comp.price.toLocaleString()}${comp.pricePerSqft ? ` ($${comp.pricePerSqft}/sqft)` : ''} | ${comp.distanceMiles.toFixed(2)} mi driving${comp.straightLineMiles != null ? ` (${comp.straightLineMiles.toFixed(2)} mi straight-line)` : ''}${comp.drivingFallback ? ' [straight-line fallback]' : ''} | ${comp.verifiedNote || 'RealtyAPI sold record'}${comp.priceDiscrepancy ? ` | discrepancy: ${comp.priceDiscrepancy}` : ''}`).join('\n')
-  : "NONE FOUND: no new-construction (built 2025–2026) HOME sales matching the subject's zoning use closed within the last 12 months inside the 5-mile driving radius (RealtyAPI: Realtor, Redfin, Zillow). Do NOT substitute older homes, vacant-land, raw-lot, or unbuilt-pad sales. State plainly that no qualifying comps were available and note the county tax-assessor values as the only valuation reference."}
+  ? reportData.comps.map((comp, idx) => `- Comp ${idx + 1}: ${comp.address} | ${comp.propertyType || (comp.compType ? residentialCompTypeLabel(comp.compType) : 'Residential')} | ${comp.unitCount ? `${comp.unitCount} dwelling units | ` : ''}${comp.structureCount ? `${comp.structureCount} structures | ` : ''}Built ${comp.yearBuilt ?? 'N/A'} | ${comp.sqft ? `${comp.sqft.toLocaleString()} sqft | ` : ''}Sold ${comp.saleDate || 'N/A'} for $${comp.price.toLocaleString()}${comp.pricePerSqft ? ` ($${comp.pricePerSqft}/sqft)` : ''} | ${comp.distanceMiles.toFixed(2)} mi driving${comp.straightLineMiles != null ? ` (${comp.straightLineMiles.toFixed(2)} mi straight-line)` : ''}${comp.drivingFallback ? ' [straight-line fallback]' : ''} | Type evidence: ${comp.typeEvidence || 'RealtyAPI property-type field'} | Zoning match: ${comp.zoningMatchReason || 'source-backed permitted use'} | ${comp.verifiedNote || 'RealtyAPI sold record'}${comp.priceDiscrepancy ? ` | discrepancy: ${comp.priceDiscrepancy}` : ''}`).join('\n')
+  : `NONE FOUND: no new-construction (built 2025–2026) residential sale matching the parcel's permitted forms (${reportAllowedCompForms}) closed within the last 12 months inside the ${reportCompRadius}-mile driving radius (RealtyAPI: Realtor, Redfin, Zillow). Do NOT substitute older homes, vacant land, raw lots, unbuilt pads, active listings, or a different residential form. State plainly that no qualifying comps were available and note the county tax-assessor values as the only valuation reference.`}
 
 ### 5. Ownership, Tax & Assessment Data (for report content — never output this as a JSON/asset payload)
 - Center Coordinates: [${reportData.coordinates.lat}, ${reportData.coordinates.lng}]

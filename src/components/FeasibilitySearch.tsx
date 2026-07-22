@@ -46,6 +46,18 @@ const recordDate = (value?: string): string => {
     : parsed.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
 };
 
+const COMP_TYPE_LABELS_MAP: Record<string, string> = {
+  'single-family': 'Single-Family',
+  mobile: 'Mobile/Manufactured',
+  townhouse: 'Townhouse',
+  condo: 'Condo',
+  duplex: 'Duplex',
+  triplex: 'Triplex',
+  quadplex: 'Quadplex',
+  'multi-family': 'Multi-Family',
+  'multi-structure': 'Multiple Residential Structures',
+};
+
 const ownerMapLabel = (data: SiteFeasibilityData): string | null => {
   if (!data.ownerName) return null;
   const prefix = data.ownerRecordType === 'deed'
@@ -1100,6 +1112,8 @@ export const FeasibilitySearch: FC = () => {
         undefined,
         newRadius,
         zoningCanDriveComps,
+        d.zoningPermittedUses || [],
+        d.zoningRestrictions || [],
       );
       if (seq !== searchSeqRef.current) return; // a new search superseded this
       setData((prev) => (prev ? { ...prev, comps: run.comps, compRunSummary: run.summary } : prev));
@@ -1202,9 +1216,12 @@ TOTAL build cost: $${costEstimate.totalCost.toLocaleString()} ($${costEstimate.c
         : '';
       const compsList = reportData.comps && reportData.comps.length > 0
         ? reportData.comps.map((comp, idx) =>
-            `- Comp ${idx + 1}: ${comp.address} | Sold: $${comp.price.toLocaleString()}${comp.pricePerSqft ? ` ($${comp.pricePerSqft}/sqft)` : ''} | ${comp.sqft ? `${comp.sqft.toLocaleString()} sqft | ` : ''}Driving: ${comp.distanceMiles.toFixed(2)} mi | Year Built: ${comp.yearBuilt || 'N/A'} | Type: ${comp.propertyType || 'N/A'} | Sale Date: ${comp.saleDate || 'N/A'} | ${comp.verifiedNote || 'RealtyAPI closed-sale record'}`
+            `- Comp ${idx + 1}: ${comp.address} | Sold: $${comp.price.toLocaleString()}${comp.pricePerSqft ? ` ($${comp.pricePerSqft}/sqft)` : ''} | ${comp.sqft ? `${comp.sqft.toLocaleString()} sqft | ` : ''}Driving: ${comp.distanceMiles.toFixed(2)} mi | Year Built: ${comp.yearBuilt || 'N/A'} | Type: ${comp.propertyType || (comp.compType ? COMP_TYPE_LABELS_MAP[comp.compType] : 'N/A')}${comp.unitCount ? ` | Units: ${comp.unitCount}` : ''}${comp.structureCount ? ` | Structures: ${comp.structureCount}` : ''} | Type evidence: ${comp.typeEvidence || 'RealtyAPI property-type field'} | Zoning match: ${comp.zoningMatchReason || 'source-backed permitted use'} | Sale Date: ${comp.saleDate || 'N/A'} | ${comp.verifiedNote || 'RealtyAPI closed-sale record'}`
           ).join('\n')
         : 'No verified comps available.';
+      const allowedCompForms = reportData.compAllowedTypes?.length
+        ? reportData.compAllowedTypes.map((type) => COMP_TYPE_LABELS_MAP[type] || type).join(', ')
+        : 'the source-backed residential uses published for the parcel';
 
       const initialPrompt = `Produce the AI Land Feasibility Report for "${reportData.inputAddress}" following your Operating Standards exactly. Lead every section with its conclusion, label evidence Verified / Likely / Unknown, and do not finish until all required sections are completed or explicitly marked "Unknown — unverifiable due to lack of available evidence."
 
@@ -1226,7 +1243,7 @@ INVESTIGATE with live Google Search (focused on this exact address + ZIP, not th
 - CURRENT LOCAL construction costs for this address's metro/county for the Development Cost + Profitability sections — searching AS MANY local sources near the address as possible (not one), with sources, never national averages. Get local figures for: per-sqft new single-family build cost; land CLEARING / TREE removal ($/acre); GRADING/earthwork on slopes; foundation; WELL drilling ($/ft + total) and SEPTIC system + perc test when there's no public water/sewer; public water/sewer TAP & impact fees when available; permits and survey. Be EXTREMELY ACCURATE.
 Reconcile differences across sources and cite at least 3 distinct Markdown links.
 
-COMPARABLES — use ONLY these verified, already-filtered SOLD comps (closed within 12 months, new construction, zoning-matched, within 5 driving miles). Do NOT search for or substitute any other comps, and never cite a price other than those below:
+COMPARABLES — use ONLY these verified, already-filtered SOLD comps (closed within 12 months, new construction, zoning-matched, within ${compRadius} driving miles). The permitted forms searched were: ${allowedCompForms}. Keep single-family, mobile/manufactured, townhouse, condo, duplex, triplex, quadplex, 5+ unit multifamily, and multiple-residential-structure sales distinct. Do NOT search for or substitute any other comps, and never cite a price other than those below:
 ${compsList}
 
 In Section 19 (New Construction Comparable Sales Analysis) present EVERY comp above in a table with: address, sale price, sale date, year built, living-area sqft, lot size (or "Unknown"), distance from subject, and price/sqft — plus one line on why each qualifies. Then derive the median, range, and median $/sqft.
@@ -3132,27 +3149,48 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
   // Comp property-type buckets for the display filter.
   const compTypeBucket = (t?: string): string => {
     const s = String(t || '').toLowerCase().replace(/[_-]+/g, ' ').trim();
-    if (/single|sfr|detached|\bhouse\b|\bhome\b/.test(s)) return 'single-family';
-    if (/town|row\s?house/.test(s)) return 'townhome';
+    if (/mobile|manufactured|hud code/.test(s)) return 'mobile';
+    if (/multiple residential structures|multi structure|residential compound|cottage court/.test(s)) return 'multi-structure';
+    if (/duplex|two family|2 unit/.test(s)) return 'duplex';
+    if (/triplex|three family|3 unit/.test(s)) return 'triplex';
+    if (/quad|fourplex|four family|4 unit/.test(s)) return 'quadplex';
+    if (/town|row\s?house/.test(s)) return 'townhouse';
     if (/condo/.test(s)) return 'condo';
-    if (/multi|duplex|triplex|quad|fourplex|apartment|\bapt\b|co.?op/.test(s)) return 'multi-family';
-    if (/mobile|manufactured/.test(s)) return 'mobile';
+    if (/multi|apartment|\bapt\b|co.?op/.test(s)) return 'multi-family';
+    if (/single|sfr|detached|\bhouse\b|\bhome\b/.test(s)) return 'single-family';
     return 'other';
   };
   // The comp type filter chips are DRIVEN BY THE ZONING: only the building types
   // this district permits (data.compAllowedTypes) are offered, defaulting to
   // "All allowed" (a mix of every permitted type).
-  const COMP_TYPE_LABELS_MAP: Record<string, string> = {
-    'single-family': 'Single Family', 'townhome': 'Townhome', 'condo': 'Condo', 'multi-family': 'Multi-Family', 'mobile': 'Mobile/Manufactured',
-  };
+  const allComps = data?.comps || [];
   const compAllowedTypes = (data?.compAllowedTypes || []).filter((t) => COMP_TYPE_LABELS_MAP[t]);
+  const compResultTypes = [...new Set(allComps.map((comp) => comp.compType || compTypeBucket(comp.propertyType)).filter((type) => COMP_TYPE_LABELS_MAP[type]))];
+  const compCoverageTypes = [...new Set([...compAllowedTypes, ...compResultTypes])];
   const COMP_TYPE_OPTIONS: { value: string; label: string }[] = [
     { value: 'all', label: compAllowedTypes.length ? 'All allowed' : 'All types' },
-    ...compAllowedTypes.map((t) => ({ value: t, label: COMP_TYPE_LABELS_MAP[t] })),
+    ...compCoverageTypes.map((t) => ({ value: t, label: COMP_TYPE_LABELS_MAP[t] })),
   ];
-  const allComps = data?.comps || [];
-  const filteredComps = compTypeFilter === 'all' ? allComps : allComps.filter((c) => compTypeBucket(c.propertyType) === compTypeFilter);
+  const effectiveCompTypeFilter = COMP_TYPE_OPTIONS.some((option) => option.value === compTypeFilter) ? compTypeFilter : 'all';
+  const filteredComps = effectiveCompTypeFilter === 'all'
+    ? allComps
+    : allComps.filter((comp) => (comp.compType || compTypeBucket(comp.propertyType)) === effectiveCompTypeFilter);
   const visibleComps = compsShowAll ? filteredComps : filteredComps.slice(0, 10);
+  const compCoverageRow = compCoverageTypes.length > 0 ? (
+    <div style={{ marginBottom: '0.65rem' }}>
+      <div className="comp-filter-label" style={{ marginBottom: '6px' }}>Zoning-matched sold categories</div>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
+        {compCoverageTypes.map((type) => {
+          const count = allComps.filter((comp) => (comp.compType || compTypeBucket(comp.propertyType)) === type).length;
+          return (
+            <span key={type} className={`comp-filter-pill${count > 0 ? ' active' : ''}`} style={{ cursor: 'default' }}>
+              {COMP_TYPE_LABELS_MAP[type]}: {count}
+            </span>
+          );
+        })}
+      </div>
+    </div>
+  ) : null;
 
   // Development Costs — the Instant Construction Cost Estimate + Local
   // Material Takeoff, now rendered INSIDE the AI Feasibility Report (injected
@@ -4519,6 +4557,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                         : `No qualifying comps found: no new-construction sales (built 2025–2026) matching this parcel's zoning use closed within the last 12 months inside the ${compRadius} driving-mile radius (RealtyAPI: Realtor, Redfin, Zillow). The chat bubble has the run breakdown. Try a wider radius:`}
                     </span>
                   </div>
+                  {compCoverageRow}
                   {!['review-required', 'planning-designation', 'unavailable'].includes(String(data.zoningVerificationStatus)) && (
                     <div className="comp-filter-bar">
                       <div className="comp-filter-group">
@@ -4561,8 +4600,9 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                     )}
                   </div>
                   <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginBottom: '0.6rem', fontStyle: 'italic', borderBottom: '1px dashed var(--bg-card-border)', paddingBottom: '0.5rem' }}>
-                    *Criteria: New construction (built 2025–2026) matching this parcel's zoning use, sold within 12 months, no sqft limits, within {compRadius} driving miles. Sources: Realtor.com sold records (radius scan, ✓ confirmed) + public MLS via Google Search.*
+                    Criteria: New construction (built 2025–2026) matching the parcel's source-backed zoning uses, closed within 12 months, no sqft limits, within {compRadius} driving miles. Sold records: RealtyAPI Realtor, Redfin, and Zillow. Gemini is used only to select an exterior listing photo.
                   </div>
+                  {compCoverageRow}
                   {/* Comp filters: max radius (EVERY click re-runs a fresh comps
                       search at that mileage) + property type (instant) */}
                   <div className="comp-filter-bar">
@@ -4586,7 +4626,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                       <span className="comp-filter-label">Type</span>
                       <select
                         className="comp-filter-select"
-                        value={compTypeFilter}
+                        value={effectiveCompTypeFilter}
                         onChange={(e) => { setCompTypeFilter(e.target.value); setCompsShowAll(false); }}
                       >
                         {COMP_TYPE_OPTIONS.map((o) => (
@@ -4601,7 +4641,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                   {filteredComps.length === 0 ? (
                     <div style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '12px 0', color: 'var(--text-secondary)', fontSize: '0.8rem' }}>
                       <AlertCircle size={15} style={{ color: 'var(--warning, #d97706)' }} />
-                      <span>No {COMP_TYPE_OPTIONS.find((o) => o.value === compTypeFilter)?.label.toLowerCase()} comps in this set. Try “All types” or a wider radius.</span>
+                      <span>No {COMP_TYPE_OPTIONS.find((o) => o.value === effectiveCompTypeFilter)?.label.toLowerCase()} comps in this set. Try “All allowed” or a wider radius.</span>
                     </div>
                   ) : (
                   <>
@@ -4613,7 +4653,8 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                         const map: Record<string, string> = {
                           'single family': 'Single Family', 'singlefamily': 'Single Family', 'sfr': 'Single Family', 'single family residence': 'Single Family', 'single family residential': 'Single Family',
                           'townhouse': 'Townhouse', 'townhome': 'Townhome', 'townhomes': 'Townhome', 'condo': 'Condo', 'condos': 'Condo', 'condominium': 'Condo',
-                          'multi family': 'Multi-Family', 'multifamily': 'Multi-Family', 'duplex': 'Duplex', 'triplex': 'Triplex', 'quadruplex': 'Quadruplex',
+                          'multi family': 'Multi-Family', 'multifamily': 'Multi-Family', 'duplex': 'Duplex', 'triplex': 'Triplex', 'quadplex': 'Quadplex', 'quadruplex': 'Quadplex',
+                          'multiple residential structures': 'Multiple Residential Structures',
                           'apartment': 'Apartment', 'land': 'Land', 'mobile': 'Mobile/Manufactured', 'manufactured': 'Mobile/Manufactured',
                         };
                         return map[s.toLowerCase()] || s.replace(/\b\w/g, (c) => c.toUpperCase());
@@ -4695,6 +4736,8 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                         {(comp.sqft || comp.pricePerSqft || comp.yearBuilt || comp.propertyType) && (
                           <div style={{ display: 'flex', justifyContent: 'space-between', flexWrap: 'wrap', gap: '4px 10px', fontSize: '0.72rem', color: 'var(--text-secondary)', paddingLeft: '24px', borderTop: '1px dashed rgba(0,0,0,0.05)', paddingTop: '4px' }}>
                             {comp.propertyType && <span>Type: <strong>{prettyType(comp.propertyType)}</strong></span>}
+                            {comp.unitCount && <span>Units: <strong>{comp.unitCount}</strong></span>}
+                            {comp.structureCount && <span>Structures: <strong>{comp.structureCount}</strong></span>}
                             {comp.sqft && <span>Size: <strong>{comp.sqft.toLocaleString()} SF</strong></span>}
                             {comp.pricePerSqft && <span><strong>${comp.pricePerSqft.toLocaleString()}/SF</strong></span>}
                             {comp.yearBuilt && <span>Built: <strong>{comp.yearBuilt}</strong></span>}
@@ -4711,6 +4754,12 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                             <span style={{ color: 'var(--warning, #d97706)' }} title="Google driving distance unavailable — straight-line used">⚠ straight-line</span>
                           )}
                         </div>
+                        {(comp.typeEvidence || comp.zoningMatchReason) && (
+                          <div style={{ fontSize: '0.68rem', color: 'var(--text-muted)', paddingLeft: '24px', lineHeight: 1.4 }}>
+                            {comp.typeEvidence && <div>Type evidence: {comp.typeEvidence}</div>}
+                            {comp.zoningMatchReason && <div>Zoning match: {comp.zoningMatchReason}</div>}
+                          </div>
+                        )}
                         {comp.priceDiscrepancy && (
                           <div style={{ fontSize: '0.68rem', color: 'var(--text-muted)', paddingLeft: '24px' }}>
                             Price corrected to MLS record ({comp.priceDiscrepancy})

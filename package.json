@@ -12,6 +12,7 @@
     "test:zoning": "node --test netlify/functions/lib/zoning-registry.test.js",
     "test:estimates": "node --test netlify/functions/lib/sourced-estimate.test.js",
     "test:transactions": "node --test netlify/functions/lib/realestateapi-property.test.js",
+    "test:comps": "node scripts/test-comps.mjs",
     "typecheck:zoning-engine": "tsc -p tsconfig.zoning.json",
     "typecheck:zoning-server": "tsc -p tsconfig.zoning-server.json",
     "test:zoning-engine": "node scripts/test-zoning-engine.mjs",

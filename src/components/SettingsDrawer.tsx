@@ -6,10 +6,15 @@ import { getCompPrefs, setCompPrefs, getReportAutoGenerate, setReportAutoGenerat
 
 const COMP_TYPE_OPTIONS = [
   { value: 'all', label: 'All types' },
-  { value: 'single-family', label: 'Single Family' },
+  { value: 'single-family', label: 'Single-Family' },
+  { value: 'mobile', label: 'Mobile/Manufactured' },
   { value: 'townhouse', label: 'Townhouse' },
   { value: 'condo', label: 'Condo' },
-  { value: 'multi-family', label: 'Multi-Family' },
+  { value: 'duplex', label: 'Duplex' },
+  { value: 'triplex', label: 'Triplex' },
+  { value: 'quadplex', label: 'Quadplex' },
+  { value: 'multi-family', label: 'Multi-Family (5+ / unspecified)' },
+  { value: 'multi-structure', label: 'Multiple Residential Structures' },
 ];
 
 interface SettingsDrawerProps {
