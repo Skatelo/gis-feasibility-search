@@ -15,12 +15,13 @@ export interface OfficialZoningEvidenceHint {
 
 type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 
-// Zoning search models in priority order. gemini-3.6-flash (GA) is the primary
-// zoning model. gemini-3-flash-preview is kept as the fallback — in past tests it
-// grounded as accurately as the flagship (same district across repeated runs) at
-// ~2x the speed, so it's a solid backup if 3.6 is ever unavailable (a retired or
-// unknown model answers HTTP 404, which triggers the fallback).
-export const GEMINI_ZONING_MODELS = ['gemini-3.6-flash', 'gemini-3-flash-preview'] as const;
+// Zoning search models in priority order. gemini-3-flash-preview is the primary
+// zoning model — it grounds as accurately as the flagship (same district across
+// repeated runs) at ~2x the speed and is the proven-good default. gemini-3.6-flash
+// is kept as the fallback. If any model errors or returns an unusable answer, the
+// lookup transparently falls back to the next one (see loop below), so a single
+// bad/unavailable model can never take down the whole zoning lookup.
+export const GEMINI_ZONING_MODELS = ['gemini-3-flash-preview', 'gemini-3.6-flash'] as const;
 export const GEMINI_ZONING_MODEL = GEMINI_ZONING_MODELS[0];
 
 // Zoning district identification needs the model's full agentic search depth.
@@ -229,12 +230,15 @@ export async function fetchGeminiZoningSearchEvidence(
   const requestedQuery = `What is ${fullAddress} zoning code`;
   const input = buildGeminiZoningSearchPrompt(fullAddress, countyName, jurisdiction, officialEvidence);
 
-  // Try each model in priority order. A retired/unknown model answers HTTP 404,
-  // so we transparently fall back to the next one instead of failing the lookup.
+  // Try each model in priority order. If a model is unavailable, errors, or
+  // returns an unusable answer, transparently fall back to the next one instead
+  // of failing the whole zoning lookup. Only the last model's failure surfaces.
   let lastError: Error | null = null;
   for (let modelIndex = 0; modelIndex < GEMINI_ZONING_MODELS.length; modelIndex++) {
+    const model = GEMINI_ZONING_MODELS[modelIndex];
+    const isLastModel = modelIndex === GEMINI_ZONING_MODELS.length - 1;
     const body = JSON.stringify({
-      model: GEMINI_ZONING_MODELS[modelIndex],
+      model,
       input,
       system_instruction: ZONING_SYSTEM,
       store: false,
@@ -256,23 +260,28 @@ export async function fetchGeminiZoningSearchEvidence(
 
       if (response.ok) {
         const parsed = parseGeminiZoningInteraction(await response.json());
-        if (!parsed.raw) throw new Error('Gemini zoning search returned no structured answer.');
-        return { fullAddress, requestedQuery, ...parsed };
-      }
-
-      // Model unavailable (e.g. a preview model was retired) — stop retrying it
-      // and fall through to the next model in the list.
-      if (response.status === 404 && modelIndex < GEMINI_ZONING_MODELS.length - 1) {
-        lastError = new Error(`Gemini zoning model ${GEMINI_ZONING_MODELS[modelIndex]} is unavailable (HTTP 404).`);
+        if (parsed.raw) return { fullAddress, requestedQuery, ...parsed };
+        // 200 OK but no usable answer — record it and fall back to the next model.
+        lastError = new Error(`Gemini zoning model ${model} returned no structured answer.`);
         break;
       }
 
+      // Retry transient errors once on the SAME model before moving on.
       const retryable = response.status === 429 || response.status >= 500;
-      if (!retryable || attempt === 1) {
-        throw new Error(`Gemini zoning search returned HTTP ${response.status}.`);
+      if (retryable && attempt === 0) {
+        await new Promise((resolve) => setTimeout(resolve, retryDelayMs(response, attempt)));
+        continue;
       }
-      await new Promise((resolve) => setTimeout(resolve, retryDelayMs(response, attempt)));
+
+      // Any other failure (404, 400, 401/403, or exhausted retries) — stop
+      // retrying this model and fall back to the next one in the list.
+      lastError = new Error(`Gemini zoning model ${model} returned HTTP ${response.status}.`);
+      break;
     }
+
+    // This model produced no usable answer. Fall back to the next model; if this
+    // was the last one, stop and surface the error below.
+    if (isLastModel) break;
   }
 
   throw lastError ?? new Error('Gemini zoning search did not return a response.');
