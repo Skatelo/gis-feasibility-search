@@ -526,7 +526,7 @@ test('Gemini zoning search uses the complete address and a fresh grounded Intera
   assert.equal(call.init.method, 'POST');
   assert.equal(call.init.cache, 'no-store');
   assert.equal(call.init.headers['x-goog-api-key'], 'test-gemini-key');
-  assert.equal(call.body.model, 'gemini-3.6-flash');
+  assert.equal(call.body.model, 'gemini-3-flash-preview');
   assert.equal(call.body.store, false);
   assert.deepEqual(call.body.tools, [{ type: 'google_search' }]);
   assert.equal(call.body.generation_config.thinking_level, 'high');
