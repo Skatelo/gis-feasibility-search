@@ -15,13 +15,9 @@ export interface OfficialZoningEvidenceHint {
 
 type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 
-// Zoning search models in priority order. gemini-3-flash-preview is the primary
-// zoning model — it grounds as accurately as the flagship (same district across
-// repeated runs) at ~2x the speed and is the proven-good default. gemini-3.6-flash
-// is kept as the fallback. If any model errors or returns an unusable answer, the
-// lookup transparently falls back to the next one (see loop below), so a single
-// bad/unavailable model can never take down the whole zoning lookup.
-export const GEMINI_ZONING_MODELS = ['gemini-3-flash-preview', 'gemini-3.6-flash'] as const;
+// Zoning search model. Keep this list-shaped contract because the lookup loop
+// handles retries consistently even when only one production model is enabled.
+export const GEMINI_ZONING_MODELS = ['gemini-3.6-flash'] as const;
 export const GEMINI_ZONING_MODEL = GEMINI_ZONING_MODELS[0];
 
 // Zoning district identification needs the model's full agentic search depth.

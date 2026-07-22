@@ -256,12 +256,14 @@ async function imageUrlToInlineData(url: string): Promise<{ mimeType: string; da
 function visionPrompt(mode: SearchMode): string {
   const shared = `You are an expert real-estate computer-vision analyst. You are given a high-zoom SATELLITE/aerial image and (when available) a STREET VIEW image of a single property. Analyze them as a real-estate investor scanning for opportunities.
 
+Inspect every image edge-to-edge in two passes. First inventory all visible structures, surfaces, vegetation, access, water, utilities, vehicles, and neighboring activity. Then make a targeted defect/development pass and cross-check the satellite and street-level evidence. Distinguish a visible condition from a shadow, seasonal vegetation, image stitching, blur, or compression artifact. Do not infer details that are hidden, off-frame, or too blurry to verify. Put the most specific visible evidence in "reasons" and use "confidence" to reflect coverage and image quality.
+
 Respond with ONLY a single raw JSON object — no prose, no markdown, no code fences. Use numeric 0-100 scores (integers) and booleans exactly as specified. If a field cannot be judged from the imagery, use a conservative value and lower your overall "confidence". The JSON shape to follow is shown below.`;
 
   if (mode === 'house') {
     return `${shared}
 
-Detect DISTRESSED-HOUSE indicators: roof damage / missing shingles / roof discoloration, exterior deterioration, broken or boarded windows, overgrown grass / excessive vegetation, junk vehicles, unmaintained driveway, structural / fire / storm damage, and vacancy/abandonment signals.
+Detect DISTRESSED-HOUSE indicators: inspect each visible roof plane, ridge, flashing, gutters, fascia/soffits, siding or masonry, windows, doors, porch/deck, foundation edge, driveway, yard, fencing, vehicles, and utility condition. Look for missing or lifted shingles, tarps, staining, sagging, holes, rot, peeling finishes, cracks, boarded openings, overgrowth, debris, junk vehicles, structural/fire/storm damage, and vacancy/abandonment signals.
 
 JSON shape:
 \`\`\`json
@@ -284,7 +286,7 @@ For the *_score fields: 0 = pristine/well-maintained, 100 = severe distress. Be 
   // land = combined vacant-land + builder-lot assessment
   return `${shared}
 
-This is a combined VACANT-LAND and BUILDER-LOT assessment. Detect whether the parcel is vacant/cleared, road frontage / access roads, visible utilities/power lines, tree coverage percentage, water/wetland indicators, terrain slope, flood signals, and especially DEVELOPMENT ACTIVITY nearby (adjacent new construction, graded lots, similar-sized residential lots — the signal a homebuilder would buy here), plus any agricultural/commercial use or encroachments.
+This is a combined VACANT-LAND and BUILDER-LOT assessment. Inspect parcel center and edges for structures, clearing, driveways, curb cuts, road frontage, access constraints, visible utilities/power lines, tree canopy versus lawn or scrub, standing water/drainage channels/wetland vegetation, terrain breaks, flood signals, dumping, easement-like corridors, and encroachments. Inspect the surrounding blocks separately for DEVELOPMENT ACTIVITY such as new roofs, active construction, graded lots, roads, and similar-sized residential lots, plus agricultural or commercial use.
 
 JSON shape:
 \`\`\`json
@@ -373,11 +375,15 @@ export async function geminiVisionAnalyze(
   const parts: any[] = [{ text: visionPrompt(mode) }];
   for (const img of images) parts.push({ inline_data: { mime_type: img.mimeType, data: img.data } });
 
-  // `responseMimeType: application/json` forces clean JSON (no prose / markdown
-  // fences); a generous token budget avoids truncating the object. jsonMode is a
-  // flag so we can fall back to plain mode if the model rejects JSON mode.
-  const callOnce = async (temperature: number, jsonMode: boolean) => {
-    const generationConfig: any = { temperature, maxOutputTokens: 2048 };
+  // High media resolution preserves small roof, vegetation, access, and site
+  // details. High thinking gives the model room for the requested second-pass
+  // cross-check, while JSON mode keeps the observations machine-readable.
+  const callOnce = async (jsonMode: boolean) => {
+    const generationConfig: any = {
+      maxOutputTokens: 8192,
+      mediaResolution: 'MEDIA_RESOLUTION_HIGH',
+      thinkingConfig: { thinkingLevel: 'high' },
+    };
     if (jsonMode) generationConfig.responseMimeType = 'application/json';
     const res = await fetch(url, {
       method: 'POST',
@@ -403,15 +409,15 @@ export async function geminiVisionAnalyze(
   // in plain mode (the parser handles fenced/embedded JSON too).
   let last: { text: string; finishReason?: string };
   try {
-    last = await callOnce(0.2, true);
+    last = await callOnce(true);
   } catch (e: any) {
-    if (e?.status >= 400 && e?.status < 500) last = await callOnce(0.2, false);
+    if (e?.status >= 400 && e?.status < 500) last = await callOnce(false);
     else throw e;
   }
   let obs = parseVisionJson(last.text);
-  // On an empty/unparseable/truncated response, retry once at temperature 0.
+  // On an empty/unparseable/truncated response, retry once.
   if (!obs) {
-    last = await callOnce(0, true).catch(() => callOnce(0, false));
+    last = await callOnce(true).catch(() => callOnce(false));
     obs = parseVisionJson(last.text);
   }
   if (!obs) {
