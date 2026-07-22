@@ -6113,12 +6113,15 @@ async function geminiPickExteriorIndex(images: { mimeType: string; data: string 
   try {
     const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key=${geminiKey}`;
     const parts: any[] = [{
-      text: `These ${images.length} images (indexed 0 to ${images.length - 1}, in order) are photos from ONE home listing. Reply with ONLY the single integer index of the image that best shows the BUILDING'S EXTERIOR — the whole house/structure seen from OUTSIDE (front facade preferred). It must NOT be an interior room (kitchen, bath, bedroom, living room), an aerial/satellite view, a map, a floor plan, a sign, a logo, or any cartoon/graphic. If NONE clearly shows a building exterior, reply -1. Reply with just the number.`,
+      text: `These ${images.length} images (indexed 0 to ${images.length - 1}, in order) are from ONE home listing. Inspect every image before choosing. First classify each image as exterior, interior, aerial/map, floor plan, sign/logo, or graphic. Then compare only the true exteriors for building visibility, facade coverage, sharpness, and obstruction. Reply with ONLY the single integer index of the image that best shows the whole BUILDING EXTERIOR from outside, with the front facade preferred. Reject interior rooms, aerial/satellite views, maps, floor plans, signs, logos, renderings, and cartoons. If no image clearly shows a real building exterior, reply -1.`,
     }];
     images.forEach((img) => parts.push({ inline_data: { mime_type: img.mimeType, data: img.data } }));
-    // Large budget: thinking tokens count against maxOutputTokens — 256 got
-    // truncated at MAX_TOKENS before the single-integer answer was emitted.
-    const res = await queueGemini(() => fetchWithTimeout(url, 30000, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ contents: [{ role: "user", parts }], generationConfig: { temperature: 0, maxOutputTokens: 4096 } }) }), 'idle', 'background');
+    const generationConfig = {
+      maxOutputTokens: 8192,
+      mediaResolution: 'MEDIA_RESOLUTION_HIGH',
+      thinkingConfig: { thinkingLevel: 'high' },
+    };
+    const res = await queueGemini(() => fetchWithTimeout(url, 45000, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ contents: [{ role: "user", parts }], generationConfig }) }), 'idle', 'background');
     if (!res.ok) return null;
     const data = await res.json();
     const text = data.candidates?.[0]?.content?.parts?.map((p: any) => p.text).filter(Boolean).join("") || "";
@@ -6141,7 +6144,7 @@ async function selectExteriorComps(comps: CompProperty[], geminiKey: string): Pr
   const worker = async () => {
     while (i < targets.length) {
       const c = targets[i++];
-      const urls = (c.photoUrls || []).slice(0, 4);
+      const urls = (c.photoUrls || []).slice(0, 6);
       const encoded = await Promise.all(urls.map(async (u) => ({ u, img: await imageUrlToInline(u) })));
       const valid = encoded.filter((e): e is { u: string; img: { mimeType: string; data: string } } => !!e.img);
       if (!valid.length) continue; // couldn't fetch — keep the cover photo
@@ -7017,8 +7020,9 @@ async function countTreesFromSatellite(
   const localEstimate = await estimateTreesFromSatellitePixels(imgs[0], acres, maskContext).catch(() => null);
   if (localEstimate) return localEstimate;
   const multi = imgs.length > 1;
-  const prompt = `You are estimating TREE REMOVAL for a ~${acres.toFixed(2)}-acre raw land parcel.
+  const prompt = `You are estimating TREE REMOVAL for a ~${acres.toFixed(2)}-acre raw land parcel. Inspect the imagery edge-to-edge in two passes before answering.
 ${multi ? 'The FIRST image is a top-down SATELLITE view — use it to COUNT the trees and read canopy. The SECOND image is a ground-level STREET VIEW — use it to gauge tree SIZE/maturity and species.' : 'This is a top-down SATELLITE view of the parcel — count the trees and read canopy.'}
+Pass 1: divide the satellite parcel view into a 4-by-4 grid, inspect every cell, and distinguish tree crowns from lawn, scrub, shadows, buildings, and neighboring canopy. Pass 2: cross-check dense or partially obscured areas, parcel edges, and the street-level image so small and understory trees are not missed or double-counted. Count only the subject parcel as closely as the image permits.
 Estimate how many TREES would need removal to develop/build on it, by canopy size:
 - "small": young/small trees, canopy under ~25 ft wide
 - "medium": mature trees, canopy ~25-45 ft
@@ -7028,12 +7032,10 @@ Return ONLY JSON: {"small":<int>,"medium":<int>,"large":<int>,"canopyCoverPct":<
   const parts: any[] = [{ text: prompt }];
   imgs.forEach((img) => parts.push({ inline_data: { mime_type: img.mimeType, data: img.data } }));
   const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key=${geminiKey}`;
-  // Counting trees from an image is pure visual classification, so thinking is
-  // turned OFF (thinkingBudget: 0). gemini-3.6-flash defaults to `medium`
-  // thinking, which only added latency AND sometimes consumed the whole response
-  // so no JSON came back ("the satellite tree count didn't answer"). With thinking
-  // off the model returns clean JSON in ~1.5s (vs ~4-5s) on every attempt.
-  const body = JSON.stringify({ contents: [{ role: 'user', parts }], generationConfig: { temperature: 0, responseMimeType: 'application/json', maxOutputTokens: 8192, thinkingConfig: { thinkingBudget: 0 } } });
+  // High media resolution exposes small crowns and parcel-edge detail. Low
+  // thinking is deliberate here: the systematic visual prompt does the heavy
+  // lifting without recreating the long-running fallback that previously timed out.
+  const body = JSON.stringify({ contents: [{ role: 'user', parts }], generationConfig: { responseMimeType: 'application/json', maxOutputTokens: 8192, mediaResolution: 'MEDIA_RESOLUTION_HIGH', thinkingConfig: { thinkingLevel: 'low' } } });
   // 4 attempts with real backoff. The tree count fires alongside the cost
   // estimate, takeoff, utilities and report generation — all on the same
   // Gemini key — so a free-tier per-minute rate limit (429) is the most common
@@ -8574,8 +8576,12 @@ RULES:
 - Use the report + the facts below; only use Google Search when the question needs CURRENT external facts (rates, prices, codes, market) you don't already have.
 - No preamble, no restating the question, no re-dumping the whole report. Plain markdown only — no code blocks; use × and ÷ for math, never the asterisk.
 - If the user attaches images or documents (site plans, surveys, photos, listings, PDFs), ANALYZE them directly and tie your findings to this parcel and its development.
+- For each visual attachment, inspect the full page/image in two passes: first inventory every visible label, dimension, boundary, structure, symbol, and condition; then zoom attention to small text and cross-check conflicts. State anything unreadable or off-frame instead of guessing.
 PARCEL: ${reportData.inputAddress} · ${parcelCountyLabel} · ${acres} acres · zoning ${reportData.zoningCode}${reportData.ownerName ? ` · owner ${reportData.ownerName}` : ''}.`;
 
+  const hasVisualAttachments = messages.some((m) =>
+    (m.attachments || []).some((att) => (att.kind === 'image' || att.kind === 'pdf') && !!att.data),
+  );
   const contents = messages.map((m) => {
     const parts: any[] = [];
     let textPrefix = '';
@@ -8606,7 +8612,18 @@ PARCEL: ${reportData.inputAddress} · ${parcelCountyLabel} · ${acres} acres · 
     const last = contents[contents.length - 1];
     if (last.role === 'user') last.parts.push({ text: followUpResearch });
   }
-  const body: any = { contents, systemInstruction: { parts: [{ text: system }] }, ...(followUpResearch ? {} : { tools: [{ google_search: {} }] }) };
+  const body: any = {
+    contents,
+    systemInstruction: { parts: [{ text: system }] },
+    ...(hasVisualAttachments ? {
+      generationConfig: {
+        maxOutputTokens: 16384,
+        mediaResolution: 'MEDIA_RESOLUTION_HIGH',
+        thinkingConfig: { thinkingLevel: 'high' },
+      },
+    } : {}),
+    ...(followUpResearch ? {} : { tools: [{ google_search: {} }] }),
+  };
 
   let emitted = false;
   const guarded = onToken ? (c: string) => { emitted = true; onToken(c); } : onToken;
