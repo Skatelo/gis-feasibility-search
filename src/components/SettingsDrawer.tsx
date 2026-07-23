@@ -492,7 +492,7 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
                     className={`comp-pref-pill${compRadiusPref === r ? ' active' : ''}`}
                     onClick={() => setCompRadiusPref(r)}
                   >
-                    {r} miles
+                    {r} {r === 1 ? 'mile' : 'miles'}
                   </button>
                 ))}
               </div>
