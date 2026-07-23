@@ -485,7 +485,7 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
                 <label><Ruler size={14} style={{ verticalAlign: '-2px', marginRight: '5px' }} />Max comp radius</label>
               </div>
               <div className="comp-pref-pills">
-                {[3, 5, 10].map((r) => (
+                {[1, 3, 5, 10].map((r) => (
                   <button
                     key={r}
                     type="button"

@@ -828,7 +828,7 @@ export const FeasibilitySearch: FC = () => {
   const [ownerSkipLoading, setOwnerSkipLoading] = useState(false);
   const [ownerSkipError, setOwnerSkipError] = useState('');
   // Comps display/search filters
-  const [compRadius, setCompRadius] = useState(5);          // max DRIVING-mile radius (3 / 5 / 10) — re-fetches
+  const [compRadius, setCompRadius] = useState(5);          // max DRIVING-mile radius (1 / 3 / 5 / 10) — re-fetches
   const [compTypeFilter, setCompTypeFilter] = useState('all'); // property-type display filter
   const [compsShowAll, setCompsShowAll] = useState(false);  // show the nearest 10 vs. every result
   const [compsRefetching, setCompsRefetching] = useState(false);
@@ -1135,7 +1135,7 @@ export const FeasibilitySearch: FC = () => {
   //  no separate "Generate Cost Estimate" button.)
 
   // Re-run the comps for the current parcel at the chosen max DRIVING-mile
-  // radius (3 / 5 / 10). Every run is fresh, so the comp set always reflects
+  // radius (1 / 3 / 5 / 10). Every run is fresh, so the comp set always reflects
   // the latest submitted search and chosen radius.
   // The report itself stays as generated. Failures surface in the card.
   const changeCompRadius = async (newRadius: number) => {
@@ -4618,7 +4618,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                     <div className="comp-filter-bar">
                       <div className="comp-filter-group">
                         <span className="comp-filter-label">Radius</span>
-                        {[3, 5, 10].map((r) => (
+                        {[1, 3, 5, 10].map((r) => (
                           <button
                             key={r}
                             type="button"
@@ -4664,7 +4664,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                   <div className="comp-filter-bar">
                     <div className="comp-filter-group">
                       <span className="comp-filter-label">Radius</span>
-                      {[3, 5, 10].map((r) => (
+                      {[1, 3, 5, 10].map((r) => (
                         <button
                           key={r}
                           type="button"
