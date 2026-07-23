@@ -67,13 +67,13 @@ export function getUserKeys(): UserKeys {
 
 /** User comp-search preferences (set in Account & API Settings, persisted locally). */
 export interface CompPrefs {
-  /** Max DRIVING-mile radius for the comp search (3 / 5 / 10). */
+  /** Max DRIVING-mile radius for the comp search (1 / 3 / 5 / 10). */
   radiusMiles: number;
   /** Default display filter; accepts every ResidentialCompType plus "all". */
   propertyType: string;
 }
 const COMP_PREFS_KEY = 'gis_comp_prefs';
-const COMP_RADII = [3, 5, 10];
+const COMP_RADII = [1, 3, 5, 10];
 export function getCompPrefs(): CompPrefs {
   try {
     const p = JSON.parse(localStorage.getItem(COMP_PREFS_KEY) || '{}');
@@ -6191,7 +6191,7 @@ export async function fetchGoogleDistanceMatrixComps(
   // NO minimum or maximum square footage.
   const today = new Date(`${dateWindow.asOfDate}T23:59:59`);
   const soldSince = new Date(`${dateWindow.soldSinceDate}T00:00:00`);
-  const EXPANDED_RADIUS_MILES = Math.max(1, maxRadiusMiles); // selectable max driving radius (3 / 5 / 10)
+  const EXPANDED_RADIUS_MILES = Math.max(1, maxRadiusMiles); // selectable max driving radius (1 / 3 / 5 / 10)
   const MIN_DIST_MILES = 0;
 
   // Permitted use category (drives the Realtor search property type).
