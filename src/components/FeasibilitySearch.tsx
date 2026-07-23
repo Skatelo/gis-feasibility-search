@@ -830,6 +830,7 @@ export const FeasibilitySearch: FC = () => {
   // Comps display/search filters
   const [compRadius, setCompRadius] = useState(5);          // max DRIVING-mile radius (3 / 5 / 10) — re-fetches
   const [compTypeFilter, setCompTypeFilter] = useState('all'); // property-type display filter
+  const [compsShowAll, setCompsShowAll] = useState(false);  // show the nearest 10 vs. every result
   const [compsRefetching, setCompsRefetching] = useState(false);
   const [compsError, setCompsError] = useState('');         // radius re-run failure (card shows the reason)
   const [copiedId, setCopiedId] = useState<string | null>(null);
@@ -1140,6 +1141,7 @@ export const FeasibilitySearch: FC = () => {
   const changeCompRadius = async (newRadius: number) => {
     if (compsRefetching) return; // one run at a time
     setCompRadius(newRadius);
+    setCompsShowAll(false);
     setCompsError('');
     const d = data;
     if (!d || !d.coordinates) return;
@@ -3058,6 +3060,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
     setReportPending(false);
     setCompRadius(compPrefs.radiusMiles);
     setCompTypeFilter(compPrefs.propertyType);
+    setCompsShowAll(false);
     setCompsRefetching(false);
     setCompsError('');
     resetChatUiState();
@@ -3220,10 +3223,15 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
     ...compCoverageTypes.map((t) => ({ value: t, label: COMP_TYPE_LABELS_MAP[t] })),
   ];
   const effectiveCompTypeFilter = COMP_TYPE_OPTIONS.some((option) => option.value === compTypeFilter) ? compTypeFilter : 'all';
+  const nearestFirstComps = [...allComps].sort((a, b) => {
+    const distanceA = Number.isFinite(a.distanceMiles) ? a.distanceMiles : Number.POSITIVE_INFINITY;
+    const distanceB = Number.isFinite(b.distanceMiles) ? b.distanceMiles : Number.POSITIVE_INFINITY;
+    return distanceA - distanceB;
+  });
   const filteredComps = effectiveCompTypeFilter === 'all'
-    ? allComps
-    : allComps.filter((comp) => (comp.compType || compTypeBucket(comp.propertyType)) === effectiveCompTypeFilter);
-  const visibleComps = filteredComps;
+    ? nearestFirstComps
+    : nearestFirstComps.filter((comp) => (comp.compType || compTypeBucket(comp.propertyType)) === effectiveCompTypeFilter);
+  const visibleComps = compsShowAll ? filteredComps : filteredComps.slice(0, 10);
   const compCoverageRow = compCoverageTypes.length > 0 ? (
     <div style={{ marginBottom: '0.65rem' }}>
       <div className="comp-filter-label" style={{ marginBottom: '6px' }}>Zoning-matched sold categories</div>
@@ -4675,7 +4683,10 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                       <select
                         className="comp-filter-select"
                         value={effectiveCompTypeFilter}
-                        onChange={(e) => setCompTypeFilter(e.target.value)}
+                        onChange={(e) => {
+                          setCompTypeFilter(e.target.value);
+                          setCompsShowAll(false);
+                        }}
                       >
                         {COMP_TYPE_OPTIONS.map((o) => (
                           <option key={o.value} value={o.value}>{o.label}</option>
@@ -4796,6 +4807,17 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                       ));
                     })()}
                   </div>
+                  {filteredComps.length > 10 && (
+                    <button
+                      type="button"
+                      className="comps-viewall-btn"
+                      onClick={() => setCompsShowAll((showAll) => !showAll)}
+                    >
+                      {compsShowAll
+                        ? 'Show nearest 10 comps'
+                        : `View all ${filteredComps.length} comps (${filteredComps.length - 10} more)`}
+                    </button>
+                  )}
                   </>
                   )}
                 </div>
