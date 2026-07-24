@@ -44,7 +44,19 @@
   --shadow-glow: 0 0 24px rgba(79, 70, 229, 0.08);
   
   --transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-  
+
+  /* Motion system — one set of curves/durations so every surface enters the
+     same way. `--ease-out-soft` decelerates gently (no bounce, no snap), which
+     is what makes content settle instead of "pop". */
+  --ease-out-soft: cubic-bezier(0.22, 0.61, 0.36, 1);
+  --ease-out-glide: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-in-out-soft: cubic-bezier(0.45, 0, 0.25, 1);
+  --dur-xs: 140ms;
+  --dur-sm: 220ms;
+  --dur-md: 380ms;
+  --dur-lg: 520ms;
+  --stagger: 45ms;
+
   background-color: var(--bg-main);
   color: var(--text-primary);
   font-family: var(--font-sans);
@@ -214,12 +226,18 @@ code {
   box-shadow: var(--shadow-sm);
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
-  transition: var(--transition);
+  /* Scoped (not `all`) so hover never transitions layout properties — that's the
+     usual source of a "jumpy" card. */
+  transition:
+    transform var(--dur-sm) var(--ease-out-soft),
+    box-shadow var(--dur-sm) var(--ease-out-soft),
+    border-color var(--dur-sm) var(--ease-out-soft);
 }
 
 .card:hover {
   border-color: var(--bg-card-border-hover);
   box-shadow: var(--shadow-glow);
+  transform: translate3d(0, -2px, 0);
 }
 
 .card-subtitle {
@@ -593,19 +611,74 @@ code {
 }
 
 .fade-in {
-  animation: fadeIn 0.5s ease-out forwards;
+  animation: fadeIn var(--dur-lg) var(--ease-out-glide) both;
 }
 
 @keyframes fadeIn {
   from {
     opacity: 0;
-    transform: translateY(10px);
+    transform: translate3d(0, 12px, 0);
   }
   to {
     opacity: 1;
-    transform: translateY(0);
+    transform: translate3d(0, 0, 0);
   }
 }
+
+/* ---------------------------------------------------------------------------
+   Smooth entrance for result surfaces.
+   Cards stream in progressively (parcel → zoning → topography → comps), so each
+   one animates as it mounts. Only opacity/transform are animated (compositor-
+   only properties) so the motion stays at 60fps even with backdrop-blur cards.
+   --------------------------------------------------------------------------- */
+@keyframes surfaceIn {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 14px, 0) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+}
+
+.results-dashboard .card,
+.sidebar-scroll-wrapper .card,
+.results-dashboard .registry-card {
+  animation: surfaceIn var(--dur-md) var(--ease-out-soft) both;
+  /* Hint the compositor for the entrance, then release it. */
+  will-change: opacity, transform;
+}
+
+/* Gentle stagger so a column of cards cascades instead of snapping in at once. */
+.results-dashboard .card:nth-child(1),
+.sidebar-scroll-wrapper .card:nth-child(1) { animation-delay: 0ms; }
+.results-dashboard .card:nth-child(2),
+.sidebar-scroll-wrapper .card:nth-child(2) { animation-delay: calc(var(--stagger) * 1); }
+.results-dashboard .card:nth-child(3),
+.sidebar-scroll-wrapper .card:nth-child(3) { animation-delay: calc(var(--stagger) * 2); }
+.results-dashboard .card:nth-child(4),
+.sidebar-scroll-wrapper .card:nth-child(4) { animation-delay: calc(var(--stagger) * 3); }
+.results-dashboard .card:nth-child(5),
+.sidebar-scroll-wrapper .card:nth-child(5) { animation-delay: calc(var(--stagger) * 4); }
+.results-dashboard .card:nth-child(6),
+.sidebar-scroll-wrapper .card:nth-child(6) { animation-delay: calc(var(--stagger) * 5); }
+.results-dashboard .card:nth-child(n + 7),
+.sidebar-scroll-wrapper .card:nth-child(n + 7) { animation-delay: calc(var(--stagger) * 6); }
+
+/* Rows inside a card settle a beat after the card itself. */
+@keyframes rowIn {
+  from { opacity: 0; transform: translate3d(0, 6px, 0); }
+  to { opacity: 1; transform: translate3d(0, 0, 0); }
+}
+.registry-card .registry-row {
+  animation: rowIn var(--dur-sm) var(--ease-out-soft) both;
+}
+.registry-card .registry-row:nth-child(1) { animation-delay: 60ms; }
+.registry-card .registry-row:nth-child(2) { animation-delay: 90ms; }
+.registry-card .registry-row:nth-child(3) { animation-delay: 120ms; }
+.registry-card .registry-row:nth-child(4) { animation-delay: 150ms; }
+.registry-card .registry-row:nth-child(n + 5) { animation-delay: 180ms; }
 
 /* Address Card styles */
 .address-result-card {
@@ -2276,12 +2349,12 @@ code {
 
 /* Animations */
 .animate-slide-down {
-  animation: slideDown 0.25s ease-out forwards;
+  animation: slideDown var(--dur-sm) var(--ease-out-glide) both;
 }
 
 @keyframes slideDown {
-  from { opacity: 0; transform: translateY(-10px); }
-  to { opacity: 1; transform: translateY(0); }
+  from { opacity: 0; transform: translate3d(0, -8px, 0) scale(0.99); }
+  to { opacity: 1; transform: translate3d(0, 0, 0) scale(1); }
 }
 
 /* Google Mock Modal */
@@ -2518,12 +2591,12 @@ code {
 }
 
 .animate-slide-left {
-  animation: slideLeft 0.3s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+  animation: slideLeft var(--dur-md) var(--ease-out-glide) both;
 }
 
 @keyframes slideLeft {
-  from { transform: translateX(100%); }
-  to { transform: translateX(0); }
+  from { transform: translate3d(100%, 0, 0); }
+  to { transform: translate3d(0, 0, 0); }
 }
 
 .drawer-header {
@@ -2968,12 +3041,13 @@ code {
 
 .chat-fab-panel.open {
   display: flex;
-  animation: chatPanelIn 0.22s ease;
+  animation: chatPanelIn var(--dur-md) var(--ease-out-glide) both;
+  transform-origin: bottom right;
 }
 
 @keyframes chatPanelIn {
-  from { opacity: 0; transform: translateY(14px) scale(0.98); }
-  to { opacity: 1; transform: translateY(0) scale(1); }
+  from { opacity: 0; transform: translate3d(0, 14px, 0) scale(0.96); }
+  to { opacity: 1; transform: translate3d(0, 0, 0) scale(1); }
 }
 
 /* Make the embedded chat card fill the panel. The !important height/max-height
@@ -3489,7 +3563,13 @@ img, svg, video, canvas, table, pre { max-width: 100%; }
    progress. Windows reports reduced-motion whenever "Show animations" is off (and
    on some battery-saver settings), which previously froze every loader on desktop. */
 @media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after { animation-duration: 0.001ms !important; transition-duration: 0.001ms !important; }
+  /* Delay is zeroed too: staggered entrances use fill-mode `both`, so a surviving
+     delay would leave content invisible while it waited its turn. */
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-delay: 0ms !important;
+    transition-duration: 0.001ms !important;
+  }
 
   /* Keep progress/activity indicators moving. Durations are re-declared
      EXPLICITLY (not `revert`, which would fall back to the browser default of 0s
