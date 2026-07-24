@@ -7636,6 +7636,21 @@ function clampRate(value: number, bounds: { min: number; max: number }): number 
   return Math.min(Math.max(value, bounds.min), bounds.max);
 }
 
+/** Vision canopy % is `number | null` (the model may omit it). Normalize to a
+ *  plain number so cost math never sees null/NaN. */
+function canopyPctValue(canopyPct: number | null | undefined): number {
+  return typeof canopyPct === 'number' && Number.isFinite(canopyPct) ? canopyPct : 0;
+}
+
+/** Share of the parcel that is actually wooded (and therefore priced for
+ *  clearing). Floored at 15% so a lightly-treed lot still carries real area, and
+ *  defaults to 50% when canopy could not be read. Shared by the cost math and the
+ *  explanatory factor text so the two can never disagree. */
+function woodedShareOf(canopyPct: number | null | undefined): number {
+  const canopy = canopyPctValue(canopyPct);
+  return Math.min(1, Math.max(canopy > 0 ? canopy / 100 : 0.5, 0.15));
+}
+
 /** Build the two bulk-clearing method options (forestry mulching vs. traditional
  *  excavator) with cost RANGES sized to THIS site: the per-acre rate is picked
  *  from the sourced low-high band by observed density/tree size, and applied to
@@ -7646,12 +7661,13 @@ function buildClearingMethods(
   treeCount: number,
   largeCount: number,
   r: TreeRates,
-  canopyPct = 0,
-  density: string = '',
+  canopyPct: number | null | undefined = 0,
+  density: string | null | undefined = '',
 ): ClearingMethod[] {
-  // Nothing to clear — no trees and no meaningful canopy. An open//cleared lot must
+  const canopy = canopyPctValue(canopyPct);
+  // Nothing to clear — no trees and no meaningful canopy. An open/cleared lot must
   // NOT be billed an acreage-based clearing cost just because it has acreage.
-  if (treeCount <= 0 && (!Number.isFinite(canopyPct) || canopyPct < 3)) return [];
+  if (treeCount <= 0 && canopy < 3) return [];
 
   const mulchLoRate = clampRate(r.mulchPerAcreLow, CLEARING_RATE_BOUNDS.mulchPerAcre);
   const mulchHiRate = clampRate(r.mulchPerAcreHigh, CLEARING_RATE_BOUNDS.mulchPerAcre);
@@ -7670,8 +7686,7 @@ function buildClearingMethods(
 
   // Clearing is priced on the WOODED portion, not raw parcel acreage. Floor at 15%
   // so a lightly-treed lot still carries mobilization-worthy area.
-  const woodedShare = Math.min(1, Math.max(canopyPct > 0 ? canopyPct / 100 : 0.5, 0.15));
-  const effAcres = Math.max(acres * woodedShare, 0.1);
+  const effAcres = Math.max(acres * woodedShareOf(canopy), 0.1);
 
   // A real bid varies by roughly -20%/+25% around the site-specific midpoint — an
   // actionable spread, not the full national min-to-max. The spread is applied to
@@ -7789,7 +7804,8 @@ export async function fetchLandClearingEstimate(reportData: SiteFeasibilityData)
   const clearingMethods = buildClearingMethods(acres, treeCount, vision.large, r, vision.canopyPct, vision.density);
   const haulLow = r.haulOffLow;
   const haulHigh = r.haulOffHigh;
-  const nothingToClear = treeCount <= 0 && (!Number.isFinite(vision.canopyPct) || vision.canopyPct < 3);
+  const visionCanopyPct = canopyPctValue(vision.canopyPct);
+  const nothingToClear = treeCount <= 0 && visionCanopyPct < 3;
   const clearingFactors = nothingToClear
     ? [
         'No trees or meaningful canopy were detected on the parcel imagery, so no tree removal or bulk clearing is budgeted. Only grading/grubbing of grass and brush would apply.',
@@ -7805,7 +7821,7 @@ export async function fetchLandClearingEstimate(reportData: SiteFeasibilityData)
         haulHigh > 0
           ? `Haul-off: leaving mulch on site is cheapest; the sourced debris allowance is $${haulLow.toLocaleString()}-$${haulHigh.toLocaleString()}.`
           : 'Haul-off: no current sourced debris-hauling allowance was found.',
-        `Priced on the ~${(Math.round(acres * Math.min(1, Math.max(vision.canopyPct > 0 ? vision.canopyPct / 100 : 0.5, 0.15)) * 100) / 100).toLocaleString()} wooded acres (of ${(Math.round(acres * 100) / 100).toLocaleString()} total) at ${vision.density || 'observed'} density — not the whole parcel.`,
+        `Priced on the ~${(Math.round(acres * woodedShareOf(visionCanopyPct) * 100) / 100).toLocaleString()} wooded acres (of ${(Math.round(acres * 100) / 100).toLocaleString()} total) at ${vision.density || 'observed'} density — not the whole parcel.`,
       ];
   const imagerySources = [
     `https://www.google.com/maps/@${lat},${lng},19z/data=!3m1!1e3`,
