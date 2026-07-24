@@ -1654,31 +1654,57 @@ function parcelIdVariants(pin: string): { escaped: string[]; strippedEscaped: st
  * Dash/space tolerant: matches the PIN as entered, a punctuation-stripped form,
  * and (best effort) a separator-stripped comparison of the stored value.
  */
-async function lookupNcParcelById(pin: string, googleKey: string): Promise<{ address: string; county: string; lat?: number; lng?: number } | null> {
+/** Normalize a parcel identifier for exact comparison (case + separators). */
+function normalizeParcelKey(v: unknown): string {
+  return String(v ?? '').toUpperCase().replace(/[\s-]+/g, '');
+}
+
+/** Exact-match strength of a candidate against the entered id (0 = no match).
+ *  An as-typed match on the primary id (4) beats an as-typed secondary match (3),
+ *  beats a separator-stripped primary match (2), beats a stripped secondary (1). */
+function parcelMatchRank(primary: unknown, secondary: unknown, inputUpper: string, inputKey: string): number {
+  const p = String(primary ?? '').toUpperCase();
+  const s = String(secondary ?? '').toUpperCase();
+  if (p && p === inputUpper) return 4;
+  if (s && s === inputUpper) return 3;
+  if (p && normalizeParcelKey(p) === inputKey) return 2;
+  if (s && normalizeParcelKey(s) === inputKey) return 1;
+  return 0;
+}
+
+async function lookupNcParcelById(pin: string, googleKey: string): Promise<{ address: string; county: string; lat?: number; lng?: number; quality: number } | null> {
   const { escaped, strippedEscaped } = parcelIdVariants(pin);
-  if (!escaped.length) return null;
+  const inputUpper = pin.trim().toUpperCase();
+  const inputKey = normalizeParcelKey(pin);
+  if (!escaped.length || inputKey.length < 3) return null;
   const inList = escaped.map((v) => `'${v}'`).join(', ');
-  // Match EITHER the PIN (parno) OR the alternate county Parcel ID (altparno), so
-  // a lookup works with whichever number the user has.
-  const wheres = [`UPPER(parno) IN (${inList}) OR UPPER(altparno) IN (${inList})`];
-  // Fallback for counties that STORE the number with dashes while the user typed
-  // it without: strip separators from the stored value too. Runs only if the exact
-  // variants missed; services that don't support REPLACE simply return nothing.
+  // Query in PRECISION order: exact PIN first (parno is unique), then the county
+  // Parcel ID (altparno), then dash-normalized fallbacks. Whatever hits first is
+  // the strongest match — and we still verify the returned row's id EXACTLY equals
+  // the entered value, so a broad match never yields a fuzzy/arbitrary parcel.
+  const wheres = [
+    `UPPER(parno) IN (${inList})`,
+    `UPPER(altparno) IN (${inList})`,
+  ];
   if (strippedEscaped) {
     wheres.push(`REPLACE(REPLACE(UPPER(parno), '-', ''), ' ', '') = '${strippedEscaped}'`);
     wheres.push(`REPLACE(REPLACE(UPPER(altparno), '-', ''), ' ', '') = '${strippedEscaped}'`);
   }
 
   let feat: any = null;
+  let quality = 0;
   for (const where of wheres) {
     const url = `${NC_PARCEL_ENGINE}?where=${encodeURIComponent(where)}` +
-      `&outFields=${encodeURIComponent('parno,siteadd,scity,cntyname')}&returnGeometry=true&outSR=4326&resultRecordCount=1&f=json`;
+      `&outFields=${encodeURIComponent('parno,altparno,siteadd,scity,cntyname')}&returnGeometry=true&outSR=4326&resultRecordCount=25&f=json`;
     try {
       const res = await fetchWithTimeout(url, 15000, { cache: 'no-store' });
       if (!res.ok) continue;
-      const data = await res.json();
-      const f = data?.features?.[0];
-      if (f) { feat = f; break; }
+      const feats = (await res.json())?.features || [];
+      for (const f of feats) {
+        const r = parcelMatchRank(f?.attributes?.parno, f?.attributes?.altparno, inputUpper, inputKey);
+        if (r > quality) { quality = r; feat = f; }
+      }
+      if (feat) break; // earlier WHERE = stronger match; stop at the first that hits
     } catch { /* try the next WHERE variant */ }
   }
   if (!feat) return null;
@@ -1688,9 +1714,7 @@ async function lookupNcParcelById(pin: string, googleKey: string): Promise<{ add
   const situs = String(a.siteadd || '').trim();
   const scity = String(a.scity || '').trim();
 
-  // The parcel's polygon centroid — the RELIABLE anchor. We return it so the
-  // caller can drive the analysis off the exact parcel point instead of
-  // re-geocoding an abbreviated county situs address (which often misses).
+  // The parcel's polygon centroid — the RELIABLE anchor for the analysis.
   let lat: number | undefined, lng: number | undefined;
   const ring: number[][] | undefined = feat.geometry?.rings?.[0];
   if (ring?.length) {
@@ -1698,7 +1722,7 @@ async function lookupNcParcelById(pin: string, googleKey: string): Promise<{ add
     if (c) { lng = c[0]; lat = c[1]; }
   }
 
-  if (situs) return { address: `${situs}${scity ? `, ${scity}` : ''}, NC`, county, lat, lng };
+  if (situs) return { address: `${situs}${scity ? `, ${scity}` : ''}, NC`, county, lat, lng, quality };
 
   // Vacant parcel with no situs address — reverse-geocode the polygon centroid.
   if (typeof lat === 'number' && typeof lng === 'number' && googleKey) {
@@ -1708,32 +1732,40 @@ async function lookupNcParcelById(pin: string, googleKey: string): Promise<{ add
         const gj = await gr.json();
         const best = gj.results?.find((r: any) => r.types?.some((t: string) => ['street_address', 'premise'].includes(t))) || gj.results?.[0];
         const addr = (best?.formatted_address || '').replace(/,?\s*USA$/i, '').trim();
-        if (addr) return { address: addr, county, lat, lng };
+        if (addr) return { address: addr, county, lat, lng, quality };
       }
     } catch { /* fall through */ }
   }
-  return county ? { address: `${county} County parcel ${a.parno}`, county, lat, lng } : null;
+  return county ? { address: `${county} County parcel ${a.parno}`, county, lat, lng, quality } : null;
 }
 
 /** SC parcel-ID lookup: the statewide SC layer is keyed by T_Map_Number (not the
  *  NC `parno`) and carries no situs address, so we reverse-geocode the parcel
  *  centroid for a display address and map the UPPERCASE county to the config key. */
-async function lookupScParcelById(pin: string, googleKey: string): Promise<{ address: string; county: string; lat?: number; lng?: number } | null> {
+async function lookupScParcelById(pin: string, googleKey: string): Promise<{ address: string; county: string; lat?: number; lng?: number; quality: number } | null> {
   const { escaped, strippedEscaped } = parcelIdVariants(pin);
-  if (!escaped.length) return null;
-  const wheres = [`UPPER(T_Map_Number) IN (${escaped.map((v) => `'${v}'`).join(', ')})`];
+  const inputUpper = pin.trim().toUpperCase();
+  const inputKey = normalizeParcelKey(pin);
+  if (!escaped.length || inputKey.length < 3) return null;
+  const inList = escaped.map((v) => `'${v}'`).join(', ');
+  const wheres = [`UPPER(T_Map_Number) IN (${inList})`];
   // Fallback for SC map numbers stored WITH dashes when the user typed none.
   if (strippedEscaped) wheres.push(`REPLACE(REPLACE(UPPER(T_Map_Number), '-', ''), ' ', '') = '${strippedEscaped}'`);
 
   let feat: any = null;
+  let quality = 0;
   for (const where of wheres) {
     const url = `${SC_STATEWIDE_PARCEL_LAYER}/query?where=${encodeURIComponent(where)}` +
-      `&outFields=${encodeURIComponent('T_Map_Number,County')}&returnGeometry=true&outSR=4326&resultRecordCount=1&f=json`;
+      `&outFields=${encodeURIComponent('T_Map_Number,County')}&returnGeometry=true&outSR=4326&resultRecordCount=25&f=json`;
     try {
       const res = await fetchWithTimeout(url, 15000, { cache: 'no-store' });
       if (!res.ok) continue;
-      const f = (await res.json())?.features?.[0];
-      if (f) { feat = f; break; }
+      const feats = (await res.json())?.features || [];
+      for (const f of feats) {
+        const r = parcelMatchRank(f?.attributes?.T_Map_Number, '', inputUpper, inputKey);
+        if (r > quality) { quality = r; feat = f; }
+      }
+      if (feat) break;
     } catch { /* try the next WHERE variant */ }
   }
   if (!feat) return null;
@@ -1751,21 +1783,27 @@ async function lookupScParcelById(pin: string, googleKey: string): Promise<{ add
         const gj = await gr.json();
         const best = gj.results?.find((r: any) => r.types?.some((t: string) => ['street_address', 'premise'].includes(t))) || gj.results?.[0];
         const addr = (best?.formatted_address || '').replace(/,?\s*USA$/i, '').trim();
-        if (addr) return { address: addr, county, lat, lng };
+        if (addr) return { address: addr, county, lat, lng, quality };
       }
     } catch { /* fall through */ }
   }
-  return county ? { address: `${proper} County, SC parcel ${pin.trim()}`, county, lat, lng } : null;
+  return county ? { address: `${proper} County, SC parcel ${pin.trim()}`, county, lat, lng, quality } : null;
 }
 
 /** Parcel-ID lookup across BOTH states. NC (parno) and SC (T_Map_Number) live on
- *  different services, so query both in parallel and return whichever resolves. */
+ *  different services, so query both in parallel and return the STRONGEST exact
+ *  match — an as-typed hit wins over a separator-stripped one, so a coincidental
+ *  stripped NC match can never override an exact SC TMS match (or vice versa). */
 export async function lookupParcelById(pin: string, googleKey: string): Promise<{ address: string; county: string; lat?: number; lng?: number } | null> {
   const [nc, sc] = await Promise.all([
     lookupNcParcelById(pin, googleKey).catch(() => null),
     lookupScParcelById(pin, googleKey).catch(() => null),
   ]);
-  return nc || sc;
+  const hits = [nc, sc].filter((h): h is NonNullable<typeof h> => !!h);
+  if (!hits.length) return null;
+  hits.sort((a, b) => b.quality - a.quality);
+  const best = hits[0];
+  return { address: best.address, county: best.county, lat: best.lat, lng: best.lng };
 }
 
 /**
