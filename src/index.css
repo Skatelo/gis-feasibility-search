@@ -3483,9 +3483,25 @@ img, svg, video, canvas, table, pre { max-width: 100%; }
   .main-content { padding: 1.25rem; }
 }
 
-/* Honor users who ask for less motion: stop the news marquee + transitions. */
+/* Honor users who ask for less motion: stop DECORATIVE motion (marquee, pulses,
+   slide-ins) and shorten transitions. Loading indicators are deliberately EXEMPT —
+   a frozen spinner reads as a hung app and removes the only signal that work is in
+   progress. Windows reports reduced-motion whenever "Show animations" is off (and
+   on some battery-saver settings), which previously froze every loader on desktop. */
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 0.001ms !important; transition-duration: 0.001ms !important; }
+
+  /* Keep progress/activity indicators moving. Durations are re-declared
+     EXPLICITLY (not `revert`, which would fall back to the browser default of 0s
+     and leave the loader frozen). */
+  .spinner { animation-duration: 1s !important; }
+  .google-spinner,
+  .session-loading-viewport .spinner,
+  [class*="spinner"] { animation-duration: 0.8s !important; }
+  .radar-circle { animation-duration: 3s !important; }
+  .placeholder-pin { animation-duration: 2s !important; }
+  .wave-bar { animation-duration: 1.2s !important; }
+  .chat-fab.pulse { animation-duration: 1.2s !important; }
 }
 
 /* GIS Feasibility Search — Address / Parcel-ID mode toggle */

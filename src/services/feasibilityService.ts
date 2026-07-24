@@ -7620,17 +7620,81 @@ Prefer current county/ZIP sources. If those pages do not publish prices, use cur
   } catch { return null; }
 }
 
+/** Plausibility bounds for researched clearing rates. Grounded search often
+ *  returns NATIONAL extremes (e.g. $10k-$30k/acre for specialty work), which made
+ *  a 2-acre lot quote a uselessly wide 10x range. Clamping keeps a sourced rate
+ *  honest without discarding it. Ranges reflect typical Carolinas site work. */
+const CLEARING_RATE_BOUNDS = {
+  mulchPerAcre: { min: 400, max: 3_500 },
+  clearingPerAcre: { min: 1_500, max: 12_000 },
+  mulchDayRate: { min: 800, max: 4_000 },
+  clearingDayRate: { min: 1_200, max: 6_500 },
+} as const;
+
+function clampRate(value: number, bounds: { min: number; max: number }): number {
+  if (!Number.isFinite(value) || value <= 0) return 0;
+  return Math.min(Math.max(value, bounds.min), bounds.max);
+}
+
 /** Build the two bulk-clearing method options (forestry mulching vs. traditional
- *  excavator) with cost RANGES, applying day-rate minimums on small lots. */
-function buildClearingMethods(acres: number, treeCount: number, largeCount: number, r: TreeRates): ClearingMethod[] {
-  // Apply the researched rate ranges directly and honor one-day minimums. The
-  // high end includes the sourced haul-off allowance for traditional clearing.
-  const mulchLow = Math.round(Math.max(acres * r.mulchPerAcreLow, r.mulchDayRateLow));
-  const mulchHigh = Math.round(Math.max(acres * r.mulchPerAcreHigh, r.mulchDayRateHigh));
-  const clearLow = Math.round(Math.max(acres * r.clearingPerAcreLow, r.clearingDayRateLow));
-  const clearHigh = Math.round(Math.max(acres * r.clearingPerAcreHigh, r.clearingDayRateHigh) + r.haulOffHigh);
+ *  excavator) with cost RANGES sized to THIS site: the per-acre rate is picked
+ *  from the sourced low-high band by observed density/tree size, and applied to
+ *  the actually-WOODED acreage rather than the whole parcel. Returns [] when
+ *  there is nothing to clear. */
+function buildClearingMethods(
+  acres: number,
+  treeCount: number,
+  largeCount: number,
+  r: TreeRates,
+  canopyPct = 0,
+  density: string = '',
+): ClearingMethod[] {
+  // Nothing to clear — no trees and no meaningful canopy. An open//cleared lot must
+  // NOT be billed an acreage-based clearing cost just because it has acreage.
+  if (treeCount <= 0 && (!Number.isFinite(canopyPct) || canopyPct < 3)) return [];
+
+  const mulchLoRate = clampRate(r.mulchPerAcreLow, CLEARING_RATE_BOUNDS.mulchPerAcre);
+  const mulchHiRate = clampRate(r.mulchPerAcreHigh, CLEARING_RATE_BOUNDS.mulchPerAcre);
+  const clearLoRate = clampRate(r.clearingPerAcreLow, CLEARING_RATE_BOUNDS.clearingPerAcre);
+  const clearHiRate = clampRate(r.clearingPerAcreHigh, CLEARING_RATE_BOUNDS.clearingPerAcre);
+  if (!mulchHiRate && !clearHiRate) return [];
 
   const heavyHardwoods = largeCount >= Math.max(5, treeCount * 0.3);
+
+  // Where THIS site sits inside the sourced rate band. Light brush prices near the
+  // bottom; dense heavy timber near the top — instead of quoting the whole band.
+  const d = String(density || '').toLowerCase();
+  let t = d === 'heavy' ? 0.75 : d === 'medium' ? 0.5 : d === 'light' ? 0.25 : 0.5;
+  if (heavyHardwoods) t = Math.min(0.85, t + 0.1);
+  const pick = (lo: number, hi: number) => (lo > 0 && hi > 0 ? lo + (hi - lo) * t : lo || hi);
+
+  // Clearing is priced on the WOODED portion, not raw parcel acreage. Floor at 15%
+  // so a lightly-treed lot still carries mobilization-worthy area.
+  const woodedShare = Math.min(1, Math.max(canopyPct > 0 ? canopyPct / 100 : 0.5, 0.15));
+  const effAcres = Math.max(acres * woodedShare, 0.1);
+
+  // A real bid varies by roughly -20%/+25% around the site-specific midpoint — an
+  // actionable spread, not the full national min-to-max. The spread is applied to
+  // the PER-ACRE rate and re-clamped, so the top of the range can never imply an
+  // implausible per-acre cost.
+  const band = (midRate: number, bounds: { min: number; max: number }) => ({
+    low: effAcres * clampRate(midRate * 0.8, bounds),
+    high: effAcres * clampRate(midRate * 1.25, bounds),
+  });
+
+  const mulchBand = band(pick(mulchLoRate, mulchHiRate), CLEARING_RATE_BOUNDS.mulchPerAcre);
+  const clearBand = band(pick(clearLoRate, clearHiRate), CLEARING_RATE_BOUNDS.clearingPerAcre);
+
+  const mulchDayLow = clampRate(r.mulchDayRateLow, CLEARING_RATE_BOUNDS.mulchDayRate);
+  const mulchDayHigh = clampRate(r.mulchDayRateHigh, CLEARING_RATE_BOUNDS.mulchDayRate);
+  const clearDayLow = clampRate(r.clearingDayRateLow, CLEARING_RATE_BOUNDS.clearingDayRate);
+  const clearDayHigh = clampRate(r.clearingDayRateHigh, CLEARING_RATE_BOUNDS.clearingDayRate);
+
+  // Honor a one-day crew minimum (a half-acre job still costs a full mobilization).
+  const mulchLow = Math.round(Math.max(mulchBand.low, mulchDayLow));
+  const mulchHigh = Math.round(Math.max(mulchBand.high, mulchLow, mulchDayHigh));
+  const clearLow = Math.round(Math.max(clearBand.low, clearDayLow));
+  const clearHigh = Math.round(Math.max(clearBand.high, clearLow, clearDayHigh) + (r.haulOffHigh > 0 ? r.haulOffHigh : 0));
   return [
     {
       method: 'Forestry Mulching',
@@ -7722,20 +7786,27 @@ export async function fetchLandClearingEstimate(reportData: SiteFeasibilityData)
 
   // Bulk machine-clearing METHODS (forestry mulching vs. traditional excavator),
   // each with a real-time cost range; plus the key cost-driving factors.
-  const clearingMethods = buildClearingMethods(acres, treeCount, vision.large, r);
+  const clearingMethods = buildClearingMethods(acres, treeCount, vision.large, r, vision.canopyPct, vision.density);
   const haulLow = r.haulOffLow;
   const haulHigh = r.haulOffHigh;
-  const clearingFactors = [
-    vision.large >= Math.max(5, treeCount * 0.3)
-      ? `Tree diameter: ~${vision.large} large/mature trees (>12 in) — too big for a mulcher, so an excavator + chainsaw crew is needed, pushing cost toward the high end.`
-      : `Tree diameter: mostly small/medium trees — a forestry mulcher can clear these quickly (often a 1-day job).`,
-    r.stumpGrindHigh > 0
-      ? `Stump management: mulching leaves root balls in the ground. The sourced range is $${r.stumpGrindLow.toLocaleString()}-$${r.stumpGrindHigh.toLocaleString()} per stump; ${treeCount.toLocaleString()} stumps budget at $${stumpGrindCostLow.toLocaleString()}-$${stumpGrindCostHigh.toLocaleString()}.`
-      : 'Stump management: mulching leaves root balls in place; no current sourced stump-grinding range was found.',
-    haulHigh > 0
-      ? `Haul-off: leaving mulch on site is cheapest; the sourced debris allowance is $${haulLow.toLocaleString()}-$${haulHigh.toLocaleString()}.`
-      : 'Haul-off: no current sourced debris-hauling allowance was found.',
-  ];
+  const nothingToClear = treeCount <= 0 && (!Number.isFinite(vision.canopyPct) || vision.canopyPct < 3);
+  const clearingFactors = nothingToClear
+    ? [
+        'No trees or meaningful canopy were detected on the parcel imagery, so no tree removal or bulk clearing is budgeted. Only grading/grubbing of grass and brush would apply.',
+        'Verify against current site conditions — satellite imagery can lag recent clearing or new growth.',
+      ]
+    : [
+        vision.large >= Math.max(5, treeCount * 0.3)
+          ? `Tree diameter: ~${vision.large} large/mature trees (>12 in) — too big for a mulcher, so an excavator + chainsaw crew is needed, pushing cost toward the high end.`
+          : `Tree diameter: mostly small/medium trees — a forestry mulcher can clear these quickly (often a 1-day job).`,
+        r.stumpGrindHigh > 0
+          ? `Stump management: mulching leaves root balls in the ground. The sourced range is $${r.stumpGrindLow.toLocaleString()}-$${r.stumpGrindHigh.toLocaleString()} per stump; ${treeCount.toLocaleString()} stumps budget at $${stumpGrindCostLow.toLocaleString()}-$${stumpGrindCostHigh.toLocaleString()}.`
+          : 'Stump management: mulching leaves root balls in place; no current sourced stump-grinding range was found.',
+        haulHigh > 0
+          ? `Haul-off: leaving mulch on site is cheapest; the sourced debris allowance is $${haulLow.toLocaleString()}-$${haulHigh.toLocaleString()}.`
+          : 'Haul-off: no current sourced debris-hauling allowance was found.',
+        `Priced on the ~${(Math.round(acres * Math.min(1, Math.max(vision.canopyPct > 0 ? vision.canopyPct / 100 : 0.5, 0.15)) * 100) / 100).toLocaleString()} wooded acres (of ${(Math.round(acres * 100) / 100).toLocaleString()} total) at ${vision.density || 'observed'} density — not the whole parcel.`,
+      ];
   const imagerySources = [
     `https://www.google.com/maps/@${lat},${lng},19z/data=!3m1!1e3`,
     ...(streetViewUrl ? [`https://www.google.com/maps?layer=c&cbll=${lat},${lng}`] : []),
