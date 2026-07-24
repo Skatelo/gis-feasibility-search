@@ -14,6 +14,7 @@
     "test:transactions": "node --test netlify/functions/lib/realestateapi-property.test.js",
     "test:vision": "node --test netlify/functions/lib/gemini-vision-config.test.js",
     "test:comps": "node scripts/test-comps.mjs",
+    "test:parcel-id": "node scripts/test-parcel-identity.mjs",
     "typecheck:zoning-engine": "tsc -p tsconfig.zoning.json",
     "typecheck:zoning-server": "tsc -p tsconfig.zoning-server.json",
     "test:zoning-engine": "node scripts/test-zoning-engine.mjs",

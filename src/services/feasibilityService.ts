@@ -24,6 +24,15 @@ import {
   type ClassifiedCompType,
   type CompSearchFamily,
 } from './comps/comp-types';
+import {
+  ParcelIdentityAmbiguityError,
+  chooseUniqueTopParcelCandidate,
+  normalizeParcelIdentity,
+  parseParcelLookupInput,
+  parcelIdentitiesMatch,
+  selectExactParcelFeature,
+  type RankedParcelCandidate,
+} from './parcels/parcel-identity';
 
 export interface UserKeys {
   googleMaps?: string;
@@ -48,6 +57,23 @@ export interface UserKeys {
    *  individuals & businesses from the GIS owner data. */
   enformionApName?: string;
   enformionApPassword?: string;
+}
+
+export interface ParcelIdLookupResult {
+  address: string;
+  county: string;
+  state: SupportedState;
+  enteredParcelId: string;
+  parcelId: string;
+  alternateParcelId?: string;
+  ownerName?: string;
+  lat?: number;
+  lng?: number;
+  feature: {
+    type: 'Feature';
+    properties: Record<string, any>;
+    geometry: { type: 'Polygon'; coordinates: number[][][] } | null;
+  };
 }
 
 export function getUserKeys(): UserKeys {
@@ -1308,14 +1334,54 @@ export function normalizeCountyParcelAttrs(a: Record<string, any>): Record<strin
   }
 }
 
-async function queryScStatewideParcelAttributes(lng: number, lat: number, where: string): Promise<Record<string, any> | null> {
+function parcelIdsFromAttributes(attributes: Record<string, any>): unknown[] {
+  const normalized = normalizeCountyParcelAttrs(attributes);
+  return [normalized.parno, normalized.pin, normalized.altparno]
+    .filter((value) => value != null && String(value).trim() && String(value).trim().toUpperCase() !== 'N/A');
+}
+
+function parcelIdsFromFeature(feature: any): unknown[] {
+  return parcelIdsFromAttributes(feature?.properties || feature?.attributes || {});
+}
+
+function selectExpectedParcelFeature<T>(
+  features: readonly T[],
+  expectedParcelIds: readonly string[],
+  state: SupportedState,
+  idsForFeature: (feature: T) => readonly unknown[] = parcelIdsFromFeature,
+): T | null {
+  return selectExactParcelFeature(
+    features,
+    expectedParcelIds,
+    idsForFeature,
+    state === 'SC',
+  );
+}
+
+function parcelIdMatchesExpected(
+  parcelId: unknown,
+  expectedParcelIds: readonly string[],
+  state: SupportedState,
+): boolean {
+  if (!expectedParcelIds.length) return true;
+  return expectedParcelIds.some((expected) =>
+    parcelIdentitiesMatch(parcelId, expected, state === 'SC'),
+  );
+}
+
+async function queryScStatewideParcelAttributes(
+  lng: number,
+  lat: number,
+  where: string,
+  expectedParcelIds: readonly string[] = [],
+): Promise<Record<string, any> | null> {
   const endpoint = `${SC_STATEWIDE_PARCEL_LAYER}/query`;
   const buildUrl = (geometry: string, geometryType: "esriGeometryPoint" | "esriGeometryEnvelope") =>
     `${endpoint}?geometry=${geometry}` +
     `&geometryType=${geometryType}&inSR=4326&spatialRel=esriSpatialRelIntersects` +
     `&where=${encodeURIComponent(where)}` +
     `&outFields=${encodeURIComponent(SC_PARCEL_FIELDS)}` +
-    `&returnGeometry=false&resultRecordCount=1&f=json`;
+    `&returnGeometry=false&resultRecordCount=25&f=json`;
 
   const urls = [
     buildUrl(`${lng},${lat}`, "esriGeometryPoint"),
@@ -1326,7 +1392,11 @@ async function queryScStatewideParcelAttributes(lng: number, lat: number, where:
       const res = await fetchWithRetry(url, 2, 10000, { cache: 'no-store' });
       if (!res.ok) continue;
       const data = await res.json();
-      const attrs = data?.features?.[0]?.attributes;
+      const features: any[] = Array.isArray(data?.features) ? data.features : [];
+      const selected = expectedParcelIds.length
+        ? selectExpectedParcelFeature(features, expectedParcelIds, 'SC')
+        : features[0] || null;
+      const attrs = selected?.attributes;
       if (attrs) return normalizeCountyParcelAttrs(attrs);
     } catch {
       // Try the buffered fallback or let the caller continue with local attrs.
@@ -1340,7 +1410,14 @@ async function queryScStatewideParcelAttributes(lng: number, lat: number, where:
  * State Plane Esri rings, native SR) with attributes normalized to the statewide
  * schema, or null if unavailable / no parcel at the point.
  */
-async function queryCountyParcel(baseUrl: string, lng: number, lat: number, joinConfig?: ScAttributeJoin) {
+async function queryCountyParcel(
+  baseUrl: string,
+  lng: number,
+  lat: number,
+  joinConfig?: ScAttributeJoin,
+  expectedParcelIds: readonly string[] = [],
+  state: SupportedState = 'NC',
+) {
   const runQuery = async (geometryParams: string) => {
     const common = `${geometryParams}&inSR=4326&spatialRel=esriSpatialRelIntersects&where=1%3D1&outFields=*&returnGeometry=true`;
     // Independent fetches: the WGS84 boundary is the critical result — don't
@@ -1359,30 +1436,46 @@ async function queryCountyParcel(baseUrl: string, lng: number, lat: number, join
   };
   try {
     let { wgsJson, spJson } = await runQuery(`geometry=${lng},${lat}&geometryType=esriGeometryPoint`);
-    if (!wgsJson?.features?.length) {
+    const pointFeatures: any[] = Array.isArray(wgsJson?.features) ? wgsJson.features : [];
+    const pointExact = expectedParcelIds.length
+      ? selectExpectedParcelFeature(pointFeatures, expectedParcelIds, state)
+      : pointFeatures[0] || null;
+    if (!pointFeatures.length || (expectedParcelIds.length && !pointExact)) {
       // Some county servers (e.g. Horry's HARN State Plane 10.6) return nothing
-      // for a reprojected point-in-polygon query but match a tiny envelope
-      // around the same coordinate reliably.
+      // for a reprojected point-in-polygon query. Parcel-ID mode also retries
+      // when the point returns only an adjacent parcel.
       const d = 0.00012;
       ({ wgsJson, spJson } = await runQuery(
         `geometry=${lng - d},${lat - d},${lng + d},${lat + d}&geometryType=esriGeometryEnvelope`,
       ));
     }
     const feats: any[] = wgsJson?.features || [];
-    // The envelope can clip the adjacent roadway/right-of-way parcel; prefer the
-    // first feature whose owner is NOT a road segment (same rule as statewide).
-    let pickedIdx = feats.findIndex((f) => f?.geometry && !isRoadwayOwner(normalizeCountyParcelAttrs(f?.properties || {}).ownname));
-    if (pickedIdx < 0) pickedIdx = feats.findIndex((f) => f?.geometry);
+    // Parcel-ID searches are identity-bound: an adjacent feature returned by a
+    // point/envelope query must never contribute its owner or geometry.
+    const exactFeature = expectedParcelIds.length
+      ? selectExpectedParcelFeature(
+          feats.filter((feature) => feature?.geometry),
+          expectedParcelIds,
+          state,
+        )
+      : null;
+    let pickedIdx = exactFeature ? feats.indexOf(exactFeature) : -1;
+    if (!expectedParcelIds.length) {
+      // The envelope can clip the adjacent roadway/right-of-way parcel; prefer
+      // the first feature whose owner is not a road segment.
+      pickedIdx = feats.findIndex((f) => f?.geometry && !isRoadwayOwner(normalizeCountyParcelAttrs(f?.properties || {}).ownname));
+      if (pickedIdx < 0) pickedIdx = feats.findIndex((f) => f?.geometry);
+    }
     const wgsFeat = pickedIdx >= 0 ? feats[pickedIdx] : null;
     if (!wgsFeat || !wgsFeat.geometry) return null;
     // Align the native-SR measurement feature to the SAME parcel by id (the two
     // projection queries can order their features differently).
     const spFeats: any[] = Array.isArray(spJson?.features) ? spJson.features : [];
-    const pickedParno = String(normalizeCountyParcelAttrs(wgsFeat.properties || {}).parno || '').trim();
-    const spMatch = (pickedParno && pickedParno.toUpperCase() !== 'N/A')
-      ? spFeats.find((f) => String(normalizeCountyParcelAttrs(f?.attributes || {}).parno || '').trim() === pickedParno)
+    const pickedIds = parcelIdsFromFeature(wgsFeat).map((value) => String(value));
+    const spMatch = pickedIds.length
+      ? selectExpectedParcelFeature(spFeats, pickedIds, state)
       : null;
-    const spFeat = spMatch || spFeats[pickedIdx] || spFeats[0] || null;
+    const spFeat = spMatch || (!expectedParcelIds.length ? spFeats[pickedIdx] || spFeats[0] : null);
 
     let rawAttrs: Record<string, any> = wgsFeat.properties || {};
     if (joinConfig) {
@@ -1424,15 +1517,23 @@ async function queryCountyParcel(baseUrl: string, lng: number, lat: number, join
  * (owner/value, TaxParcel_camadata) in separate layers, so we fetch the boundary
  * geometry and enrich it with the CAMA record at the same point.
  */
-async function queryMecklenburgParcel(lng: number, lat: number) {
+async function queryMecklenburgParcel(
+  lng: number,
+  lat: number,
+  expectedParcelIds: readonly string[] = [],
+) {
   const boundary = "https://meckgis.mecklenburgcountync.gov/server/rest/services/TaxParcelBoundaries/MapServer/0";
   const cama = "https://meckgis.mecklenburgcountync.gov/server/rest/services/TaxParcel_camadata/MapServer/0";
-  const result = await queryCountyParcel(boundary, lng, lat);
+  const result = await queryCountyParcel(boundary, lng, lat, undefined, expectedParcelIds, 'NC');
   if (!result) return null;
   try {
     const common = `geometry=${lng},${lat}&geometryType=esriGeometryPoint&inSR=4326&spatialRel=esriSpatialRelIntersects&where=1%3D1&outFields=*&returnGeometry=false&f=json`;
     const res = await fetchWithRetry(`${cama}/query?${common}`, 2, 7000, { cache: 'no-store' });
-    const camAttrs = (await res.json()).features?.[0]?.attributes;
+    const camaFeatures: any[] = (await res.json()).features || [];
+    const camaFeature = expectedParcelIds.length
+      ? selectExpectedParcelFeature(camaFeatures, expectedParcelIds, 'NC')
+      : camaFeatures[0] || null;
+    const camAttrs = camaFeature?.attributes;
     if (camAttrs) {
       const enriched = normalizeCountyParcelAttrs(camAttrs);
       // Keep the real geometry & acreage from the boundary layer; take richer CAMA attrs.
@@ -1656,7 +1757,7 @@ function parcelIdVariants(pin: string): { escaped: string[]; strippedEscaped: st
  */
 /** Normalize a parcel identifier for exact comparison (case + separators). */
 function normalizeParcelKey(v: unknown): string {
-  return String(v ?? '').toUpperCase().replace(/[\s-]+/g, '');
+  return normalizeParcelIdentity(v);
 }
 
 /** Exact-match strength of a candidate against the entered id (0 = no match).
@@ -1672,16 +1773,41 @@ function parcelMatchRank(primary: unknown, secondary: unknown, inputUpper: strin
   return 0;
 }
 
-async function lookupNcParcelById(pin: string, googleKey: string): Promise<{ address: string; county: string; lat?: number; lng?: number; quality: number } | null> {
+interface RankedEsriParcelCandidate extends RankedParcelCandidate {
+  esriFeature: any;
+}
+
+type InternalParcelLookupResult = ParcelIdLookupResult & { quality: number };
+
+function exactLookupFeature(
+  feature: any,
+  state: SupportedState,
+): ParcelIdLookupResult['feature'] {
+  const properties = normalizeCountyParcelAttrs(feature?.attributes || {});
+  if (state === 'SC') properties.recordsource = 'scdot';
+  const rings = feature?.geometry?.rings;
+  return {
+    type: 'Feature',
+    properties,
+    geometry: Array.isArray(rings) && rings.length
+      ? { type: 'Polygon', coordinates: rings }
+      : null,
+  };
+}
+
+async function lookupNcParcelById(
+  pin: string,
+  googleKey: string,
+  countyHint?: string,
+): Promise<InternalParcelLookupResult | null> {
   const { escaped, strippedEscaped } = parcelIdVariants(pin);
   const inputUpper = pin.trim().toUpperCase();
   const inputKey = normalizeParcelKey(pin);
   if (!escaped.length || inputKey.length < 3) return null;
   const inList = escaped.map((v) => `'${v}'`).join(', ');
-  // Query in PRECISION order: exact PIN first (parno is unique), then the county
-  // Parcel ID (altparno), then dash-normalized fallbacks. Whatever hits first is
-  // the strongest match — and we still verify the returned row's id EXACTLY equals
-  // the entered value, so a broad match never yields a fuzzy/arbitrary parcel.
+  // Query the canonical PIN, county parcel ID, and separator-normalized forms.
+  // Distinct matching parcels are reported as ambiguous, so formatting never
+  // decides which owner is shown.
   const wheres = [
     `UPPER(parno) IN (${inList})`,
     `UPPER(altparno) IN (${inList})`,
@@ -1691,28 +1817,55 @@ async function lookupNcParcelById(pin: string, googleKey: string): Promise<{ add
     wheres.push(`REPLACE(REPLACE(UPPER(altparno), '-', ''), ' ', '') = '${strippedEscaped}'`);
   }
 
-  let feat: any = null;
-  let quality = 0;
+  const candidates: RankedEsriParcelCandidate[] = [];
   for (const where of wheres) {
     const url = `${NC_PARCEL_ENGINE}?where=${encodeURIComponent(where)}` +
-      `&outFields=${encodeURIComponent('parno,altparno,siteadd,scity,cntyname')}&returnGeometry=true&outSR=4326&resultRecordCount=25&f=json`;
+      `&outFields=${encodeURIComponent(NC_PARCEL_FIELDS)}&returnGeometry=true&outSR=4326&resultRecordCount=25&f=json`;
     try {
       const res = await fetchWithTimeout(url, 15000, { cache: 'no-store' });
       if (!res.ok) continue;
       const feats = (await res.json())?.features || [];
       for (const f of feats) {
         const r = parcelMatchRank(f?.attributes?.parno, f?.attributes?.altparno, inputUpper, inputKey);
-        if (r > quality) { quality = r; feat = f; }
+        if (!r) continue;
+        const attrs = f?.attributes || {};
+        const rawCounty = String(attrs.cntyname || '').trim();
+        const properCounty = NC_COUNTY_NAMES.find((name) => name.toLowerCase() === rawCounty.toLowerCase()) || rawCounty;
+        candidates.push({
+          quality: r,
+          state: 'NC',
+          county: properCounty ? `${properCounty}, NC` : 'Unknown County, NC',
+          parcelId: String(attrs.parno || attrs.altparno || pin).trim(),
+          alternateParcelId: String(attrs.altparno || '').trim() || undefined,
+          esriFeature: f,
+        });
       }
-      if (feat) break; // earlier WHERE = stronger match; stop at the first that hits
     } catch { /* try the next WHERE variant */ }
   }
-  if (!feat) return null;
+  const scopedCandidates = countyHint
+    ? candidates.filter((candidate) =>
+        countyBaseName(candidate.county).toLowerCase() === countyHint.toLowerCase(),
+      )
+    : candidates;
+  const chosen = chooseUniqueTopParcelCandidate(pin, scopedCandidates);
+  if (!chosen) return null;
 
+  const feat = chosen.esriFeature;
   const a = feat.attributes || {};
-  const county = String(a.cntyname || '').trim();
+  const county = chosen.county;
   const situs = String(a.siteadd || '').trim();
   const scity = String(a.scity || '').trim();
+  const normalized = normalizeCountyParcelAttrs(a);
+  const baseResult = {
+    county,
+    state: 'NC' as const,
+    enteredParcelId: pin.trim(),
+    parcelId: chosen.parcelId,
+    alternateParcelId: chosen.alternateParcelId,
+    ownerName: String(normalized.ownname || '').trim() || undefined,
+    quality: chosen.quality,
+    feature: exactLookupFeature(feat, 'NC'),
+  };
 
   // The parcel's polygon centroid — the RELIABLE anchor for the analysis.
   let lat: number | undefined, lng: number | undefined;
@@ -1722,7 +1875,7 @@ async function lookupNcParcelById(pin: string, googleKey: string): Promise<{ add
     if (c) { lng = c[0]; lat = c[1]; }
   }
 
-  if (situs) return { address: `${situs}${scity ? `, ${scity}` : ''}, NC`, county, lat, lng, quality };
+  if (situs) return { ...baseResult, address: `${situs}${scity ? `, ${scity}` : ''}, NC`, lat, lng };
 
   // Vacant parcel with no situs address — reverse-geocode the polygon centroid.
   if (typeof lat === 'number' && typeof lng === 'number' && googleKey) {
@@ -1732,47 +1885,99 @@ async function lookupNcParcelById(pin: string, googleKey: string): Promise<{ add
         const gj = await gr.json();
         const best = gj.results?.find((r: any) => r.types?.some((t: string) => ['street_address', 'premise'].includes(t))) || gj.results?.[0];
         const addr = (best?.formatted_address || '').replace(/,?\s*USA$/i, '').trim();
-        if (addr) return { address: addr, county, lat, lng, quality };
+        if (addr) return { ...baseResult, address: addr, lat, lng };
       }
     } catch { /* fall through */ }
   }
-  return county ? { address: `${county} County parcel ${a.parno}`, county, lat, lng, quality } : null;
+  return county
+    ? { ...baseResult, address: `${county.replace(/,\s*NC$/i, '')} County, NC parcel ${chosen.parcelId}`, lat, lng }
+    : null;
 }
 
 /** SC parcel-ID lookup: the statewide SC layer is keyed by T_Map_Number (not the
  *  NC `parno`) and carries no situs address, so we reverse-geocode the parcel
  *  centroid for a display address and map the UPPERCASE county to the config key. */
-async function lookupScParcelById(pin: string, googleKey: string): Promise<{ address: string; county: string; lat?: number; lng?: number; quality: number } | null> {
+async function lookupScParcelById(
+  pin: string,
+  googleKey: string,
+  countyHint?: string,
+): Promise<InternalParcelLookupResult | null> {
   const { escaped, strippedEscaped } = parcelIdVariants(pin);
   const inputUpper = pin.trim().toUpperCase();
   const inputKey = normalizeParcelKey(pin);
   if (!escaped.length || inputKey.length < 3) return null;
-  const inList = escaped.map((v) => `'${v}'`).join(', ');
+  // Some SC county portals append a display-only "000" account suffix while
+  // SCDOT stores the same TMS without it (Union is one example). Query both
+  // exact forms, then enforce the trailing-zero-only equivalence in code.
+  const suffixlessKey = inputKey.length > 6 && inputKey.endsWith('000')
+    ? inputKey.slice(0, -3)
+    : null;
+  const suffixlessDisplay = /[\s-]+000$/.test(inputUpper)
+    ? inputUpper.replace(/[\s-]+000$/, '')
+    : null;
+  const lookupValues = [...new Set([
+    ...escaped,
+    ...(suffixlessKey ? [suffixlessKey] : []),
+    ...(suffixlessDisplay ? [suffixlessDisplay.replace(/'/g, "''")] : []),
+  ])];
+  const inList = lookupValues.map((v) => `'${v}'`).join(', ');
   const wheres = [`UPPER(T_Map_Number) IN (${inList})`];
-  // Fallback for SC map numbers stored WITH dashes when the user typed none.
-  if (strippedEscaped) wheres.push(`REPLACE(REPLACE(UPPER(T_Map_Number), '-', ''), ' ', '') = '${strippedEscaped}'`);
+  // SCDOT rejects SQL REPLACE(), so use a bounded prefix/suffix fallback when
+  // the user omits punctuation. Strict in-code identity matching still rejects
+  // every non-equivalent result.
+  const looseKey = suffixlessKey || (strippedEscaped ? inputKey : null);
+  if (looseKey && looseKey.length >= 6) {
+    wheres.push(`UPPER(T_Map_Number) LIKE '${looseKey.slice(0, 3)}%${looseKey.slice(-3)}'`);
+  }
 
-  let feat: any = null;
-  let quality = 0;
+  const candidates: RankedEsriParcelCandidate[] = [];
   for (const where of wheres) {
     const url = `${SC_STATEWIDE_PARCEL_LAYER}/query?where=${encodeURIComponent(where)}` +
-      `&outFields=${encodeURIComponent('T_Map_Number,County')}&returnGeometry=true&outSR=4326&resultRecordCount=25&f=json`;
+      `&outFields=${encodeURIComponent(SC_PARCEL_FIELDS)}&returnGeometry=true&outSR=4326&resultRecordCount=25&f=json`;
     try {
       const res = await fetchWithTimeout(url, 15000, { cache: 'no-store' });
       if (!res.ok) continue;
       const feats = (await res.json())?.features || [];
       for (const f of feats) {
-        const r = parcelMatchRank(f?.attributes?.T_Map_Number, '', inputUpper, inputKey);
-        if (r > quality) { quality = r; feat = f; }
+        const storedParcelId = f?.attributes?.T_Map_Number;
+        const r = parcelMatchRank(storedParcelId, '', inputUpper, inputKey) ||
+          (parcelIdentitiesMatch(storedParcelId, pin, true) ? 1 : 0);
+        if (!r) continue;
+        const attrs = f?.attributes || {};
+        const rawCounty = String(attrs.County || '').trim();
+        const properCounty = SC_COUNTY_NAMES.find((name) => name.toLowerCase() === rawCounty.toLowerCase()) || rawCounty;
+        candidates.push({
+          quality: r,
+          state: 'SC',
+          county: properCounty ? `${properCounty}, SC` : 'Unknown County, SC',
+          parcelId: String(attrs.T_Map_Number || pin).trim(),
+          esriFeature: f,
+        });
       }
-      if (feat) break;
     } catch { /* try the next WHERE variant */ }
   }
-  if (!feat) return null;
+  const scopedCandidates = countyHint
+    ? candidates.filter((candidate) =>
+        countyBaseName(candidate.county).toLowerCase() === countyHint.toLowerCase(),
+      )
+    : candidates;
+  const chosen = chooseUniqueTopParcelCandidate(pin, scopedCandidates);
+  if (!chosen) return null;
 
+  const feat = chosen.esriFeature;
   const rawCounty = String(feat.attributes?.County || '').trim();
   const proper = SC_COUNTY_NAMES.find((n) => n.toLowerCase() === rawCounty.toLowerCase()) || rawCounty;
-  const county = proper ? `${proper}, SC` : '';
+  const county = chosen.county;
+  const normalized = normalizeCountyParcelAttrs(feat.attributes || {});
+  const baseResult = {
+    county,
+    state: 'SC' as const,
+    enteredParcelId: pin.trim(),
+    parcelId: chosen.parcelId,
+    ownerName: String(normalized.ownname || '').trim() || undefined,
+    quality: chosen.quality,
+    feature: exactLookupFeature(feat, 'SC'),
+  };
   let lat: number | undefined, lng: number | undefined;
   const ring: number[][] | undefined = feat.geometry?.rings?.[0];
   if (ring?.length) { const c = ringCentroid(ring); if (c) { lng = c[0]; lat = c[1]; } }
@@ -1783,27 +1988,56 @@ async function lookupScParcelById(pin: string, googleKey: string): Promise<{ add
         const gj = await gr.json();
         const best = gj.results?.find((r: any) => r.types?.some((t: string) => ['street_address', 'premise'].includes(t))) || gj.results?.[0];
         const addr = (best?.formatted_address || '').replace(/,?\s*USA$/i, '').trim();
-        if (addr) return { address: addr, county, lat, lng, quality };
+        if (addr) return { ...baseResult, address: addr, lat, lng };
       }
     } catch { /* fall through */ }
   }
-  return county ? { address: `${proper} County, SC parcel ${pin.trim()}`, county, lat, lng, quality } : null;
+  return county
+    ? { ...baseResult, address: `${proper} County, SC parcel ${chosen.parcelId}`, lat, lng }
+    : null;
 }
 
-/** Parcel-ID lookup across BOTH states. NC (parno) and SC (T_Map_Number) live on
- *  different services, so query both in parallel and return the STRONGEST exact
- *  match — an as-typed hit wins over a separator-stripped one, so a coincidental
- *  stripped NC match can never override an exact SC TMS match (or vice versa). */
-export async function lookupParcelById(pin: string, googleKey: string): Promise<{ address: string; county: string; lat?: number; lng?: number } | null> {
-  const [nc, sc] = await Promise.all([
-    lookupNcParcelById(pin, googleKey).catch(() => null),
-    lookupScParcelById(pin, googleKey).catch(() => null),
+/** Parcel-ID lookup across both states. NC (parno) and SC (T_Map_Number) live on
+ *  different services, so query both in parallel and reject ambiguous matches.
+ *  A formatting difference never selects one jurisdiction over another. */
+export async function lookupParcelById(input: string, googleKey: string): Promise<ParcelIdLookupResult | null> {
+  const parsed = parseParcelLookupInput(input);
+  const pin = parsed.parcelId;
+  const stateHint = parsed.stateHint as SupportedState | undefined;
+  const countyNames = stateHint === 'SC' ? SC_COUNTY_NAMES : stateHint === 'NC' ? NC_COUNTY_NAMES : null;
+  const countyHint = parsed.countyHint && countyNames
+    ? countyNames.find((county) => county.toLowerCase() === parsed.countyHint?.toLowerCase())
+    : parsed.countyHint;
+  if (parsed.countyHint && stateHint && !countyHint) {
+    throw new Error(`"${parsed.countyHint}" is not a ${stateHint} county. Use "parcel ID, County, ${stateHint}".`);
+  }
+  const [ncResult, scResult] = await Promise.allSettled([
+    stateHint === 'SC' ? Promise.resolve(null) : lookupNcParcelById(pin, googleKey, countyHint),
+    stateHint === 'NC' ? Promise.resolve(null) : lookupScParcelById(pin, googleKey, countyHint),
   ]);
+  for (const result of [ncResult, scResult]) {
+    if (result.status === 'rejected' && result.reason instanceof ParcelIdentityAmbiguityError) {
+      throw result.reason;
+    }
+  }
+  const nc = ncResult.status === 'fulfilled' ? ncResult.value : null;
+  const sc = scResult.status === 'fulfilled' ? scResult.value : null;
   const hits = [nc, sc].filter((h): h is NonNullable<typeof h> => !!h);
   if (!hits.length) return null;
-  hits.sort((a, b) => b.quality - a.quality);
-  const best = hits[0];
-  return { address: best.address, county: best.county, lat: best.lat, lng: best.lng };
+  const best = chooseUniqueTopParcelCandidate(pin, hits);
+  if (!best) return null;
+  return {
+    address: best.address,
+    county: best.county,
+    state: best.state,
+    enteredParcelId: best.enteredParcelId,
+    parcelId: best.parcelId,
+    alternateParcelId: best.alternateParcelId,
+    ownerName: best.ownerName,
+    lat: best.lat,
+    lng: best.lng,
+    feature: best.feature,
+  };
 }
 
 /**
@@ -1821,17 +2055,25 @@ export async function executeLandAnalysis(
   onPartial?: (partial: Partial<SiteFeasibilityData>) => void,
   compRadiusMiles = 5,
   knownCoords?: { lat: number; lng: number },
+  knownParcel?: ParcelIdLookupResult,
 ): Promise<SiteFeasibilityData> {
+  const addressState = addressString.match(/(?:,|\s)\s*(NC|SC)(?:\s+\d{5}(?:-\d{4})?)?\s*$/i)?.[1]?.toUpperCase() as SupportedState | undefined;
+  const selectedState = knownParcel?.state || addressState || countyState(countyName);
+  // Keep the state attached throughout GIS resolution. Bare overlapping county
+  // names (Union, Beaufort, Cherokee, Lee) otherwise resolve to the NC registry,
+  // and bare unique SC names used to miss SC-only zoning service overrides.
+  countyName = `${countyBaseName(knownParcel?.county || countyName)}, ${selectedState}`;
   const config = ncCountyConfig[countyName];
   if (!config) {
     throw new Error(`Target county context for '${countyName}' is unconfigured.`);
   }
-  const addressState = addressString.match(/(?:,|\s)\s*(NC|SC)(?:\s+\d{5}(?:-\d{4})?)?\s*$/i)?.[1]?.toUpperCase() as SupportedState | undefined;
-  const selectedState = addressState || countyState(countyName);
-  // Keep the state attached throughout GIS resolution. Bare overlapping county
-  // names (Union, Beaufort, Cherokee, Lee) otherwise resolve to the NC registry,
-  // and bare unique SC names used to miss SC-only zoning service overrides.
-  countyName = `${countyBaseName(countyName)}, ${selectedState}`;
+  const expectedParcelIds = knownParcel
+    ? [...new Set([
+        knownParcel.enteredParcelId,
+        knownParcel.parcelId,
+        knownParcel.alternateParcelId,
+      ].filter((value): value is string => !!value && !!normalizeParcelIdentity(value)))]
+    : [];
 
   onStageChange?.("Querying county GIS records...");
 
@@ -1842,9 +2084,14 @@ export async function executeLandAnalysis(
   let lng = 0;
   let lat = 0;
 
-  if (knownCoords && Number.isFinite(knownCoords.lat) && Number.isFinite(knownCoords.lng)) {
-    lat = knownCoords.lat;
-    lng = knownCoords.lng;
+  const exactCoords = knownCoords || (
+    typeof knownParcel?.lat === 'number' && typeof knownParcel?.lng === 'number'
+      ? { lat: knownParcel.lat, lng: knownParcel.lng }
+      : undefined
+  );
+  if (exactCoords && Number.isFinite(exactCoords.lat) && Number.isFinite(exactCoords.lng)) {
+    lat = exactCoords.lat;
+    lng = exactCoords.lng;
   }
 
   if (!lng || !lat) {
@@ -1905,9 +2152,16 @@ export async function executeLandAnalysis(
   if (hasScLocalParcelLayer && countyParcelLayer) {
     onStageChange?.("Querying county parcel server...");
     try {
-      const localRes = await queryCountyParcel(countyParcelLayer, lng, lat, SC_COUNTY_ATTRIBUTE_JOINS[countyKeyLower]);
+      const localRes = await queryCountyParcel(
+        countyParcelLayer,
+        lng,
+        lat,
+        SC_COUNTY_ATTRIBUTE_JOINS[countyKeyLower],
+        expectedParcelIds,
+        'SC',
+      );
       if (localRes) {
-        const statewideAttrs = await queryScStatewideParcelAttributes(lng, lat, parcelWhere);
+        const statewideAttrs = await queryScStatewideParcelAttributes(lng, lat, parcelWhere, expectedParcelIds);
         if (statewideAttrs) {
           const localAttrs = localRes.wgs84Feature.properties || {};
           // County-local data is authoritative (it is the live source of record and is
@@ -1981,8 +2235,14 @@ export async function executeLandAnalysis(
       }
     }
 
-    // If no direct point intersection is found, retry with a spatial envelope tolerance (e.g. 50 feet buffer)
-    if (!wgs84Data || !wgs84Data.features || wgs84Data.features.length === 0) {
+    const directFeatures: any[] = Array.isArray(wgs84Data?.features) ? wgs84Data.features : [];
+    const directExact = expectedParcelIds.length
+      ? selectExpectedParcelFeature(directFeatures, expectedParcelIds, selectedState)
+      : directFeatures[0] || null;
+
+    // If no direct point intersection is found, or a parcel-ID search returned
+    // only neighboring parcels, retry with a spatial envelope tolerance.
+    if (!directFeatures.length || (expectedParcelIds.length && !directExact)) {
       console.log("Direct point intersection returned no parcels or failed. Retrying with spatial envelope buffer...");
       const delta = 0.00015;
       const envGeometry = `${lng - delta},${lat - delta},${lng + delta},${lat + delta}`;
@@ -2006,22 +2266,28 @@ export async function executeLandAnalysis(
 
     if (wgs84Data && wgs84Data.features && wgs84Data.features.length > 0) {
       const feats: any[] = wgs84Data.features;
-      // A point near a property edge can intersect the adjacent roadway parcel (a
-      // state/SCDOT right-of-way or highway segment) instead of the private lot.
-      // Prefer the first feature whose owner is NOT a roadway/DOT right-of-way,
-      // falling back to the first feature when every match is a road segment.
-      let pickedIdx = feats.findIndex((f) => !isRoadwayOwner(normalizeCountyParcelAttrs(f?.properties || {}).ownname));
-      if (pickedIdx < 0) pickedIdx = 0;
+      const exactFeature = expectedParcelIds.length
+        ? selectExpectedParcelFeature(feats, expectedParcelIds, selectedState)
+        : null;
+      let pickedIdx = exactFeature ? feats.indexOf(exactFeature) : -1;
+      if (!expectedParcelIds.length) {
+        // A point near a property edge can intersect a roadway parcel. This
+        // heuristic remains for address searches only; parcel-ID searches are
+        // required to match the requested identity.
+        pickedIdx = feats.findIndex((f) => !isRoadwayOwner(normalizeCountyParcelAttrs(f?.properties || {}).ownname));
+        if (pickedIdx < 0) pickedIdx = 0;
+      }
+      if (pickedIdx < 0) continue;
       parcelFeature = feats[pickedIdx];
       const spFeats: any[] = statePlaneData && Array.isArray(statePlaneData.features) ? statePlaneData.features : [];
       if (spFeats.length) {
         // Align the State Plane measurement feature to the SAME parcel by id (the
         // two projection queries can order their features differently).
-        const pickedParno = String(normalizeCountyParcelAttrs(parcelFeature.properties || {}).parno || '').trim();
-        const spMatch = (pickedParno && pickedParno.toUpperCase() !== 'N/A')
-          ? spFeats.find((f) => String(normalizeCountyParcelAttrs(f?.attributes || {}).parno || '').trim() === pickedParno)
+        const pickedIds = parcelIdsFromFeature(parcelFeature).map((value) => String(value));
+        const spMatch = pickedIds.length
+          ? selectExpectedParcelFeature(spFeats, pickedIds, selectedState)
           : null;
-        statePlaneFeature = spMatch || spFeats[pickedIdx] || spFeats[0];
+        statePlaneFeature = spMatch || (!expectedParcelIds.length ? spFeats[pickedIdx] || spFeats[0] : null);
       } else {
         statePlaneFeature = null;
       }
@@ -2034,8 +2300,10 @@ export async function executeLandAnalysis(
     onStageChange?.("Statewide GIS unavailable — trying county parcel server...");
     try {
       const localRes = countyKeyLower === "mecklenburg"
-        ? await queryMecklenburgParcel(lng, lat)
-        : countyParcelLayer ? await queryCountyParcel(countyParcelLayer, lng, lat) : null;
+        ? await queryMecklenburgParcel(lng, lat, expectedParcelIds)
+        : countyParcelLayer
+          ? await queryCountyParcel(countyParcelLayer, lng, lat, undefined, expectedParcelIds, 'NC')
+          : null;
       if (localRes) {
         parcelFeature = localRes.wgs84Feature;
         statePlaneFeature = localRes.statePlaneFeature;
@@ -2046,10 +2314,30 @@ export async function executeLandAnalysis(
     }
   }
 
+  // The initial parcel-ID query already returned an exact feature. Keep it as
+  // the final real-data fallback when point queries fail, but verify its ID
+  // again before allowing any owner or geometry into the analysis.
+  if (!parcelFeature && knownParcel?.feature) {
+    const seedMatches = selectExpectedParcelFeature(
+      [knownParcel.feature],
+      expectedParcelIds,
+      selectedState,
+    );
+    if (!seedMatches) {
+      throw new Error(`The parcel service returned a feature that does not match parcel ID "${knownParcel.enteredParcelId}". No owner was applied.`);
+    }
+    parcelFeature = knownParcel.feature;
+    statePlaneFeature = null;
+    console.log(`${countyName} parcel resolved from the exact parcel-ID feature.`);
+  }
+
   // 4) If both real GIS paths failed, never invent an SC parcel. NC retains the
   // legacy simulated outline for compatibility, but SC continues with an empty
   // record so the UI can link to the official county viewer.
   if (!parcelFeature) {
+    if (expectedParcelIds.length) {
+      throw new Error(`No GIS record matching parcel ID "${knownParcel?.enteredParcelId || expectedParcelIds[0]}" could be verified. No neighboring parcel owner was used.`);
+    }
     if (selectedState === 'SC') {
       parcelFeature = {
         type: 'Feature',
@@ -2067,6 +2355,14 @@ export async function executeLandAnalysis(
   }
 
   let info = normalizeCountyParcelAttrs(parcelFeature.properties || {});
+  if (
+    expectedParcelIds.length &&
+    !parcelIdsFromAttributes(info).some((parcelId) =>
+      parcelIdMatchesExpected(parcelId, expectedParcelIds, selectedState),
+    )
+  ) {
+    throw new Error(`The resolved GIS record does not match parcel ID "${knownParcel?.enteredParcelId || expectedParcelIds[0]}". No owner was applied.`);
+  }
 
   // Self-correct the county from the ACTUAL parcel record (authoritative), for
   // BOTH states. The parcel point query is county-agnostic, so even if the county
@@ -2088,17 +2384,26 @@ export async function executeLandAnalysis(
     }
   }
 
-  const countyGisScRecord = selectedState === 'SC'
+  const parcelConflicts: string[] = [];
+  const rawCountyGisScRecord = selectedState === 'SC'
     ? officialRecordFromCountyGis(countyName, info)
     : null;
+  const countyGisScRecord = rawCountyGisScRecord?.status === 'verified' &&
+    expectedParcelIds.length &&
+    !parcelIdMatchesExpected(rawCountyGisScRecord.parcelId, expectedParcelIds, 'SC')
+    ? null
+    : rawCountyGisScRecord;
+  if (rawCountyGisScRecord && !countyGisScRecord) {
+    parcelConflicts.push('The county GIS owner record was rejected because its parcel ID did not match the requested parcel.');
+  }
   // Structured treasurer and WTHGIS adapters can enrich a county GIS response
   // with current tax and assessment facts. When GIS already supplied an owner,
   // skip only the expensive browser fallback, not those structured adapters.
-  const remoteOfficialScRecord = selectedState === 'SC'
+  const rawRemoteOfficialScRecord = selectedState === 'SC'
     ? await fetchOfficialScParcel(
         countyName,
         addressString,
-        String(info.parno || ''),
+        String(knownParcel?.parcelId || info.parno || ''),
         { lat, lng },
         fetch,
         {
@@ -2107,11 +2412,18 @@ export async function executeLandAnalysis(
         },
       )
     : null;
+  const remoteOfficialScRecord = rawRemoteOfficialScRecord?.status === 'verified' &&
+    expectedParcelIds.length &&
+    !parcelIdMatchesExpected(rawRemoteOfficialScRecord.parcelId, expectedParcelIds, 'SC')
+    ? null
+    : rawRemoteOfficialScRecord;
+  if (rawRemoteOfficialScRecord && !remoteOfficialScRecord) {
+    parcelConflicts.push('The assessor or treasurer owner record was rejected because its parcel ID did not match the requested parcel.');
+  }
   const officialScRecord = mergeOfficialScParcelRecords(remoteOfficialScRecord, countyGisScRecord);
   let geometryStatus: SiteFeasibilityData['geometryStatus'] = selectedState === 'SC'
     ? (info.recordsource === 'county-gis' ? 'verified' : info.recordsource === 'scdot' ? 'statewide-candidate' : 'unavailable')
     : 'verified';
-  const parcelConflicts: string[] = [];
 
   if (selectedState === 'SC' && officialScRecord?.status === 'verified') {
     const candidateParcelId = info.parno;

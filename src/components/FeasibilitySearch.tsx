@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import type { FormEvent, KeyboardEvent, FC } from 'react';
 import { createRoot } from 'react-dom/client';
 import { executeLandAnalysis, chatWithGemini, chatFollowUp, getUserKeys, getMapboxToken, getRealEstateApiKey, detectNcCounty, lookupParcelById, fetchConstructionCostEstimate, fetchLandClearingEstimate, fetchUtilitiesEstimate, fetchGoogleDistanceMatrixComps, fetchParcelsInBbox, getCompPrefs, getReportAutoGenerate, clearAddressSearchCache, enformionConfigured, enformionContactEnrich, enformionPersonSearch, enformionBusinessSearch, looksLikeBusiness, enformionDiagMessage, getLastEnformionShape, getLastEnformionDetail, ncAddressSuggestions } from '../services/feasibilityService';
-import type { SkipTraceContact } from '../services/feasibilityService';
+import type { ParcelIdLookupResult, SkipTraceContact } from '../services/feasibilityService';
 import type { ChatMessage, ChatAttachment } from '../services/feasibilityService';
 import { fetchRealEstatePropertyTransactions } from '../services/realEstateApiProperty';
 import type { RealEstatePropertyTransactions } from '../services/realEstateApiProperty';
@@ -3025,7 +3025,12 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
       .catch((e) => console.error('Failed to update search history:', e));
   };
 
-  const handleSearch = async (addressToSearch: string, countyOverride?: string, knownCoords?: { lat: number; lng: number }) => {
+  const handleSearch = async (
+    addressToSearch: string,
+    countyOverride?: string,
+    knownCoords?: { lat: number; lng: number },
+    knownParcel?: ParcelIdLookupResult,
+  ) => {
     if (!addressToSearch.trim()) return;
     if (!hasKeys) {
       setError("Please configure Google Maps and Gemini API credentials in Account Settings.");
@@ -3098,6 +3103,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
         onPartial,
         compPrefs.radiusMiles,
         knownCoords,
+        knownParcel,
       );
       if (seq !== searchSeqRef.current) return;
       setData(result);
@@ -3142,7 +3148,8 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
     }
   };
 
-  // Look up a property by its NC parcel ID (PIN), then run the normal analysis.
+  // Look up a property by its NC or SC parcel ID, then keep that exact parcel
+  // identity attached throughout the normal analysis.
   const handleParcelLookup = async () => {
     const pin = parcelIdInput.trim();
     if (!pin) return;
@@ -3156,7 +3163,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
     try {
       const found = await lookupParcelById(pin, getUserKeys().googleMaps || '');
       if (!found) {
-        setError(`No NC parcel found for ID "${pin}". Check the parcel number (PIN) — it must match the county's records exactly.`);
+        setError(`No NC or SC parcel found for ID "${pin}". Check the parcel number — it must match the county's records exactly.`);
         setLoading(false); setLoadingStage(null);
         return;
       }
@@ -3167,7 +3174,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
       const coords = (typeof found.lat === 'number' && typeof found.lng === 'number')
         ? { lat: found.lat, lng: found.lng }
         : undefined;
-      await handleSearch(found.address, found.county, coords); // county known from the parcel record
+      await handleSearch(found.address, found.county, coords, found);
     } catch (err: any) {
       console.error(err);
       setError(err?.message || "Parcel ID lookup failed.");
@@ -3441,7 +3448,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
             </div>
           )}
 
-          {/* Search by address (county auto-detected) or by NC parcel ID */}
+          {/* Search by address (county auto-detected) or by NC/SC parcel ID */}
           <div className="search-mode-toggle">
             <button
               type="button"
@@ -3500,7 +3507,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                   <Landmark className="input-icon" size={20} />
                   <input
                     type="text"
-                    placeholder="Enter NC parcel ID / PIN (e.g. 56120014450000)…"
+                    placeholder="Parcel ID, County, State (for example: 049-00-00-112 000, Union, SC)…"
                     value={parcelIdInput}
                     onChange={(e) => setParcelIdInput(e.target.value)}
                     disabled={loading}
