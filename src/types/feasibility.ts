@@ -294,6 +294,10 @@ export interface WetlandsInfo {
 export interface SiteFeasibilityData {
   inputAddress: string;
   parcelId: string;
+  /** Grid PIN (e.g. NC `parno`) shown separately when distinct from the parcel ID. */
+  pinNumber?: string;
+  /** County parcel/account ID (NC `altparno` or a county parcel_id; SC TMS number). */
+  countyParcelId?: string;
   countyName: string;
   grossSf: number;
   gisAcres: number;

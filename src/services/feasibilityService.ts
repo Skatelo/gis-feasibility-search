@@ -122,7 +122,7 @@ const SC_STATEWIDE_PARCEL_LAYER = "https://smpesri.scdot.org/arcgis/rest/service
 // Only the fields the app actually uses — requesting these instead of `*` keeps
 // the response small so the (sometimes overloaded) statewide server is far less
 // likely to hit a gateway timeout. The State Plane query needs geometry only.
-const NC_PARCEL_FIELDS = "parno,siteadd,gisacres,ownname,ownname2,ownfrst,ownlast,mailadd,mcity,mstate,mzip,scity,parval,landval,saledate,reviseyear,sourceref,legdecfull,cntyname";
+const NC_PARCEL_FIELDS = "parno,altparno,siteadd,gisacres,ownname,ownname2,ownfrst,ownlast,mailadd,mcity,mstate,mzip,scity,parval,landval,saledate,reviseyear,sourceref,legdecfull,cntyname";
 export const SC_PARCEL_FIELDS = "T_Map_Number,County,L_Value,M_Value,Ownership,Mailing_Add,Mailing_City,Mailing_St,Mailing_Zip,Zoning,Land_Use,Acreage";
 
 /** Keyless address suggestions from the NC statewide geocoder — the always-
@@ -1272,6 +1272,11 @@ export function normalizeCountyParcelAttrs(a: Record<string, any>): Record<strin
   }
   return {
     parno: get(/^pin_?num$/i, /^parno$/i, /parcel_?id/i, /^parcel_?id$/i, /^pid$/i, /^pin$/i, /^pin14$/i, /^nad83_?pin$/i, /parcel_?num/i, /^gis_?pin$/i, /gpin/i, /nc_?pin/i, /^newpin$/i, /^geo_?pin$/i, /^par_?code$/i, /^tms$/i, /_tms$/i, /tms_?number/i, /^pin/i, /t_map_number/i, /tax_?map_?number/i, /^taxmapid$/i, /^map_?number$/i, /^tax_?pin$/i, /^tms_?number$/i, /^cmplnn2?$/i) ?? "N/A",
+    // Distinct capture so the UI can show the PIN and the county Parcel ID apart:
+    // `pin` only from grid-PIN-named fields, `altparno` only from parcel-id/account
+    // named fields. `parno` above stays the primary key used for dedup/comps.
+    pin: get(/^pin$/i, /^pin_?num$/i, /^pin14$/i, /^nc_?pin$/i, /^gis_?pin$/i, /gpin/i, /^geo_?pin$/i, /^nad83_?pin$/i, /^parno$/i, /^newpin$/i, /^tax_?pin$/i) ?? "",
+    altparno: get(/^altparno$/i, /^parcel_?id$/i, /parcel_?id/i, /^pid$/i, /^reid$/i, /^account(?:_?no|_?num)?$/i, /^acct(?:_?no|_?num)?$/i, /^parcel_?num(?:ber)?$/i, /^tax_?acct/i) ?? "",
     gisacres: get(/gis_?acres/i, /calc.*acre/i, /calculated_?acreage/i, /^calc_?ac(re)?$/i, /^cacres$/i, /acres_?gis/i, /deed(?:ed)?_?ac(?:res?|re)?/i, /^acres$/i, /acreage/i, /legal_?acres/i, /tax_?acres/i, /total_?acres/i, /tot_?number_?acres/i, /(?:^|_)number_?acres/i, /poly_?acres/i, /map_?acres/i, /assessed_?ac$/i, /^total_?calc/i, /land_?area/i, /^pacrea$/i, /^calculated$/i, /gross.*acres/i),
     ownname: ownname ?? get(/ownership/i, /owner_?ship/i) ?? "N/A",
     ownname2: ownname2 ?? "",
@@ -1652,11 +1657,17 @@ function parcelIdVariants(pin: string): { escaped: string[]; strippedEscaped: st
 async function lookupNcParcelById(pin: string, googleKey: string): Promise<{ address: string; county: string; lat?: number; lng?: number } | null> {
   const { escaped, strippedEscaped } = parcelIdVariants(pin);
   if (!escaped.length) return null;
-  const wheres = [`UPPER(parno) IN (${escaped.map((v) => `'${v}'`).join(', ')})`];
-  // Fallback for counties that STORE the PIN with dashes while the user typed it
-  // without: strip separators from the stored value too. Runs only if the exact
+  const inList = escaped.map((v) => `'${v}'`).join(', ');
+  // Match EITHER the PIN (parno) OR the alternate county Parcel ID (altparno), so
+  // a lookup works with whichever number the user has.
+  const wheres = [`UPPER(parno) IN (${inList}) OR UPPER(altparno) IN (${inList})`];
+  // Fallback for counties that STORE the number with dashes while the user typed
+  // it without: strip separators from the stored value too. Runs only if the exact
   // variants missed; services that don't support REPLACE simply return nothing.
-  if (strippedEscaped) wheres.push(`REPLACE(REPLACE(UPPER(parno), '-', ''), ' ', '') = '${strippedEscaped}'`);
+  if (strippedEscaped) {
+    wheres.push(`REPLACE(REPLACE(UPPER(parno), '-', ''), ' ', '') = '${strippedEscaped}'`);
+    wheres.push(`REPLACE(REPLACE(UPPER(altparno), '-', ''), ' ', '') = '${strippedEscaped}'`);
+  }
 
   let feat: any = null;
   for (const where of wheres) {
@@ -2446,6 +2457,16 @@ export async function executeLandAnalysis(
     // street-only and previously poisoned history and exact-address lookups.
     inputAddress: isFullCarolinaPostalAddress(addressString) ? addressString : (info.siteadd || addressString),
     parcelId: info.parno || "N/A",
+    // Show the PIN and the county Parcel ID as DISTINCT identifiers. `info.pin`
+    // comes only from PIN-named fields; `info.altparno` only from parcel-id/
+    // account-named fields — so neither is mislabeled. SC has just the TMS number
+    // (info.parno), which is its parcel ID.
+    pinNumber: info.pin && String(info.pin).trim() && String(info.pin).trim() !== 'N/A'
+      ? String(info.pin).trim()
+      : undefined,
+    countyParcelId: selectedState === 'NC'
+      ? (info.altparno && String(info.altparno).trim() ? String(info.altparno).trim() : undefined)
+      : (info.parno && info.parno !== 'N/A' ? String(info.parno).trim() : undefined),
     countyName: countyName,
     grossSf,
     gisAcres,
