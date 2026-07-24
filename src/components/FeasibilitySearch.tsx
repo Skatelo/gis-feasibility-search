@@ -4085,14 +4085,28 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                     <strong className="field-value">{data.contactByMail || "Unavailable"}</strong>
                   </div>
 
-                  {/* Parcel ID */}
-                  <div className="registry-row">
-                    <div className="registry-label-with-icon">
-                      <FileText size={16} className="registry-icon-blue" />
-                      <span className="field-label">Parcel id</span>
+                  {/* PIN (grid number) — shown only when distinct from the parcel ID */}
+                  {data.pinNumber ? (
+                    <div className="registry-row">
+                      <div className="registry-label-with-icon">
+                        <FileText size={16} className="registry-icon-blue" />
+                        <span className="field-label">PIN</span>
+                      </div>
+                      <strong className="field-value">{data.pinNumber}</strong>
                     </div>
-                    <strong className="field-value">{data.countyName.toLowerCase() === 'mecklenburg' && data.parcelId.length === 8 ? `${data.parcelId.substring(0, 3)}-${data.parcelId.substring(3, 6)}-${data.parcelId.substring(6, 8)} (${data.parcelId})` : data.parcelId}</strong>
-                  </div>
+                  ) : null}
+
+                  {/* Parcel ID (county account / TMS). Shown when there's no PIN row, or a
+                      county parcel ID that differs from the PIN — never the same value twice. */}
+                  {(!data.pinNumber || (data.countyParcelId && data.countyParcelId !== data.pinNumber)) ? (
+                    <div className="registry-row">
+                      <div className="registry-label-with-icon">
+                        <FileText size={16} className="registry-icon-blue" />
+                        <span className="field-label">Parcel id</span>
+                      </div>
+                      <strong className="field-value">{(() => { const v = data.countyParcelId || data.parcelId; return data.countyName.toLowerCase() === 'mecklenburg' && v.length === 8 ? `${v.substring(0, 3)}-${v.substring(3, 6)}-${v.substring(6, 8)} (${v})` : v; })()}</strong>
+                    </div>
+                  ) : null}
 
                   {/* Deed Type */}
                   <div className="registry-row">
