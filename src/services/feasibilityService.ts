@@ -423,10 +423,12 @@ async function crawleeScrapeBatch(urls: string[], queries: string[], maxTargets 
   const targets = [...new Set(urls.map((url) => url.trim()).filter(Boolean))].slice(0, targetLimit);
   if (!targets.length) return [];
   // PROVIDER SWITCH: Octen's Extract API replaces the Crawlee scraper for page /
-  // PDF / document text when configured. Crawlee still runs if Octen returns
-  // nothing, so extraction degrades instead of failing.
+  // PDF / document text when configured. Extract takes up to 20 URLs in ONE
+  // request, so it reads MORE of the discovered sources than the Crawlee crawl
+  // budget allowed. Crawlee still runs if Octen returns nothing.
   if (octenConfigured()) {
-    const extracted = await octenExtractBatch(targets, maxTargets).catch(() => [] as CrawleeResult[]);
+    const octenTargets = [...new Set(urls.map((url) => url.trim()).filter(Boolean))].slice(0, 20);
+    const extracted = await octenExtractBatch(octenTargets, 20).catch(() => [] as CrawleeResult[]);
     if (extracted.length) return extracted;
   }
   try {
@@ -468,7 +470,7 @@ async function crawleeResearchBlock(searchResults: PplxResult[], queries: string
   const results = await crawleeScrapeBatch(urls, queries, opts?.maxScrapeTargets);
   if (!results.length) return { block: '', urls: [] };
   return {
-    block: `\n\nLIVE WEB RESEARCH (${octenConfigured() ? 'Octen discovery + Octen Extract page/document extraction' : 'Perplexity discovery + Crawlee page/document extraction'}). Base every figure on THESE extracted sources and cite their URLs in "sources"; do not invent anything beyond them:\n\n${formatCrawleeSources(results, opts?.maxSources ?? 24)}`,
+    block: `\n\nLIVE WEB RESEARCH (${octenConfigured() ? 'Octen discovery + Octen Extract page/document extraction' : 'Perplexity discovery + Crawlee page/document extraction'}). Base every figure on THESE extracted sources and cite their URLs in "sources"; do not invent anything beyond them:\n\n${formatCrawleeSources(results, opts?.maxSources ?? (octenConfigured() ? 40 : 24))}`,
     urls: results.map((r) => r.url),
   };
 }
@@ -539,8 +541,17 @@ function octenResultsToPplx(data: any): PplxResult[] {
   return rows
     .map((row: any): PplxResult | null => {
       if (!row || typeof row.url !== 'string' || !row.url) return null;
-      // Prefer the richest text Octen returned for this result.
-      const snippet = String(row.full_content || row.highlight || row.highlights?.join?.('\n') || '');
+      // ORDER MATTERS. `highlight` is Octen's QUERY-RELEVANT extract (the true
+      // analogue of Perplexity's `snippet`); `full_content` is the raw page,
+      // which opens with nav/cookie/boilerplate. Leading with full_content meant
+      // the downstream character cap often truncated away the part that actually
+      // answered the query — so highlights lead, and page text is appended as
+      // supporting context.
+      const highlight = typeof row.highlight === 'string'
+        ? row.highlight
+        : Array.isArray(row.highlights) ? row.highlights.join('\n') : '';
+      const full = typeof row.full_content === 'string' ? row.full_content : '';
+      const snippet = [highlight.trim(), full.trim()].filter(Boolean).join('\n\n').trim();
       return {
         title: String(row.title || row.url),
         url: row.url,
@@ -578,7 +589,10 @@ export async function octenSearchBatch(
   const responses = await Promise.all(qs.map((query) => octenRequest('search', {
     query: query.slice(0, 500), // API caps query length at 500 chars
     topic: 'general',
-    count: Math.min(20, Math.max(1, opts?.maxResultsPerQuery ?? 10)),
+    // Octen allows up to 100 results/query. Callers inherited Perplexity-era
+    // values (~6), which left the source pool thin, so a floor of 12 applies —
+    // breadth is the whole point of the research pass.
+    count: Math.min(30, Math.max(12, opts?.maxResultsPerQuery ?? 12)),
     exclude_domains: octenExcludedDomains(),
     highlight: { enable: true, max_tokens: 512 },
     full_content: { enable: true, max_tokens: opts?.maxTokensPerPage ?? 1500 },
@@ -788,13 +802,17 @@ function formatPplxSources(results: PplxResult[], maxSources = 24, maxSnippetCha
 /** The research block injected into a Gemini prompt in place of Google-Search
  *  grounding: many ranked sources with extracted content. '' = nothing found. */
 async function perplexityResearchBlock(queries: string[], opts?: WebResearchOptions): Promise<{ block: string; urls: string[] }> {
-  let results = await perplexitySearchBatch(queries, { maxResultsPerQuery: opts?.maxResultsPerQuery ?? 6 });
-  // DEEP PASS: on 'hard' research Octen's Broad Search fans the lead question out
-  // into extra sub-queries, widening the source pool beyond the fixed query list.
-  if (opts?.mode === 'hard' && octenConfigured() && queries.length) {
+  const octen = octenConfigured();
+  let results = await perplexitySearchBatch(queries, {
+    maxResultsPerQuery: opts?.maxResultsPerQuery ?? (octen ? 12 : 6),
+  });
+  // TOP-UP: Octen's Broad Search fans the lead question into extra sub-queries.
+  // It runs on deep passes AND whenever the direct search came back thin, so a
+  // narrow query list can't starve the report of sources.
+  if (octen && queries.length && (opts?.mode === 'hard' || results.length < 12)) {
     const broad = await octenBroadSearch(queries[0], {
-      maxQueries: 8,
-      maxResultsPerQuery: opts?.maxResultsPerQuery ?? 6,
+      maxQueries: opts?.mode === 'hard' ? 12 : 8,
+      maxResultsPerQuery: opts?.maxResultsPerQuery ?? 8,
     }).catch(() => [] as PplxResult[]);
     if (broad.length) {
       const seen = new Set(results.map((r) => r.url));
@@ -807,7 +825,7 @@ async function perplexityResearchBlock(queries: string[], opts?: WebResearchOpti
   }
   if (!results.length) return { block: '', urls: [] };
   return {
-    block: `\n\nLIVE WEB SEARCH RESULTS (${octenConfigured() ? 'Octen Search API' : 'Perplexity Search API'} — ranked, current, with extracted page content). Base every figure on THESE sources and cite their URLs in "sources"; do not invent anything beyond them:\n\n${formatPplxSources(results, opts?.maxSources ?? 24)}`,
+    block: `\n\nLIVE WEB SEARCH RESULTS (${octenConfigured() ? 'Octen Search API' : 'Perplexity Search API'} — ranked, current, with extracted page content). Base every figure on THESE sources and cite their URLs in "sources"; do not invent anything beyond them:\n\n${formatPplxSources(results, opts?.maxSources ?? (octen ? 40 : 24))}`,
     urls: results.map((r) => r.url),
   };
 }
