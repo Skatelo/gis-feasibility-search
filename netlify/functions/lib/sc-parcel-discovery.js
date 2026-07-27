@@ -16,6 +16,8 @@
 // parcel at the requested coordinate, so a mis-ranked candidate yields nothing
 // rather than wrong data.
 
+import { scParcelLayerFor, SC_BOUNDS } from './sc-parcel-manifest.js';
+
 const ITEM_ID_RE = /^[a-f0-9]{32}$/i;
 const SERVICE_URL_RE = /https?:\\?\/\\?\/[^"'<>\s]+?(?:MapServer|FeatureServer)(?:\/\d+)?/gi;
 const PUBLIC_ARCGIS_ROOT = 'https://www.arcgis.com/sharing/rest';
@@ -241,6 +243,21 @@ async function probeLayer(serviceUrl, layerId, lng, lat, fetcher) {
   if (!feature?.attributes) return null;
   const score = parcelAttributeScore(feature.attributes);
   if (score < 2) return null; // not parcel-shaped — reject rather than guess
+
+  // GEOGRAPHIC GUARD: some services answer a point query with a record that is
+  // nowhere near the point (a Washington DC service matched a "Georgetown"
+  // search this way). Require the returned parcel to sit inside South Carolina
+  // and close to the queried coordinate.
+  const ring = feature.geometry?.rings?.[0];
+  if (ring?.length) {
+    let cx = 0, cy = 0;
+    for (const [rlng, rlat] of ring) { cx += rlng; cy += rlat; }
+    cx /= ring.length; cy /= ring.length;
+    const inSC = cx >= SC_BOUNDS.minLng && cx <= SC_BOUNDS.maxLng && cy >= SC_BOUNDS.minLat && cy <= SC_BOUNDS.maxLat;
+    const nearPoint = Math.abs(cx - lng) < 0.25 && Math.abs(cy - lat) < 0.25;
+    if (!inSC || !nearPoint) return null;
+  }
+
   return {
     serviceUrl,
     layerId,
@@ -258,6 +275,15 @@ export async function discoverScParcelAtPoint(county, lng, lat, fetcher = fetch)
   const countyName = String(county || '').replace(/,\s*SC$/i, '').replace(/\s+County$/i, '').trim();
   if (!countyName || !Number.isFinite(lng) || !Number.isFinite(lat)) return null;
   const countyToken = compactName(countyName);
+
+  // FAST PATH: a pre-verified layer for this county. Still probed at the real
+  // coordinate, so a stale or city-scoped entry falls through to live discovery
+  // rather than returning nothing useful.
+  const known = scParcelLayerFor(countyName);
+  if (known) {
+    const hit = await probeLayer(known.url, known.layer, lng, lat, fetcher).catch(() => null);
+    if (hit) return hit;
+  }
 
   const itemIds = await verifiedParcelItemIds(countyName, fetcher);
   if (!itemIds.length) return null;
