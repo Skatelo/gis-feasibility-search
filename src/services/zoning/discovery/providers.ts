@@ -77,6 +77,82 @@ export function perplexitySearchProvider(config: PerplexityProviderConfig): Sear
   };
 }
 
+// --- Octen Search API (drop-in alternative to Perplexity) ------------------
+
+export interface OctenProviderConfig {
+  apiKey: string;
+  endpoint?: string; // default: same-origin Netlify proxy
+  fetchImpl?: typeof fetch;
+  maxResultsPerQuery?: number;
+  timeoutMs?: number;
+}
+
+interface OctenRaw {
+  data?: { results?: unknown };
+}
+
+function flattenOcten(data: OctenRaw): SearchResult[] {
+  const rows = data?.data?.results;
+  if (!Array.isArray(rows)) return [];
+  const out: SearchResult[] = [];
+  for (const entry of rows) {
+    if (!entry || typeof entry !== 'object') continue;
+    const e = entry as { url?: unknown; title?: unknown; highlight?: unknown; full_content?: unknown };
+    if (typeof e.url === 'string' && e.url) {
+      const snippet = typeof e.full_content === 'string' && e.full_content
+        ? e.full_content
+        : (typeof e.highlight === 'string' ? e.highlight : undefined);
+      out.push({ url: e.url, title: typeof e.title === 'string' ? e.title : undefined, snippet });
+    }
+  }
+  return out;
+}
+
+/** Same SearchProvider contract as perplexitySearchProvider, so the discovery
+ *  service can swap engines without any other change. Octen's /search takes one
+ *  query per request, so queries are fired in parallel rather than batched. */
+export function octenSearchProvider(config: OctenProviderConfig): SearchProvider {
+  const endpoint = config.endpoint ?? '/.netlify/functions/octen?endpoint=search';
+  const fetchImpl = config.fetchImpl ?? fetch;
+  const maxResults = config.maxResultsPerQuery ?? 6;
+  return async (queries, signal) => {
+    const responses = await Promise.allSettled(
+      queries.map(async (query) => {
+        const timeout = AbortSignal.timeout(config.timeoutMs ?? 8_000);
+        const requestSignal = signal ? AbortSignal.any([signal, timeout]) : timeout;
+        const res = await fetchImpl(endpoint, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${config.apiKey}`,
+            'x-api-key': config.apiKey,
+          },
+          body: JSON.stringify({
+            query: String(query).slice(0, 500),
+            count: maxResults,
+            highlight: { enable: true, max_tokens: 400 },
+          }),
+          signal: requestSignal,
+        });
+        if (!res.ok) throw new Error(`Octen HTTP ${res.status}`);
+        return flattenOcten((await res.json()) as OctenRaw);
+      }),
+    );
+    const seen = new Set<string>();
+    const merged: SearchResult[] = [];
+    for (const r of responses) {
+      if (r.status !== 'fulfilled') continue;
+      for (const item of r.value) {
+        if (!seen.has(item.url)) {
+          seen.add(item.url);
+          merged.push(item);
+        }
+      }
+    }
+    return merged;
+  };
+}
+
 // --- Page fetchers ---------------------------------------------------------
 
 /** Direct HTTP fetch — for server/test contexts and public government pages. */

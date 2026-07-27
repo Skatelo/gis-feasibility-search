@@ -45,6 +45,10 @@ export interface UserKeys {
   /** Perplexity API key for utilities, tree rates, cost estimates, takeoff,
    *  LLC trace, and report research. Zoning never uses this credential. */
   perplexity?: string;
+  /** OPTIONAL Octen API key (https://docs.octen.ai). When set it REPLACES
+   *  Perplexity as the live web-search engine for every research lookup —
+   *  same call sites, same result shape, no other behavior changes. */
+  octen?: string;
   /** Mapbox public access token (pk.…) — satellite base map for the parcel aerial view. */
   mapbox?: string;
   /** RealEstateAPI.com Property Detail key for on-demand mortgage and sale history. */
@@ -357,8 +361,29 @@ export function perplexityConfigured(): boolean {
   return !!getPerplexityKey();
 }
 
+/** Octen API key. Optional drop-in replacement for Perplexity — see
+ *  octenSearchBatch() below. Docs: https://docs.octen.ai */
+export function getOctenKey(): string {
+  const envVar = (typeof import.meta !== 'undefined' && import.meta.env)
+    ? import.meta.env.VITE_OCTEN_API_KEY
+    : (globalThis as any).process?.env?.VITE_OCTEN_API_KEY;
+  return (getUserKeys().octen || (envVar as string | undefined) || '').trim();
+}
+export function octenConfigured(): boolean {
+  return !!getOctenKey();
+}
+
+/** Which engine actually serves live web search. Octen WINS when configured:
+ *  configuring its key is what "switches providers", so it fully replaces the
+ *  Perplexity path everywhere without any other setting to remember. */
+export function activeWebSearchProvider(): 'octen' | 'perplexity' | 'none' {
+  if (octenConfigured()) return 'octen';
+  if (perplexityConfigured()) return 'perplexity';
+  return 'none';
+}
+
 export function liveWebResearchConfigured(): boolean {
-  return perplexityConfigured();
+  return activeWebSearchProvider() !== 'none';
 }
 
 export interface PplxResult { title: string; url: string; snippet: string; date?: string }
@@ -397,6 +422,13 @@ async function crawleeScrapeBatch(urls: string[], queries: string[], maxTargets 
   const targetLimit = Math.min(12, Math.max(4, maxTargets));
   const targets = [...new Set(urls.map((url) => url.trim()).filter(Boolean))].slice(0, targetLimit);
   if (!targets.length) return [];
+  // PROVIDER SWITCH: Octen's Extract API replaces the Crawlee scraper for page /
+  // PDF / document text when configured. Crawlee still runs if Octen returns
+  // nothing, so extraction degrades instead of failing.
+  if (octenConfigured()) {
+    const extracted = await octenExtractBatch(targets, maxTargets).catch(() => [] as CrawleeResult[]);
+    if (extracted.length) return extracted;
+  }
   try {
     const response = await fetchWithTimeout('/.netlify/functions/crawlee', 30000, {
       method: 'POST',
@@ -436,9 +468,194 @@ async function crawleeResearchBlock(searchResults: PplxResult[], queries: string
   const results = await crawleeScrapeBatch(urls, queries, opts?.maxScrapeTargets);
   if (!results.length) return { block: '', urls: [] };
   return {
-    block: `\n\nLIVE WEB RESEARCH (Perplexity discovery + Crawlee page/document extraction). Base every figure on THESE extracted sources and cite their URLs in "sources"; do not invent anything beyond them:\n\n${formatCrawleeSources(results, opts?.maxSources ?? 24)}`,
+    block: `\n\nLIVE WEB RESEARCH (${octenConfigured() ? 'Octen discovery + Octen Extract page/document extraction' : 'Perplexity discovery + Crawlee page/document extraction'}). Base every figure on THESE extracted sources and cite their URLs in "sources"; do not invent anything beyond them:\n\n${formatCrawleeSources(results, opts?.maxSources ?? 24)}`,
     urls: results.map((r) => r.url),
   };
+}
+
+// ---------------------------------------------------------------------------
+// OCTEN API — optional live-web engine. When an Octen key is configured it
+// REPLACES Perplexity everywhere: every research call funnels through
+// perplexitySearchBatch()/crawleeScrapeBatch(), and both delegate here, so the
+// swap needs no changes at any call site. Three capabilities are used:
+//   • /search       ranked web results (replaces the Perplexity Search API)
+//   • /extract      clean page/PDF/doc content (replaces the Crawlee scraper)
+//   • /broad-search auto query fan-out for deep research passes
+// Docs: https://docs.octen.ai
+// ---------------------------------------------------------------------------
+
+type OctenEndpoint = 'search' | 'extract' | 'broad-search';
+
+/** Same-origin proxy first (works in prod + Vite dev and avoids CORS), direct
+ *  API as a last-ditch route. Octen accepts either auth header; send both. */
+async function octenRequest(endpoint: OctenEndpoint, body: Record<string, unknown>, key: string, timeoutMs = 15000): Promise<any | null> {
+  const payload = JSON.stringify(body);
+  const routes = [
+    { url: `/.netlify/functions/octen?endpoint=${endpoint}`, timeout: timeoutMs },
+    { url: `https://api.octen.ai/${endpoint}`, timeout: timeoutMs },
+  ];
+  for (const route of routes) {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const res = await fetchWithTimeout(route.url, route.timeout, {
+          method: 'POST',
+          cache: 'no-store',
+          headers: { 'Content-Type': 'application/json', Accept: 'application/json', Authorization: `Bearer ${key}`, 'x-api-key': key },
+          body: payload,
+        });
+        if (res.ok) {
+          const json = await res.json();
+          // Octen signals business errors with a non-zero `code` on a 200.
+          if (json && typeof json.code === 'number' && json.code !== 0) {
+            console.warn(`Octen ${endpoint} error ${json.code}: ${json.msg || ''}`);
+            return null;
+          }
+          return json;
+        }
+        if ((res.status === 429 || res.status >= 500) && attempt === 0) { await new Promise((r) => setTimeout(r, 1500)); continue; }
+        if (res.status < 500 && res.status !== 429) {
+          console.warn(`Octen ${endpoint} HTTP ${res.status}:`, (await res.text().catch(() => '')).slice(0, 200));
+          return null;
+        }
+        break;
+      } catch {
+        if (attempt === 0) { await new Promise((r) => setTimeout(r, 800)); continue; }
+      }
+    }
+  }
+  return null;
+}
+
+/** Octen takes bare domains in `exclude_domains`; the Perplexity denylist uses a
+ *  leading '-'. Same noise list, provider-appropriate format. */
+function octenExcludedDomains(): string[] {
+  return PERPLEXITY_DENYLIST.map((entry) => entry.replace(/^-/, ''));
+}
+
+function octenResultsToPplx(data: any): PplxResult[] {
+  const rows: any[] = Array.isArray(data?.data?.results) ? data.data.results
+    : Array.isArray(data?.results) ? data.results
+    : [];
+  return rows
+    .map((row: any): PplxResult | null => {
+      if (!row || typeof row.url !== 'string' || !row.url) return null;
+      // Prefer the richest text Octen returned for this result.
+      const snippet = String(row.full_content || row.highlight || row.highlights?.join?.('\n') || '');
+      return {
+        title: String(row.title || row.url),
+        url: row.url,
+        snippet,
+        date: row.time_published ? String(row.time_published).slice(0, 10) : undefined,
+      };
+    })
+    .filter((r: PplxResult | null): r is PplxResult => !!r);
+}
+
+/** Interleave groups so every query contributes its top hit before any query
+ *  contributes its second — same fairness the Perplexity batch path uses. */
+function interleaveDedupe(groups: PplxResult[][]): PplxResult[] {
+  const maxDepth = Math.max(0, ...groups.map((g) => g.length));
+  const seen = new Set<string>();
+  const merged: PplxResult[] = [];
+  for (let depth = 0; depth < maxDepth; depth++) {
+    for (const group of groups) {
+      const r = group[depth];
+      if (r && !seen.has(r.url)) { seen.add(r.url); merged.push(r); }
+    }
+  }
+  return merged;
+}
+
+/** Octen /search — one query per request, all queries fired in PARALLEL.
+ *  Returns the same PplxResult[] contract as perplexitySearchBatch(). */
+export async function octenSearchBatch(
+  queries: string[],
+  opts?: { maxResultsPerQuery?: number; maxTokensPerPage?: number; recency?: 'day' | 'week' | 'month' | 'year' },
+): Promise<PplxResult[]> {
+  const key = getOctenKey();
+  const qs = [...new Set(queries.map((q) => q.trim()).filter(Boolean))];
+  if (!key || !qs.length) return [];
+  const responses = await Promise.all(qs.map((query) => octenRequest('search', {
+    query: query.slice(0, 500), // API caps query length at 500 chars
+    topic: 'general',
+    count: Math.min(20, Math.max(1, opts?.maxResultsPerQuery ?? 10)),
+    exclude_domains: octenExcludedDomains(),
+    highlight: { enable: true, max_tokens: 512 },
+    full_content: { enable: true, max_tokens: opts?.maxTokensPerPage ?? 1500 },
+    format: 'markdown',
+    // Recency only when a caller asks: ordinances and fee schedules are often
+    // old yet still adopted, so it is never applied blanket.
+    ...(opts?.recency ? { time_range: opts.recency } : {}),
+  }, key)));
+  return interleaveDedupe(responses.map(octenResultsToPplx));
+}
+
+/** Infer a document kind from the URL so extracted sources keep the same
+ *  labelling the Crawlee results carry. */
+function inferSourceKind(url: string): CrawleeResult['kind'] {
+  const path = url.split('?')[0].toLowerCase();
+  if (path.endsWith('.pdf')) return 'pdf';
+  if (path.endsWith('.docx') || path.endsWith('.doc')) return 'docx';
+  if (path.endsWith('.xlsx') || path.endsWith('.xls')) return 'xlsx';
+  if (path.endsWith('.csv')) return 'csv';
+  if (path.endsWith('.json')) return 'json';
+  if (path.endsWith('.txt')) return 'text';
+  return 'html';
+}
+
+/** Octen /extract — clean page/PDF/document content for a list of URLs.
+ *  Drop-in replacement for the Crawlee scraper; same CrawleeResult[] shape.
+ *  `query` is intentionally OMITTED: supplying it makes Octen return short
+ *  highlights instead of the full page, and the model needs the full text. */
+export async function octenExtractBatch(urls: string[], maxTargets = 8): Promise<CrawleeResult[]> {
+  const key = getOctenKey();
+  const targetLimit = Math.min(20, Math.max(4, maxTargets)); // API max is 20 URLs
+  const targets = [...new Set(urls.map((u) => u.trim()).filter(Boolean))].slice(0, targetLimit);
+  if (!key || !targets.length) return [];
+  const data = await octenRequest('extract', {
+    urls: targets,
+    format: 'markdown',
+    timeout: 30,
+    max_age_seconds: 86400,
+  }, key, 45000);
+  const rows: any[] = Array.isArray(data?.data?.results) ? data.data.results : [];
+  return rows
+    .filter((row: any) => row?.status === 'success' && row?.url && (row.full_content || row.highlights?.length))
+    .map((row: any): CrawleeResult => {
+      const content = String(row.full_content || (Array.isArray(row.highlights) ? row.highlights.join('\n') : ''));
+      return {
+        title: String(row.title || row.url),
+        url: String(row.url),
+        content,
+        snippet: content.slice(0, 400),
+        kind: inferSourceKind(String(row.url)),
+        date: row.time_published ? String(row.time_published).slice(0, 10) : undefined,
+      };
+    });
+}
+
+/** Octen /broad-search — decomposes ONE question into many sub-queries and
+ *  searches them all. Used for deep research passes where breadth matters more
+ *  than a fixed query list. `queries_and_search` mode skips Octen's own LLM
+ *  synthesis because the app already synthesizes with Gemini. */
+export async function octenBroadSearch(question: string, opts?: { maxQueries?: number; maxResultsPerQuery?: number }): Promise<PplxResult[]> {
+  const key = getOctenKey();
+  const q = String(question || '').trim();
+  if (!key || !q) return [];
+  const data = await octenRequest('broad-search', {
+    messages: [{ role: 'user', content: q }],
+    mode: 'queries_and_search',
+    max_queries: Math.min(30, Math.max(2, opts?.maxQueries ?? 8)),
+    web_search_options: {
+      count: Math.min(20, Math.max(1, opts?.maxResultsPerQuery ?? 6)),
+      exclude_domains: octenExcludedDomains(),
+      highlight: { enable: true, max_tokens: 400 },
+      full_content: { enable: true, max_tokens: 1500 },
+      format: 'markdown',
+    },
+  }, key, 60000);
+  const groups: any[] = Array.isArray(data?.search_results) ? data.search_results : [];
+  return interleaveDedupe(groups.map((group: any) => octenResultsToPplx({ results: group?.results })));
 }
 
 /** One POST to the Search API (one batch of up to 5 queries). Same-origin proxy
@@ -517,6 +734,16 @@ export async function perplexitySearchBatch(
   queries: string[],
   opts?: { maxResultsPerQuery?: number; maxTokensPerPage?: number; country?: string; recency?: 'day' | 'week' | 'month' | 'year' },
 ): Promise<PplxResult[]> {
+  // PROVIDER SWITCH. Every live-search call in the app funnels through here, so
+  // delegating when an Octen key is present replaces the Perplexity path
+  // everywhere — identical inputs, identical PplxResult[] output.
+  if (octenConfigured()) {
+    return octenSearchBatch(queries, {
+      maxResultsPerQuery: opts?.maxResultsPerQuery,
+      maxTokensPerPage: opts?.maxTokensPerPage,
+      recency: opts?.recency,
+    });
+  }
   const key = getPerplexityKey();
   const qs = queries.map((q) => q.trim()).filter(Boolean);
   if (!key || qs.length === 0) return [];
@@ -561,14 +788,26 @@ function formatPplxSources(results: PplxResult[], maxSources = 24, maxSnippetCha
 /** The research block injected into a Gemini prompt in place of Google-Search
  *  grounding: many ranked sources with extracted content. '' = nothing found. */
 async function perplexityResearchBlock(queries: string[], opts?: WebResearchOptions): Promise<{ block: string; urls: string[] }> {
-  const results = await perplexitySearchBatch(queries, { maxResultsPerQuery: opts?.maxResultsPerQuery ?? 6 });
+  let results = await perplexitySearchBatch(queries, { maxResultsPerQuery: opts?.maxResultsPerQuery ?? 6 });
+  // DEEP PASS: on 'hard' research Octen's Broad Search fans the lead question out
+  // into extra sub-queries, widening the source pool beyond the fixed query list.
+  if (opts?.mode === 'hard' && octenConfigured() && queries.length) {
+    const broad = await octenBroadSearch(queries[0], {
+      maxQueries: 8,
+      maxResultsPerQuery: opts?.maxResultsPerQuery ?? 6,
+    }).catch(() => [] as PplxResult[]);
+    if (broad.length) {
+      const seen = new Set(results.map((r) => r.url));
+      results = [...results, ...broad.filter((r) => !seen.has(r.url))];
+    }
+  }
   if (wantsCrawleeResearch(queries, opts)) {
     const crawled = await crawleeResearchBlock(results, queries, opts);
     if (crawled.block) return crawled;
   }
   if (!results.length) return { block: '', urls: [] };
   return {
-    block: `\n\nLIVE WEB SEARCH RESULTS (Perplexity Search API — ranked, current, with extracted page content). Base every figure on THESE sources and cite their URLs in "sources"; do not invent anything beyond them:\n\n${formatPplxSources(results, opts?.maxSources ?? 24)}`,
+    block: `\n\nLIVE WEB SEARCH RESULTS (${octenConfigured() ? 'Octen Search API' : 'Perplexity Search API'} — ranked, current, with extracted page content). Base every figure on THESE sources and cite their URLs in "sources"; do not invent anything beyond them:\n\n${formatPplxSources(results, opts?.maxSources ?? 24)}`,
     urls: results.map((r) => r.url),
   };
 }
