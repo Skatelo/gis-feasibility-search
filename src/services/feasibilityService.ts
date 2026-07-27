@@ -2392,6 +2392,13 @@ export async function executeLandAnalysis(
   let parcelFeature: any = null;
   let statePlaneFeature: any = null;
   let isSimulated = false;
+  // Set when a parcel service answers with an error body (auth/token/rate limit)
+  // rather than genuinely having no parcel at the point — the two must not look
+  // the same to the user.
+  let parcelServiceError = '';
+  // Explanation shown when SC yields no parcel record (declared early; appended
+  // to parcelConflicts once that list exists).
+  let scParcelUnavailableNote = '';
   const countyKeyLower = countyParcelLayerKey(countyName);
   const countyParcelLayer = countyParcelLayerFor(countyName, selectedState);
   const hasScLocalParcelLayer = selectedState === 'SC' &&
@@ -2485,6 +2492,18 @@ export async function executeLandAnalysis(
         try { wgs84Data = await wgsRes.value.json(); } catch { /* malformed body — treat as miss */ }
         if (spRes.status === 'fulfilled' && spRes.value.ok) {
           try { statePlaneData = await spRes.value.json(); } catch { /* optional — measurements only */ }
+        }
+        // An ArcGIS service can answer HTTP 200 with an ERROR BODY (e.g. code 499
+        // "Token Required" when a formerly public layer is locked down). With
+        // f=geojson that arrives as an empty FeatureCollection, so the app used to
+        // read a service outage as "no parcel at this point" and silently produced
+        // a blank record. Capture it so the failure is reported, not swallowed.
+        const svcErr = wgs84Data?.error || statePlaneData?.error;
+        if (svcErr) {
+          parcelServiceError = `${selectedState} parcel service error ${svcErr.code ?? ''}: ${svcErr.message || 'unknown'}`.trim();
+          console.warn(`Statewide ${selectedState} parcel service returned an error body:`, parcelServiceError);
+          wgs84Data = null;
+          statePlaneData = null;
         }
       } else {
         const err = wgsRes.status === 'rejected' ? wgsRes.reason : `HTTP ${wgsRes.value.status}`;
@@ -2602,6 +2621,12 @@ export async function executeLandAnalysis(
         geometry: null,
       };
       statePlaneFeature = null;
+      // Distinguish "the parcel service is refusing requests" from "this point has
+      // no parcel", so the card explains itself instead of showing a blank record.
+      // (Recorded here, appended once parcelConflicts is declared below.)
+      scParcelUnavailableNote = parcelServiceError
+        ? `The statewide SC parcel service did not return data (${parcelServiceError}). Owner and land details are unavailable from that source — zoning and the rest of the report still ran. Verify owner/acreage with the county assessor.`
+        : 'No parcel polygon was returned at this point by the county or statewide SC services, so owner and land details are unavailable. Zoning and the rest of the report still ran.';
     } else {
       console.log("Statewide GIS completely unresponsive and no local query succeeded. Generating deterministic simulated parcel outline.");
       const sim = generateSimulatedParcel(lng, lat, addressString, countyName);
@@ -2642,6 +2667,7 @@ export async function executeLandAnalysis(
   }
 
   const parcelConflicts: string[] = [];
+  if (scParcelUnavailableNote) parcelConflicts.push(scParcelUnavailableNote);
   const rawCountyGisScRecord = selectedState === 'SC'
     ? officialRecordFromCountyGis(countyName, info)
     : null;
@@ -3123,7 +3149,11 @@ export async function executeLandAnalysis(
   // Search, then let Gemini 3.6 Flash read only those result URLs and populate
   // the existing Zoning & Allowances card.
   let resolvedPostalAddress = baseResult.inputAddress;
-  {
+  // Zoning is INDEPENDENT of the parcel record: it resolves from the geocoded
+  // point + full postal address, so it must still run when the parcel service
+  // returned nothing (common in SC when the statewide layer is unavailable).
+  // The try/catch guarantees a zoning failure can never abort the whole report.
+  try {
     onStageChange?.("Searching zoning for the full address...");
     // The searched/selected text is frequently street-only (an NC statewide
     // geocoder suggestion especially), which left the zoning lookup with just
@@ -3369,6 +3399,17 @@ export async function executeLandAnalysis(
       if (zoningStandardsStatus === 'resolving') zoningStandardsStatus = 'unavailable';
       if (zoningSetbacksStatus === 'resolving') zoningSetbacksStatus = 'unavailable';
       if (researchError) zoningTextReport = researchError;
+    }
+  } catch (zoningError) {
+    // Never let a zoning exception kill the run — the rest of the report is
+    // still valuable, and the card explains why zoning is missing.
+    const detail = zoningError instanceof Error ? zoningError.message : String(zoningError);
+    console.warn('Zoning stage failed:', detail);
+    if (!zoningCode) {
+      zoningDescription = `Zoning lookup failed for this address (${detail}).`;
+      zoningVerificationStatus = 'unavailable';
+      if (zoningStandardsStatus === 'resolving') zoningStandardsStatus = 'unavailable';
+      if (zoningSetbacksStatus === 'resolving') zoningSetbacksStatus = 'unavailable';
     }
   }
 
