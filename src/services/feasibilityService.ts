@@ -2254,6 +2254,48 @@ async function lookupScParcelById(
     : null;
 }
 
+/**
+ * Ask the server to auto-discover this SC county's OWN official parcel layer and
+ * return the parcel at the point. Used only after the county-configured and
+ * statewide layers have both missed — the statewide SCDOT service is token-gated,
+ * which otherwise leaves those addresses with no owner or land details at all.
+ *
+ * The server verifies the publisher AND requires the layer to return a
+ * parcel-shaped record at the exact coordinate, so a namesake county in another
+ * state (Union NJ, Richland WI, York VA — all real entries in the ArcGIS catalog)
+ * yields nothing rather than wrong data. Attributes flow through
+ * normalizeCountyParcelAttrs(), which already maps arbitrary county field names.
+ */
+async function discoverScParcelFeature(countyName: string, lng: number, lat: number): Promise<any | null> {
+  try {
+    const res = await fetchWithTimeout('/.netlify/functions/sc-parcel-discover', 28000, {
+      method: 'POST',
+      cache: 'no-store',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify({ county: countyBaseName(countyName), lng, lat }),
+    });
+    if (!res.ok) return null;
+    const payload = await res.json();
+    const found = payload?.data;
+    if (!found?.attributes) return null;
+    const rings = Array.isArray(found.rings) ? found.rings : null;
+    return {
+      type: 'Feature',
+      properties: {
+        ...found.attributes,
+        cntyname: `${countyBaseName(countyName)}, SC`,
+        // Marked as county GIS because that is what it is — the county's own
+        // published layer, located automatically instead of hard-coded.
+        recordsource: 'county-gis',
+        discoveredSourceUrl: `${found.serviceUrl}/${found.layerId}`,
+      },
+      geometry: rings ? { type: 'Polygon', coordinates: rings } : null,
+    };
+  } catch {
+    return null;
+  }
+}
+
 /** Parcel-ID lookup across both states. NC (parno) and SC (T_Map_Number) live on
  *  different services, so query both in parallel and reject ambiguous matches.
  *  A formatting difference never selects one jurisdiction over another. */
@@ -2615,6 +2657,18 @@ export async function executeLandAnalysis(
       throw new Error(`No GIS record matching parcel ID "${knownParcel?.enteredParcelId || expectedParcelIds[0]}" could be verified. No neighboring parcel owner was used.`);
     }
     if (selectedState === 'SC') {
+      // LAST REAL ATTEMPT: auto-discover this county's own official parcel layer.
+      // The statewide SCDOT layer is token-gated, and only some counties have a
+      // hard-coded endpoint, so discovery recovers owner/land details for the
+      // rest. It returns null unless a verified county layer actually answers
+      // with a parcel AT this point, so it can never substitute another county's
+      // (or another state's) record.
+      const discovered = await discoverScParcelFeature(countyName, lng, lat);
+      if (discovered) {
+        parcelFeature = discovered;
+        statePlaneFeature = null;
+        console.log(`${countyName} parcel resolved via auto-discovered county layer.`);
+      } else {
       parcelFeature = {
         type: 'Feature',
         properties: { parno: 'N/A', ownname: 'N/A', cntyname: `${countyBaseName(countyName)}, SC`, recordsource: 'unavailable' },
@@ -2625,8 +2679,9 @@ export async function executeLandAnalysis(
       // no parcel", so the card explains itself instead of showing a blank record.
       // (Recorded here, appended once parcelConflicts is declared below.)
       scParcelUnavailableNote = parcelServiceError
-        ? `The statewide SC parcel service did not return data (${parcelServiceError}). Owner and land details are unavailable from that source — zoning and the rest of the report still ran. Verify owner/acreage with the county assessor.`
-        : 'No parcel polygon was returned at this point by the county or statewide SC services, so owner and land details are unavailable. Zoning and the rest of the report still ran.';
+        ? `The statewide SC parcel service did not return data (${parcelServiceError}), and no official ${countyBaseName(countyName)} County parcel layer could be verified automatically. Owner and land details are unavailable — zoning and the rest of the report still ran. Verify owner/acreage with the county assessor.`
+        : `No parcel polygon was returned at this point by the county or statewide SC services, and no official ${countyBaseName(countyName)} County parcel layer could be verified automatically. Owner and land details are unavailable. Zoning and the rest of the report still ran.`;
+      }
     } else {
       console.log("Statewide GIS completely unresponsive and no local query succeeded. Generating deterministic simulated parcel outline.");
       const sim = generateSimulatedParcel(lng, lat, addressString, countyName);
