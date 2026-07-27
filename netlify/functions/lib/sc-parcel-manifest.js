@@ -27,6 +27,9 @@ export const SC_PARCEL_LAYERS = {
   lee: { url: 'https://services5.arcgis.com/zg6ovB2KKN8L0zFv/arcgis/rest/services/Web_Parcels/FeatureServer', layer: 0 },
   lexington: { url: 'https://maps.lex-co.com/agstserver/rest/services/Property/MapServer', layer: 4 },
   oconee: { url: 'https://arcserver2.oconeesc.com/arcgis/rest/services/PARCELDATA/MapServer', layer: 1 },
+  // Recovered by mining the county's configured viewer app rather than the
+  // ArcGIS catalog, which does not index it.
+  orangeburg: { url: 'https://services2.arcgis.com/bUKn95BqgpYYTnx3/arcgis/rest/services/Main_Public_Tax_Parcel_Map_WFL1/FeatureServer', layer: 0 },
   pickens: { url: 'https://services1.arcgis.com/59960rq18IxUcAVI/arcgis/rest/services/par_density/FeatureServer', layer: 0 },
   spartanburg: { url: 'https://services9.arcgis.com/HoRra3ATPLGmyjn6/arcgis/rest/services/Spartanburg_County_Parcels_1_7_2019/FeatureServer', layer: 0 },
   york: { url: 'https://services1.arcgis.com/2AGLxyiJoNiVHKwq/arcgis/rest/services/Parcels/FeatureServer', layer: 0 },
