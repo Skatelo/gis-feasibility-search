@@ -2266,44 +2266,6 @@ async function lookupScParcelById(
  * yields nothing rather than wrong data. Attributes flow through
  * normalizeCountyParcelAttrs(), which already maps arbitrary county field names.
  */
-/**
- * Statewide SCDOT parcel lookup via the token-authenticated endpoint. SCDOT
- * secured SC_Parcels (every anonymous request returns 499 Token Required), so
- * this only works when SCDOT_USERNAME/SCDOT_PASSWORD (or SCDOT_TOKEN) are set as
- * Netlify environment variables. Credentials stay server-side. Returns null when
- * unconfigured so the county auto-discovery fallback runs unchanged.
- */
-async function fetchScStatewideParcelWithToken(countyName: string, lng: number, lat: number): Promise<any | null> {
-  try {
-    const res = await fetchWithTimeout('/.netlify/functions/sc-statewide-parcel', 20000, {
-      method: 'POST',
-      cache: 'no-store',
-      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-      body: JSON.stringify({ lng, lat }),
-    });
-    if (!res.ok) return null;
-    const payload = await res.json();
-    if (payload?.configured === false) return null; // no credentials — expected
-    if (payload?.error) { console.warn('SCDOT statewide parcel:', payload.error); return null; }
-    const found = payload?.data;
-    if (!found?.attributes) return null;
-    const rings = Array.isArray(found.rings) ? found.rings : null;
-    return {
-      type: 'Feature',
-      properties: {
-        ...found.attributes,
-        cntyname: String(found.attributes.County || '').trim()
-          ? `${String(found.attributes.County).trim()}, SC`
-          : `${countyBaseName(countyName)}, SC`,
-        recordsource: 'scdot',
-      },
-      geometry: rings ? { type: 'Polygon', coordinates: rings } : null,
-    };
-  } catch {
-    return null;
-  }
-}
-
 async function discoverScParcelFeature(countyName: string, lng: number, lat: number): Promise<any | null> {
   try {
     const res = await fetchWithTimeout('/.netlify/functions/sc-parcel-discover', 28000, {
@@ -2701,15 +2663,11 @@ export async function executeLandAnalysis(
       // rest. It returns null unless a verified county layer actually answers
       // with a parcel AT this point, so it can never substitute another county's
       // (or another state's) record.
-      // (a) SCDOT statewide layer via authenticated token, when credentials are
-      //     configured — this covers all 46 counties in one shot.
-      const tokened = await fetchScStatewideParcelWithToken(countyName, lng, lat);
-      // (b) Otherwise auto-discover the county's own official parcel layer.
-      const discovered = tokened || await discoverScParcelFeature(countyName, lng, lat);
+      const discovered = await discoverScParcelFeature(countyName, lng, lat);
       if (discovered) {
         parcelFeature = discovered;
         statePlaneFeature = null;
-        console.log(`${countyName} parcel resolved via ${tokened ? 'authenticated SCDOT statewide layer' : 'auto-discovered county layer'}.`);
+        console.log(`${countyName} parcel resolved via auto-discovered county layer.`);
       } else {
       parcelFeature = {
         type: 'Feature',
