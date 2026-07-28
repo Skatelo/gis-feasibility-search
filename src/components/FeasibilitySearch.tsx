@@ -4,8 +4,8 @@ import { createRoot } from 'react-dom/client';
 import { executeLandAnalysis, chatWithGemini, chatFollowUp, getUserKeys, getMapboxToken, getRealEstateApiKey, detectNcCounty, lookupParcelById, fetchConstructionCostEstimate, fetchLandClearingEstimate, fetchUtilitiesEstimate, fetchGoogleDistanceMatrixComps, fetchParcelsInBbox, getCompPrefs, getReportAutoGenerate, clearAddressSearchCache, enformionConfigured, enformionContactEnrich, enformionPersonSearch, enformionBusinessSearch, looksLikeBusiness, enformionDiagMessage, getLastEnformionShape, getLastEnformionDetail, ncAddressSuggestions } from '../services/feasibilityService';
 import type { ParcelIdLookupResult, SkipTraceContact } from '../services/feasibilityService';
 import type { ChatMessage, ChatAttachment } from '../services/feasibilityService';
-import { fetchRealEstatePropertyTransactions } from '../services/realEstateApiProperty';
-import type { RealEstatePropertyTransactions } from '../services/realEstateApiProperty';
+import { fetchRealEstatePropertyTransactions, fetchRealEstateOwnerDetails } from '../services/realEstateApiProperty';
+import type { RealEstatePropertyTransactions, RealEstateOwnerDetails } from '../services/realEstateApiProperty';
 import { resolveFullCarolinaPostalAddress } from '../services/carolinaAddress';
 import { saveReport, getReportEtaMs, recordReportDuration } from '../services/reportStore';
 import { listConversations, saveConversation, deleteConversation as deleteConvo, newConversationId, deriveTitle } from '../services/chatStore';
@@ -827,6 +827,11 @@ export const FeasibilitySearch: FC = () => {
   const [ownerSkip, setOwnerSkip] = useState<SkipTraceContact | null>(null);
   const [ownerSkipLoading, setOwnerSkipLoading] = useState(false);
   const [ownerSkipError, setOwnerSkipError] = useState('');
+  // On-demand owner/land lookup (paid RealEstateAPI call) for parcels where
+  // county GIS returned no owner — most SC assessor portals block server access.
+  const [ownerLookup, setOwnerLookup] = useState<RealEstateOwnerDetails | null>(null);
+  const [ownerLookupLoading, setOwnerLookupLoading] = useState(false);
+  const [ownerLookupError, setOwnerLookupError] = useState('');
   // Comps display/search filters
   const [compRadius, setCompRadius] = useState(5);          // max DRIVING-mile radius (1 / 3 / 5 / 10) — re-fetches
   const [compTypeFilter, setCompTypeFilter] = useState('all'); // property-type display filter
@@ -1072,6 +1077,35 @@ export const FeasibilitySearch: FC = () => {
       );
     } finally {
       if (seq === searchSeqRef.current) setPropertyTransactionsLoading(false);
+    }
+  };
+
+  /**
+   * ON-DEMAND owner + land lookup (RealEstateAPI public records).
+   *
+   * Gap-filler for counties whose parcel data is not publicly queryable — most
+   * SC assessor portals sit behind Cloudflare and refuse server requests, so GIS
+   * returns no owner. This is a PAID call, so it only runs when the user clicks.
+   */
+  const lookupOwnerRecords = async () => {
+    if (!data) return;
+    setOwnerLookupError('');
+    setOwnerLookupLoading(true);
+    try {
+      const fullAddress = await resolveFullCarolinaPostalAddress({
+        addresses: [searchedAddressRef.current, data.inputAddress],
+        coordinates: data.coordinates,
+        countyName: data.countyName,
+        googleMapsKey: getUserKeys().googleMaps,
+      });
+      const details = await fetchRealEstateOwnerDetails(fullAddress, getRealEstateApiKey());
+      setOwnerLookup(details);
+    } catch (error) {
+      setOwnerLookupError(
+        error instanceof Error ? error.message : 'The owner lookup failed. Retry this on-demand request.',
+      );
+    } finally {
+      setOwnerLookupLoading(false);
     }
   };
 
@@ -3732,6 +3766,100 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                     </div>
                     {data.parcelSourceUrl && <a href={data.parcelSourceUrl} target="_blank" rel="noreferrer">Official record</a>}
                   </div>
+
+                  {/* Look up owner (RealEstateAPI) — shown when county GIS has no
+                      owner, which is normal for SC counties whose assessor
+                      portals block automated access. Paid, so it never runs on
+                      its own. */}
+                  {!data.ownerName && (
+                    <div className="owner-skip">
+                      <button
+                        type="button"
+                        className="owner-skip-btn"
+                        onClick={lookupOwnerRecords}
+                        disabled={ownerLookupLoading}
+                        title="Optional paid lookup: this consumes RealEstateAPI credits"
+                      >
+                        {ownerLookupLoading ? <Loader2 size={14} className="spinner" /> : <User size={14} />}
+                        {ownerLookupLoading ? 'Looking up owner…' : 'Look up Owner & Land (Paid)'}
+                      </button>
+                      {ownerLookupError && (
+                        <div className="owner-skip-error">
+                          {ownerLookupError}
+                          <button type="button" className="link-btn" onClick={lookupOwnerRecords}>Retry</button>
+                        </div>
+                      )}
+                      {ownerLookup && (
+                        <div className="owner-skip-result">
+                          <div className="registry-row">
+                            <span className="field-label">Owner</span>
+                            <strong className="field-value">{ownerLookup.ownerName || 'Not in public records'}</strong>
+                          </div>
+                          {ownerLookup.ownerSecondName && (
+                            <div className="registry-row">
+                              <span className="field-label">Co-owner</span>
+                              <strong className="field-value">{ownerLookup.ownerSecondName}</strong>
+                            </div>
+                          )}
+                          {ownerLookup.mailingAddress && (
+                            <div className="registry-row">
+                              <span className="field-label">Mailing</span>
+                              <strong className="field-value address-text-break">{ownerLookup.mailingAddress}</strong>
+                            </div>
+                          )}
+                          {ownerLookup.parcelId && (
+                            <div className="registry-row">
+                              <span className="field-label">Parcel id (APN)</span>
+                              <strong className="field-value">{ownerLookup.parcelId}</strong>
+                            </div>
+                          )}
+                          {(ownerLookup.lotAcres || ownerLookup.lotSquareFeet) && (
+                            <div className="registry-row">
+                              <span className="field-label">Lot size</span>
+                              <strong className="field-value">
+                                {ownerLookup.lotAcres ? `${ownerLookup.lotAcres.toLocaleString()} ac` : ''}
+                                {ownerLookup.lotAcres && ownerLookup.lotSquareFeet ? ' · ' : ''}
+                                {ownerLookup.lotSquareFeet ? `${ownerLookup.lotSquareFeet.toLocaleString()} SF` : ''}
+                              </strong>
+                            </div>
+                          )}
+                          {ownerLookup.landUse && (
+                            <div className="registry-row">
+                              <span className="field-label">Land use</span>
+                              <strong className="field-value">{ownerLookup.landUse}</strong>
+                            </div>
+                          )}
+                          {ownerLookup.zoning && (
+                            <div className="registry-row">
+                              <span className="field-label">Zoning (records)</span>
+                              <strong className="field-value">{ownerLookup.zoning}</strong>
+                            </div>
+                          )}
+                          {ownerLookup.assessedValue != null && (
+                            <div className="registry-row">
+                              <span className="field-label">Assessed value</span>
+                              <strong className="field-value">${ownerLookup.assessedValue.toLocaleString()}</strong>
+                            </div>
+                          )}
+                          {ownerLookup.taxAmount != null && (
+                            <div className="registry-row">
+                              <span className="field-label">Tax{ownerLookup.taxYear ? ` (${ownerLookup.taxYear})` : ''}</span>
+                              <strong className="field-value">${ownerLookup.taxAmount.toLocaleString()}</strong>
+                            </div>
+                          )}
+                          {ownerLookup.legalDescription && (
+                            <div className="registry-row">
+                              <span className="field-label">Legal</span>
+                              <strong className="field-value address-text-break">{ownerLookup.legalDescription}</strong>
+                            </div>
+                          )}
+                          <p className="field-help">
+                            Public records via RealEstateAPI for {ownerLookup.matchedAddress}. Verify against the county assessor before relying on it.
+                          </p>
+                        </div>
+                      )}
+                    </div>
+                  )}
 
                   {/* Skip Trace Owner (Enformion) — phones & emails for this owner */}
                   <div className="owner-skip">
