@@ -837,6 +837,10 @@ export const FeasibilitySearch: FC = () => {
   const [compTypeFilter, setCompTypeFilter] = useState('all'); // property-type display filter
   const [compsShowAll, setCompsShowAll] = useState(false);  // show the nearest 10 vs. every result
   const [compsRefetching, setCompsRefetching] = useState(false);
+  // Search seq whose comps the user has manually overridden with a radius re-run.
+  // The original search's STAGE-4 comps can land AFTER a radius re-fetch and would
+  // otherwise clobber it, making the radius buttons look like they did nothing.
+  const compsOverrideSeqRef = useRef(-1);
   const [compsError, setCompsError] = useState('');         // radius re-run failure (card shows the reason)
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [history, setHistory] = useState<any[]>([]);
@@ -1178,11 +1182,18 @@ export const FeasibilitySearch: FC = () => {
     setCompsShowAll(false);
     setCompsError('');
     const d = data;
-    if (!d || !d.coordinates) return;
+    // Say why nothing happened instead of silently no-oping with the pill lit.
+    if (!d || !d.coordinates) {
+      setCompsError('This parcel has no resolved coordinates, so a comps search can\'t run. Re-run the address search first.');
+      return;
+    }
     const seq = searchSeqRef.current;
     const zoningCanDriveComps = !['review-required', 'planning-designation', 'unavailable'].includes(String(d.zoningVerificationStatus))
       && !/^(manual review|official map review|zoning code unresolved|land use:|no adopted district)/i.test(String(d.zoningCode || ''));
     setCompsRefetching(true);
+    // Claim the comps for this search so a late STAGE-4 emission can't overwrite
+    // the radius the user just chose.
+    compsOverrideSeqRef.current = seq;
     try {
       const run = await fetchGoogleDistanceMatrixComps(
         d.coordinates.lat,
@@ -1204,7 +1215,11 @@ export const FeasibilitySearch: FC = () => {
       console.warn('Comp radius re-fetch failed:', e);
       if (seq === searchSeqRef.current) setCompsError(`The ${newRadius}-mile comps run failed (${e?.message || 'network/API error'}) — the previous comp set is still shown. Tap a radius to retry.`);
     } finally {
-      if (seq === searchSeqRef.current) setCompsRefetching(false);
+      // ALWAYS clear the in-flight flag. Gating it on the sequence meant a run
+      // superseded by a new search left compsRefetching stuck true forever,
+      // which disabled every radius pill and made changeCompRadius early-return
+      // — the radius buttons silently stopped working for the rest of the session.
+      setCompsRefetching(false);
     }
   };
 
@@ -3110,6 +3125,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
     setCompsShowAll(false);
     setCompsRefetching(false);
     setCompsError('');
+    compsOverrideSeqRef.current = -1; // fresh search owns its own comps again
     resetChatUiState();
 
     // Progressive loading: merge each partial emission into view state the
@@ -3118,7 +3134,15 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
     let current: SiteFeasibilityData | null = null;
     const onPartial = (partial: Partial<SiteFeasibilityData>) => {
       if (seq !== searchSeqRef.current) return; // superseded search — discard
-      current = current ? { ...current, ...partial } : (partial as SiteFeasibilityData);
+      let incoming = partial;
+      // If the user re-ran comps at a different radius, DROP the original run's
+      // late comps instead of overwriting their choice.
+      if (compsOverrideSeqRef.current === seq && ('comps' in partial || 'compRunSummary' in partial || 'compDateWindow' in partial)) {
+        const { comps: _c, compRunSummary: _s, compDateWindow: _w, ...rest } = partial as Record<string, unknown>;
+        incoming = rest as Partial<SiteFeasibilityData>;
+        if (Object.keys(incoming).length === 0) return;
+      }
+      current = current ? { ...current, ...incoming } : (incoming as SiteFeasibilityData);
       setData(current);
     };
 
