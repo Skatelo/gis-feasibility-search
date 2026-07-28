@@ -168,6 +168,9 @@ export interface ClearingMethod {
  *  figure is kept for comparison on large forested tracts. */
 export interface LandClearingEstimate {
   acres: number;
+  /** True when county GIS had no acreage and a default analysis area was used.
+   *  Tree counts still come from real imagery; bulk totals scale with acreage. */
+  acreageAssumed?: boolean;
   canopyCoverPct: number | null;   // AI tree-canopy cover (0–100)
   density: 'light' | 'medium' | 'heavy';
   treeCount: number;               // total trees to remove

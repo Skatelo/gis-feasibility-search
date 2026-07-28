@@ -8083,6 +8083,11 @@ function buildClearingMethods(
   ].filter((method) => method.low > 0 && method.high > 0);
 }
 
+/** Analysis area used when the parcel's acreage is unknown. Sized to a typical
+ *  suburban/rural homesite so the satellite crop frames the property; the result
+ *  is flagged so the UI can say the area was assumed. */
+const DEFAULT_ANALYSIS_ACRES = 1;
+
 /**
  * Land-clearing estimate by TREE COUNT × current local per-tree removal cost:
  * Gemini Vision counts the trees (by size) on a satellite crop, rates are pulled
@@ -8093,9 +8098,18 @@ function buildClearingMethods(
 export async function fetchLandClearingEstimate(reportData: SiteFeasibilityData): Promise<LandClearingEstimate | null> {
   const keys = getUserKeys();
   if (!keys.googleMaps || !keys.gemini) throw new Error('Add your Google Maps + Gemini API keys in Account Settings to run the tree/clearing estimate on this device.');
-  const acres = Number(reportData.gisAcres);
   const lat = reportData.coordinates?.lat, lng = reportData.coordinates?.lng;
-  if (!(acres > 0) || typeof lat !== 'number' || typeof lng !== 'number') throw new Error('The parcel\'s acreage or coordinates are unavailable, so the satellite tree count can\'t run for this address.');
+  // COORDINATES are the only hard requirement — they drive the satellite crop.
+  if (typeof lat !== 'number' || typeof lng !== 'number') {
+    throw new Error('This address has no resolved coordinates, so the satellite tree count can\'t run.');
+  }
+  // Acreage is a SOFT input: it only sets the crop zoom and scales bulk pricing.
+  // Parcels whose county GIS record is unavailable (common in SC, where the
+  // statewide layer is token-gated) still get a real tree count on an assumed
+  // analysis area, clearly labelled, instead of the card refusing to run.
+  const reportedAcres = Number(reportData.gisAcres);
+  const acreageAssumed = !(reportedAcres > 0);
+  const acres = acreageAssumed ? DEFAULT_ANALYSIS_ACRES : reportedAcres;
 
   const zoom = landZoomForAcres(acres);
   const satelliteUrl = `https://maps.googleapis.com/maps/api/staticmap?center=${lat},${lng}&zoom=${zoom}&size=600x600&scale=2&maptype=satellite&key=${keys.googleMaps}`;
@@ -8159,6 +8173,9 @@ export async function fetchLandClearingEstimate(reportData: SiteFeasibilityData)
   const haulHigh = r.haulOffHigh;
   const visionCanopyPct = canopyPctValue(vision.canopyPct);
   const nothingToClear = treeCount <= 0 && visionCanopyPct < 3;
+  const acreageNote = acreageAssumed
+    ? `Parcel acreage was unavailable from county GIS, so this uses an assumed ${DEFAULT_ANALYSIS_ACRES}-acre analysis area around the property. The tree count is read from real imagery; the bulk-clearing totals scale with acreage, so confirm lot size and re-run for exact pricing.`
+    : '';
   const clearingFactors = nothingToClear
     ? [
         'No trees or meaningful canopy were detected on the parcel imagery, so no tree removal or bulk clearing is budgeted. Only grading/grubbing of grass and brush would apply.',
@@ -8176,6 +8193,8 @@ export async function fetchLandClearingEstimate(reportData: SiteFeasibilityData)
           : 'Haul-off: no current sourced debris-hauling allowance was found.',
         `Priced on the ~${(Math.round(acres * woodedShareOf(visionCanopyPct) * 100) / 100).toLocaleString()} wooded acres (of ${(Math.round(acres * 100) / 100).toLocaleString()} total) at ${vision.density || 'observed'} density — not the whole parcel.`,
       ];
+  // Lead with the caveat so an assumed-area estimate is never read as measured.
+  if (acreageNote) clearingFactors.unshift(acreageNote);
   const imagerySources = [
     `https://www.google.com/maps/@${lat},${lng},19z/data=!3m1!1e3`,
     ...(streetViewUrl ? [`https://www.google.com/maps?layer=c&cbll=${lat},${lng}`] : []),
@@ -8183,6 +8202,7 @@ export async function fetchLandClearingEstimate(reportData: SiteFeasibilityData)
 
   return {
     acres: Math.round(acres * 100) / 100,
+    acreageAssumed,
     canopyCoverPct: vision.canopyPct,
     density: vision.density,
     treeCount,
