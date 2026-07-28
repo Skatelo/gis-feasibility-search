@@ -1211,14 +1211,17 @@ export const FeasibilitySearch: FC = () => {
   // Skip trace the parcel owner via Enformion (phones/emails). GIS owner names are
   // surname-first, so split before the (first-last) Enformion lookup.
   const skipTraceOwner = async () => {
-    const name = (data?.ownerName || '').trim();
+    // Fall back to the on-demand RealEstateAPI owner when county GIS had none —
+    // that is the whole point of the "Look up Owner & Land" button, and it makes
+    // skip tracing usable on the SC counties with no queryable parcel data.
+    const name = (data?.ownerName || ownerLookup?.ownerName || '').trim();
     if (!name || ownerSkipLoading) return;
     if (!enformionConfigured()) { setOwnerSkipError('Add your Enformion AP Name & Password in Account Settings first.'); return; }
     setOwnerSkipLoading(true);
     setOwnerSkipError('');
     setOwnerSkip(null);
     try {
-      const addr = data?.mailingAddress || undefined;
+      const addr = data?.mailingAddress || ownerLookup?.mailingAddress || undefined;
       const first = (data?.ownerFirst || '').trim();
       const last = (data?.ownerLast || '').trim();
       const ok = (x: SkipTraceContact | null) => !!(x && (x.phones.length || x.emails.length));
@@ -3096,6 +3099,11 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
     setOwnerSkip(null);
     setOwnerSkipError('');
     setOwnerSkipLoading(false);
+    // Clear the on-demand owner too, so a looked-up owner from the PREVIOUS
+    // address can never be skip-traced against the new one.
+    setOwnerLookup(null);
+    setOwnerLookupError('');
+    setOwnerLookupLoading(false);
     setReportPending(false);
     setCompRadius(compPrefs.radiusMiles);
     setCompTypeFilter(compPrefs.propertyType);
@@ -3863,9 +3871,19 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
 
                   {/* Skip Trace Owner (Enformion) — phones & emails for this owner */}
                   <div className="owner-skip">
-                    <button type="button" className="owner-skip-btn" onClick={skipTraceOwner} disabled={ownerSkipLoading || !data.ownerName} title="Optional paid lookup: this may consume Enformion credits">
+                    <button
+                      type="button"
+                      className="owner-skip-btn"
+                      onClick={skipTraceOwner}
+                      disabled={ownerSkipLoading || !(data.ownerName || ownerLookup?.ownerName)}
+                      title={data.ownerName || ownerLookup?.ownerName
+                        ? 'Optional paid lookup: this may consume Enformion credits'
+                        : 'Run "Look up Owner & Land" first to get an owner name for this parcel'}
+                    >
                       {ownerSkipLoading ? <Loader2 size={14} className="spinner" /> : <Fingerprint size={14} />}
-                      {ownerSkipLoading ? 'Skip tracing…' : 'Skip Trace Owner (Paid)'}
+                      {ownerSkipLoading
+                        ? 'Skip tracing…'
+                        : `Skip Trace Owner (Paid)${!data.ownerName && ownerLookup?.ownerName ? ' — uses looked-up owner' : ''}`}
                     </button>
                     {ownerSkip && (ownerSkip.phones.length > 0 || ownerSkip.emails.length > 0 || (ownerSkip.officers && ownerSkip.officers.length > 0) || (ownerSkip.relatives && ownerSkip.relatives.length > 0)) && (
                       <div className="owner-skip-result">
