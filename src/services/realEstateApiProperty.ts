@@ -446,3 +446,141 @@ export async function fetchRealEstatePropertyTransactions(
   }
   return parseRealEstatePropertyTransactions(lookup.result.payload, normalizedAddress);
 }
+
+/** Owner + land facts recovered from public records when county GIS has none. */
+export interface RealEstateOwnerDetails {
+  matchedAddress: string;
+  ownerName?: string;
+  ownerSecondName?: string;
+  mailingAddress?: string;
+  ownerOccupied?: boolean;
+  parcelId?: string;
+  legalDescription?: string;
+  lotSquareFeet?: number;
+  lotAcres?: number;
+  landUse?: string;
+  zoning?: string;
+  assessedValue?: number;
+  assessedLandValue?: number;
+  marketValue?: number;
+  taxAmount?: number;
+  taxYear?: number;
+  fetchedAt: string;
+}
+
+/**
+ * Owner and land details from RealEstateAPI PropertyDetail — the gap-filler for
+ * SC counties whose parcel data is not publicly queryable (their assessor
+ * portals sit behind Cloudflare, verified returning HTTP 403 server-side).
+ *
+ * Called ON DEMAND from the "Look up owner" button, never automatically, because
+ * each request consumes account credits.
+ */
+export async function fetchRealEstateOwnerDetails(
+  address: string,
+  apiKey = '',
+  fetcher: FetchLike = fetch,
+): Promise<RealEstateOwnerDetails> {
+  const normalizedAddress = normalizeRealEstateApiAddress(address);
+  if (!normalizedAddress || !/\b(?:NC|SC)\b/i.test(normalizedAddress)) {
+    throw new RealEstateApiError('A full North Carolina or South Carolina address is required.', 400);
+  }
+
+  const headers: Record<string, string> = { Accept: 'application/json', 'Content-Type': 'application/json' };
+  if (apiKey.trim()) headers['x-api-key'] = apiKey.trim();
+  const addressParts = realEstateApiAddressParts(normalizedAddress);
+
+  const request = async (requestBody: { address: string } | RealEstateApiAddressParts) => {
+    const init: RequestInit = {
+      method: 'POST',
+      cache: 'no-store',
+      headers,
+      body: JSON.stringify({ ...requestBody, exact_match: true, comps: false }),
+    };
+    let response = await fetcher(REAL_ESTATE_API_PROPERTY_DETAIL_PROXY, init);
+    let result = await readResponse(response);
+    const contentType = response.headers.get('content-type') || '';
+    const proxyMissing = !contentType.includes('json') && /^\s*</.test(result.raw);
+    if (proxyMissing && apiKey.trim()) {
+      response = await fetcher(REAL_ESTATE_API_PROPERTY_DETAIL_URL, { ...init });
+      result = await readResponse(response);
+    }
+    return { response, result };
+  };
+
+  let lookup = await request({ address: normalizedAddress });
+  if (!lookup.response.ok) {
+    if (!addressParts || (lookup.response.status !== 400 && lookup.response.status !== 404)) {
+      throw new RealEstateApiError(
+        errorMessage(lookup.response.status, lookup.result.payload, lookup.result.raw),
+        lookup.response.status,
+      );
+    }
+    lookup = await request(addressParts);
+    if (!lookup.response.ok) {
+      throw new RealEstateApiError(
+        errorMessage(lookup.response.status, lookup.result.payload, lookup.result.raw),
+        lookup.response.status,
+      );
+    }
+  }
+  return parseRealEstateOwnerDetails(lookup.result.payload, normalizedAddress);
+}
+
+/** Map a PropertyDetail payload onto the owner/land fields the report shows. */
+export function parseRealEstateOwnerDetails(
+  payload: unknown,
+  requestedAddress: string,
+  fetchedAt = new Date().toISOString(),
+): RealEstateOwnerDetails {
+  const root = responseData(payload);
+  const matchedAddressObject = propertyAddress(root);
+  const returnedAddress = addressLabel(matchedAddressObject);
+  if (returnedAddress) {
+    assertExactAddress(requestedAddress, matchedAddressObject);
+  } else if (!hasPropertyRecord(root)) {
+    throw new RealEstateApiError('RealEstateAPI returned no property record for this address.', 404);
+  }
+
+  // The endpoint returns camelCase or snake_case depending on the record, so
+  // accept both — the same defensive pattern the transactions parser uses.
+  const owner = objectValue(root.ownerInfo || root.owner_info);
+  const lot = objectValue(root.lotInfo || root.lot_info);
+  const tax = objectValue(root.taxInfo || root.tax_info);
+  const propertyInfo = objectValue(root.propertyInfo || root.property_info);
+  const mail = objectValue(owner.mailAddress || owner.mail_address);
+
+  const text = (value: unknown): string | undefined => {
+    const v = String(value ?? '').trim();
+    return v && v.toLowerCase() !== 'null' ? v : undefined;
+  };
+  const num = (value: unknown): number | undefined => {
+    const n = Number(String(value ?? '').replace(/[^0-9.-]/g, ''));
+    return Number.isFinite(n) && n !== 0 ? n : undefined;
+  };
+
+  const lotSquareFeet = num(lot.lotSquareFeet ?? lot.lot_square_feet);
+  const lotAcresRaw = num(lot.lotAcres ?? lot.lot_acres);
+  const lotAcres = lotAcresRaw ?? (lotSquareFeet ? Math.round((lotSquareFeet / 43560) * 1000) / 1000 : undefined);
+
+  return {
+    matchedAddress: returnedAddress || normalizeRealEstateApiAddress(requestedAddress),
+    ownerName: text(owner.owner1FullName ?? owner.owner1_full_name)
+      || [text(owner.owner1FirstName), text(owner.owner1LastName)].filter(Boolean).join(' ').trim() || undefined,
+    ownerSecondName: text(owner.owner2FullName ?? owner.owner2_full_name),
+    mailingAddress: text(mail.label) || text(mail.address),
+    ownerOccupied: typeof owner.ownerOccupied === 'boolean' ? owner.ownerOccupied : undefined,
+    parcelId: text(root.apn) || text(propertyInfo.apn) || text(lot.apn) || text(lot.apnUnformatted),
+    legalDescription: text(lot.legalDescription ?? lot.legal_description) || text(propertyInfo.legalDescription),
+    lotSquareFeet,
+    lotAcres,
+    landUse: text(lot.landUse ?? lot.land_use) || text(propertyInfo.landUse),
+    zoning: text(lot.zoning) || text(propertyInfo.zoning),
+    assessedValue: num(tax.assessedValue ?? tax.assessed_value),
+    assessedLandValue: num(tax.assessedLandValue ?? tax.assessed_land_value),
+    marketValue: num(tax.marketValue ?? tax.market_value),
+    taxAmount: num(tax.taxAmount ?? tax.tax_amount),
+    taxYear: num(tax.year) ?? num(tax.taxYear ?? tax.tax_year),
+    fetchedAt,
+  };
+}
