@@ -37,7 +37,7 @@ import {
   beginMonidBudgetSession,
   monidExtractUrlsWithKey,
   monidSearchBatchWithKey,
-  summarizeSearchQuality,
+  shouldEscalateToBroadSearch,
   type MonidBudgetMode,
   type MonidResearchStrategy,
   type MonidSearchResult,
@@ -537,24 +537,18 @@ async function crawleeResearchBlock(searchResults: PplxResult[], queries: string
     ...(opts?.seedUrls || []),
     ...searchResults.map((result) => result.url),
   ];
-  let crawleeResults: CrawleeResult[];
+  const crawleeResults = await crawleeScrapeBatch(urls, queries, opts?.maxScrapeTargets);
   let octenResults: CrawleeResult[] = [];
-  if (opts?.mode === 'hard' && monidConfigured()) {
-    [crawleeResults, octenResults] = await Promise.all([
-      crawleeScrapeBatch(urls, queries, opts?.maxScrapeTargets),
-      octenExtractBatch(urls, queries, opts?.maxScrapeTargets),
-    ]);
-  } else {
-    crawleeResults = await crawleeScrapeBatch(urls, queries, opts?.maxScrapeTargets);
-    const extractedChars = crawleeResults.reduce(
-      (total, result) => total + (result.content || result.snippet).length,
-      0,
-    );
-    const extractionIsThin = crawleeResults.length < Math.min(2, urls.length)
-      || extractedChars < 1600;
-    if (extractionIsThin && monidConfigured()) {
-      octenResults = await octenExtractBatch(urls, queries, opts?.maxScrapeTargets);
-    }
+  const extractedChars = crawleeResults.reduce(
+    (total, result) => total + (result.content || result.snippet).length,
+    0,
+  );
+  const minimumPages = opts?.mode === 'hard' ? 4 : 2;
+  const minimumChars = opts?.mode === 'hard' ? 3200 : 1600;
+  const extractionIsThin = crawleeResults.length < Math.min(minimumPages, urls.length)
+    || extractedChars < minimumChars;
+  if (extractionIsThin && monidConfigured()) {
+    octenResults = await octenExtractBatch(urls, queries, opts?.maxScrapeTargets);
   }
   const results = mergeExtractedSources([crawleeResults, octenResults]);
   if (!results.length) return { block: '', urls: [] };
@@ -734,6 +728,14 @@ function formatPplxSources(results: PplxResult[], maxSources = 24, maxSnippetCha
   ).join('\n\n');
 }
 
+function compactBroadResearchQuery(queries: string[]): string[] {
+  const unique = [...new Set(queries.map((query) => query.trim()).filter(Boolean))];
+  if (unique.length <= 1) return unique;
+  return [
+    `${unique[0]}. Cross-check these related requirements: ${unique.slice(1, 4).join('; ')}`.slice(0, 500),
+  ];
+}
+
 /** The research block injected into a Gemini prompt in place of Google-Search
  *  grounding: many ranked sources with extracted content. '' = nothing found. */
 async function perplexityResearchBlock(queries: string[], opts?: WebResearchOptions): Promise<{ block: string; urls: string[] }> {
@@ -744,51 +746,49 @@ async function perplexityResearchBlock(queries: string[], opts?: WebResearchOpti
   let monidResults: PplxResult[] = [];
 
   if (hasPerplexity && hasMonid && opts?.mode === 'hard') {
-    // Deep passes run in parallel, so Monid adds coverage without serially
-    // extending the Perplexity wait.
+    // Run the two fast search lanes together. Broad Search is a second pass only
+    // when their combined evidence is still thin.
     [perplexityResults, monidResults] = await Promise.all([
       perplexitySearchBatch(queries, { maxResultsPerQuery: perQuery }),
       monidSearchBatch(queries, {
         maxResultsPerQuery: perQuery,
-        strategy: 'broad',
-        semanticRerank: true,
+        strategy: 'search',
       }),
     ]);
+    const combined = interleaveDedupe([perplexityResults, monidResults]);
+    if (shouldEscalateToBroadSearch(combined, queries, true)) {
+      const broadResults = await monidSearchBatch(compactBroadResearchQuery(queries), {
+        maxResultsPerQuery: perQuery,
+        strategy: 'broad',
+        semanticRerank: true,
+      });
+      monidResults = interleaveDedupe([monidResults, broadResults]);
+    }
   } else if (hasPerplexity) {
     perplexityResults = await perplexitySearchBatch(queries, {
       maxResultsPerQuery: perQuery,
     });
-    const quality = summarizeSearchQuality(perplexityResults, queries);
-    const thin = quality.resultCount < 8
-      || quality.uniqueDomains < 3
-      || quality.contentCoverageRate < 0.45;
-    if (hasMonid && opts?.mode !== 'easy' && opts?.mode !== 'perplexity' && thin) {
-      monidResults = await monidSearchBatch(queries, {
+    if (hasMonid && opts?.mode !== 'easy' && opts?.mode !== 'perplexity'
+      && shouldEscalateToBroadSearch(perplexityResults, queries)) {
+      monidResults = await monidSearchBatch(compactBroadResearchQuery(queries), {
         maxResultsPerQuery: perQuery,
         strategy: 'broad',
         semanticRerank: true,
       });
     }
   } else if (hasMonid) {
-    const monidStrategy: MonidResearchStrategy = opts?.mode === 'hard' ? 'broad' : 'search';
     monidResults = await monidSearchBatch(queries, {
       maxResultsPerQuery: perQuery,
-      strategy: monidStrategy,
-      semanticRerank: opts?.mode === 'hard',
+      strategy: 'search',
     });
-    if (monidStrategy === 'search' && opts?.mode !== 'easy' && opts?.mode !== 'perplexity') {
-      const quality = summarizeSearchQuality(monidResults, queries);
-      const thin = quality.resultCount < 8
-        || quality.uniqueDomains < 3
-        || quality.contentCoverageRate < 0.45;
-      if (thin) {
-        const broadResults = await monidSearchBatch(queries, {
-          maxResultsPerQuery: perQuery,
-          strategy: 'broad',
-          semanticRerank: true,
-        });
-        monidResults = interleaveDedupe([monidResults, broadResults]);
-      }
+    if (opts?.mode !== 'easy' && opts?.mode !== 'perplexity'
+      && shouldEscalateToBroadSearch(monidResults, queries, opts?.mode === 'hard')) {
+      const broadResults = await monidSearchBatch(compactBroadResearchQuery(queries), {
+        maxResultsPerQuery: perQuery,
+        strategy: 'broad',
+        semanticRerank: true,
+      });
+      monidResults = interleaveDedupe([monidResults, broadResults]);
     }
   }
 

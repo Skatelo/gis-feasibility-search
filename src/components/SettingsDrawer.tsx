@@ -346,7 +346,7 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
                 </button>
               </div>
               <p className="field-help">
-                Optional fast search for utilities, fees, costs, and reports. When both keys are set, Perplexity handles the fast lane and Octen through Monid cross-checks hard or thin searches. Zoning is unchanged and continues to use Gemini 3.6 Flash plus official GIS evidence.
+                Optional search for utilities, fees, costs, and reports. Simple lookups start with Perplexity; hard research runs Perplexity and Octen Search together, then activates deeper tools only when evidence is thin. Zoning remains on Gemini 3.6 Flash plus official GIS evidence.
               </p>
             </div>
 
@@ -468,8 +468,8 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
               <p className="field-help">
                 {monidKey.trim()
                   ? (perplexityKey.trim()
-                    ? 'ACTIVE - Octen Broad Search will run beside Perplexity for hard or thin searches; Extract and Embedding run only when needed.'
-                    : 'ACTIVE - Octen Search will provide live web research; Broad Search, Extract, and Embedding run when needed.')
+                    ? 'ACTIVE - Hard research runs Perplexity and Octen Search together; Broad Search, Extract, and Embedding activate only for weak evidence.'
+                    : 'ACTIVE - Octen Search runs first; Broad Search, Extract, and Embedding activate only for weak evidence.')
                   : 'Optional Monid access to Octen Search, Broad Search, Extract, and Embedding.'} Adaptive and Thorough start with a soft price target but have no fixed provider ceiling; the available wallet and actual Monid billing are the final guardrails. Economy remains capped. Crawlee remains available for selected pages and documents. Get a key at app.monid.ai.
               </p>
             </div>
