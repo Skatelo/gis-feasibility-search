@@ -11,10 +11,10 @@ const compiled = ts.transpileModule(source, {
 }).outputText;
 const monid = await import(`data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`);
 
-function jsonResponse(body, status = 200) {
+function jsonResponse(body, status = 200, headers = {}) {
   return new Response(JSON.stringify(body), {
     status,
-    headers: { 'content-type': 'application/json' },
+    headers: { 'content-type': 'application/json', ...headers },
   });
 }
 
@@ -115,6 +115,81 @@ test('Monid search discovers and inspects once but executes every repeated searc
   assert.ok(run.body.input.excludeDomains.includes('reddit.com'));
   assert.ok(calls.every((call) => call.init.cache === 'no-store'));
   assert.ok(calls.every((call) => new Headers(call.init.headers).get('authorization') === 'Bearer monid-test-key'));
+  assert.ok(calls.every((call) => new Headers(call.init.headers).get('x-monid-key') === 'monid-test-key'));
+});
+
+test('Monid key validation checks wallet and search readiness without a paid run', async () => {
+  monid.resetMonidSearchToolCache();
+  const calls = [];
+  const fetchImpl = async (url, init) => {
+    const endpoint = new URL(String(url), 'http://localhost').searchParams.get('endpoint');
+    calls.push({ endpoint, init });
+    if (endpoint === 'wallet') {
+      return jsonResponse(
+        { balance: { value: 2.85, currency: 'USD' } },
+        200,
+        { 'x-request-id': 'req-wallet-ready' },
+      );
+    }
+    if (endpoint === 'discover') return jsonResponse(exaDiscovery());
+    if (endpoint === 'inspect') return jsonResponse(exaInspection());
+    throw new Error(`Validation must not execute ${endpoint}`);
+  };
+
+  const result = await monid.validateMonidApiKey('monid-live-ready', { fetchImpl });
+
+  assert.equal(result.valid, true);
+  assert.equal(result.searchReady, true);
+  assert.equal(result.balanceUsd, 2.85);
+  assert.equal(result.provider, 'Exa');
+  assert.equal(result.requestId, 'req-wallet-ready');
+  assert.match(result.message, /Monid is connected/);
+  assert.deepEqual(calls.map((call) => call.endpoint), ['wallet', 'discover', 'inspect']);
+  assert.doesNotMatch(calls.map((call) => call.endpoint).join(','), /run/);
+});
+
+test('Monid browser requests preserve the fetch receiver', async () => {
+  monid.resetMonidSearchToolCache();
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async function boundBrowserFetch(url) {
+    assert.equal(this, globalThis, 'window.fetch must not be invoked with the request options as its receiver');
+    const endpoint = new URL(String(url), 'http://localhost').searchParams.get('endpoint');
+    calls.push(endpoint);
+    if (endpoint === 'wallet') return jsonResponse({ balance: { value: 1.25, currency: 'USD' } });
+    if (endpoint === 'discover') return jsonResponse(exaDiscovery());
+    if (endpoint === 'inspect') return jsonResponse(exaInspection());
+    throw new Error(`Validation must not execute ${endpoint}`);
+  };
+  try {
+    const result = await monid.validateMonidApiKey('monid-browser-key');
+    assert.equal(result.searchReady, true);
+    assert.deepEqual(calls, ['wallet', 'discover', 'inspect']);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('Monid key validation surfaces authentication and wallet failures', async () => {
+  monid.resetMonidSearchToolCache();
+  const invalid = await monid.validateMonidApiKey('bad-key', {
+    fetchImpl: async () => jsonResponse(
+      { code: 401, message: 'Invalid API key' },
+      401,
+      { 'x-request-id': 'req-invalid-key' },
+    ),
+  });
+  assert.equal(invalid.valid, false);
+  assert.equal(invalid.status, 401);
+  assert.match(invalid.message, /rejected this API key/i);
+  assert.match(invalid.message, /req-invalid-key/);
+
+  const emptyWallet = await monid.validateMonidApiKey('valid-empty-wallet', {
+    fetchImpl: async () => jsonResponse({ balance: { value: 0, currency: 'USD' } }),
+  });
+  assert.equal(emptyWallet.valid, true);
+  assert.equal(emptyWallet.searchReady, false);
+  assert.match(emptyWallet.message, /balance is \$0\.00/i);
 });
 
 test('Monid rejects a discovered tool whose estimated per-result cost exceeds the cap', async () => {
@@ -215,14 +290,23 @@ test('Monid Netlify proxy validates auth and forwards allowed endpoints with no-
       headers: { Authorization: 'Bearer monid-proxy-key' },
       queryStringParameters: { endpoint: 'runs', runId: '01HXYZ1234567890ABCDEF' },
     });
+    const wallet = await handler({
+      httpMethod: 'GET',
+      headers: { 'x-monid-key': 'monid-proxy-key' },
+      queryStringParameters: { endpoint: 'wallet' },
+    });
 
     assert.equal(discover.statusCode, 200);
     assert.equal(runs.statusCode, 200);
+    assert.equal(wallet.statusCode, 200);
     assert.equal(captured[0].url, 'https://api.monid.ai/v1/discover');
     assert.equal(captured[1].url, 'https://api.monid.ai/v1/runs/01HXYZ1234567890ABCDEF');
+    assert.equal(captured[2].url, 'https://api.monid.ai/v1/wallet/balance');
     assert.equal(captured[0].init.headers.Authorization, 'Bearer monid-proxy-key');
+    assert.equal(captured[2].init.headers.Authorization, 'Bearer monid-proxy-key');
     assert.equal(captured[0].init.cache, 'no-store');
     assert.equal(captured[1].init.cache, 'no-store');
+    assert.equal(captured[2].init.cache, 'no-store');
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -232,7 +316,7 @@ test('Monid proxy blocks unapproved endpoint and malformed run IDs', async () =>
   const unknown = await handler({
     httpMethod: 'POST',
     headers: { authorization: 'Bearer test-key' },
-    queryStringParameters: { endpoint: 'wallet' },
+    queryStringParameters: { endpoint: 'admin' },
     body: '{}',
   });
   const invalidRun = await handler({
@@ -256,6 +340,9 @@ test('application wiring removes Octen and preserves Gemini zoning', async () =>
   assert.match(feasibility, /Promise\.all\(\[\s*perplexitySearchBatch[\s\S]*monidSearchBatch/);
   assert.match(feasibility, /summarizeSearchQuality\(perplexityResults, queries\)/);
   assert.match(settings, /monid: monidKey\.trim\(\)/);
+  assert.match(settings, /validateMonidApiKey\(monidKey\)/);
+  assert.match(settings, /'Test key'/);
   assert.match(vite, /https:\/\/api\.monid\.ai/);
+  assert.match(vite, /\/v1\/wallet\/balance/);
   assert.match(zoning, /GEMINI_ZONING_MODELS = \['gemini-3\.6-flash'\]/);
 });

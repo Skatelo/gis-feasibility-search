@@ -1,6 +1,6 @@
 const CORS = {
   'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Headers': 'content-type, authorization',
+  'Access-Control-Allow-Headers': 'content-type, authorization, x-monid-key',
   'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
   'Cache-Control': 'no-store',
 };
@@ -21,7 +21,14 @@ export const handler = async (event) => {
   try {
     const headers = event.headers || {};
     const auth = headers.authorization || headers.Authorization || '';
-    const key = auth.replace(/^Bearer\s+/i, '').trim();
+    const key = String(
+      headers['x-monid-key']
+      || headers['X-Monid-Key']
+      || auth.replace(/^Bearer\s+/i, '')
+      || process.env.MONID_API_KEY
+      || process.env.VITE_MONID_API_KEY
+      || '',
+    ).trim();
     if (!key) return json(401, { error: 'Missing Monid API key' });
 
     const endpoint = event.queryStringParameters?.endpoint || 'discover';
@@ -40,6 +47,10 @@ export const handler = async (event) => {
       if (!RUN_ID.test(runId)) return json(400, { error: 'Invalid Monid run ID' });
       target = `https://api.monid.ai/v1/runs/${encodeURIComponent(runId)}`;
       method = 'GET';
+    } else if (endpoint === 'wallet') {
+      if (event.httpMethod !== 'GET') return json(405, { error: 'GET required' });
+      target = 'https://api.monid.ai/v1/wallet/balance';
+      method = 'GET';
     } else {
       return json(400, { error: `Unknown Monid endpoint "${endpoint}"` });
     }
@@ -57,7 +68,13 @@ export const handler = async (event) => {
     const text = await response.text();
     return {
       statusCode: response.status,
-      headers: { ...CORS, 'content-type': response.headers.get('content-type') || 'application/json' },
+      headers: {
+        ...CORS,
+        'content-type': response.headers.get('content-type') || 'application/json',
+        ...(response.headers.get('x-request-id')
+          ? { 'x-request-id': response.headers.get('x-request-id') }
+          : {}),
+      },
       body: text,
     };
   } catch (error) {

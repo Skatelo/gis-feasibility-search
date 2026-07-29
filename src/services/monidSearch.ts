@@ -35,6 +35,7 @@ interface MonidTool {
 interface MonidResponse<T = unknown> {
   status: number;
   payload: T | null;
+  requestId?: string;
 }
 
 interface MonidRun {
@@ -51,6 +52,7 @@ const MONID_PROXY = '/.netlify/functions/monid';
 const SEARCH_DISCOVERY_QUERY = 'web search with ranked URLs, semantic relevance, page text, highlights, and published dates';
 const TOOL_METADATA_TTL_MS = 30 * 60 * 1000;
 const DEFAULT_MAX_PRICE_USD = 0.05;
+const browserFetch: typeof fetch = (...args) => globalThis.fetch(...args);
 const NOISE_DOMAINS = [
   'reddit.com',
   'pinterest.com',
@@ -75,7 +77,7 @@ function requestSignal(signal: AbortSignal | undefined, timeoutMs: number): Abor
 }
 
 async function monidRequest<T>(
-  endpoint: 'discover' | 'inspect' | 'run' | 'runs',
+  endpoint: 'discover' | 'inspect' | 'run' | 'runs' | 'wallet',
   key: string,
   options: {
     body?: Record<string, unknown>;
@@ -87,15 +89,17 @@ async function monidRequest<T>(
 ): Promise<MonidResponse<T>> {
   const params = new URLSearchParams({ endpoint });
   if (options.runId) params.set('runId', options.runId);
+  const isGet = endpoint === 'runs' || endpoint === 'wallet';
   const response = await options.fetchImpl(`${MONID_PROXY}?${params.toString()}`, {
-    method: endpoint === 'runs' ? 'GET' : 'POST',
+    method: isGet ? 'GET' : 'POST',
     cache: 'no-store',
     headers: {
       Accept: 'application/json',
       Authorization: `Bearer ${key}`,
-      ...(endpoint === 'runs' ? {} : { 'Content-Type': 'application/json' }),
+      'X-Monid-Key': key,
+      ...(isGet ? {} : { 'Content-Type': 'application/json' }),
     },
-    ...(endpoint === 'runs' ? {} : { body: JSON.stringify(options.body || {}) }),
+    ...(isGet ? {} : { body: JSON.stringify(options.body || {}) }),
     signal: requestSignal(options.signal, options.timeoutMs),
   });
   const text = await response.text();
@@ -107,7 +111,41 @@ async function monidRequest<T>(
       payload = null;
     }
   }
-  return { status: response.status, payload };
+  return {
+    status: response.status,
+    payload,
+    requestId: response.headers.get('x-request-id') || undefined,
+  };
+}
+
+function monidPayloadMessage(payload: unknown): string {
+  if (!payload || typeof payload !== 'object') return '';
+  const value = payload as Record<string, unknown>;
+  return String(value.message || value.error || '').trim();
+}
+
+function monidFailureMessage(status: number, payload: unknown, requestId?: string): string {
+  const providerMessage = monidPayloadMessage(payload);
+  let message: string;
+  if (status === 401) {
+    message = 'Monid rejected this API key. Use a current monid_live_ key from app.monid.ai/access/api-keys.';
+  } else if (status === 402) {
+    message = 'The Monid key is valid, but its workspace wallet has insufficient credit.';
+  } else if (status === 403) {
+    message = 'The Monid key is valid but is not attached to an active workspace.';
+  } else if (status === 404) {
+    message = 'The Monid proxy route is not deployed on this app version.';
+  } else if (status === 429) {
+    message = 'Monid is rate-limiting this workspace. Wait briefly and test the key again.';
+  } else if (status >= 500) {
+    message = 'Monid or the app proxy is temporarily unavailable.';
+  } else {
+    message = `Monid returned HTTP ${status}.`;
+  }
+  if (providerMessage && !message.toLowerCase().includes(providerMessage.toLowerCase())) {
+    message += ` ${providerMessage}`;
+  }
+  return requestId ? `${message} Request ID: ${requestId}` : message;
 }
 
 function estimatedPrice(tool: MonidTool, maxResults: number): number {
@@ -156,14 +194,17 @@ async function discoverSearchTool(
   key: string,
   options: Required<Pick<MonidSearchOptions, 'maxResultsPerQuery' | 'timeoutMs' | 'maxPriceUsd'>> & Pick<MonidSearchOptions, 'fetchImpl' | 'signal'>,
 ): Promise<MonidTool | null> {
-  const fetchImpl = options.fetchImpl || fetch;
+  const fetchImpl = options.fetchImpl || browserFetch;
   const discovered = await monidRequest<{ results?: MonidTool[] }>('discover', key, {
     body: { query: SEARCH_DISCOVERY_QUERY, limit: 10 },
     timeoutMs: Math.min(options.timeoutMs, 10_000),
     fetchImpl,
     signal: options.signal,
   });
-  if (discovered.status !== 200 || !Array.isArray(discovered.payload?.results)) return null;
+  if (discovered.status !== 200 || !Array.isArray(discovered.payload?.results)) {
+    console.warn(monidFailureMessage(discovered.status, discovered.payload, discovered.requestId));
+    return null;
+  }
 
   const ranked = discovered.payload.results
     .map((tool) => ({ tool, score: toolRank(tool, options.maxResultsPerQuery, options.maxPriceUsd) }))
@@ -221,6 +262,114 @@ async function resolvedSearchTool(
     promise,
   };
   return promise;
+}
+
+export interface MonidKeyValidation {
+  valid: boolean;
+  searchReady: boolean;
+  message: string;
+  balanceUsd?: number;
+  provider?: string;
+  endpoint?: string;
+  requestId?: string;
+  status?: number;
+}
+
+/** Verifies authentication, wallet access, and an affordable web-search tool.
+ *  Discovery and inspection do not execute a paid provider run. */
+export async function validateMonidApiKey(
+  key: string,
+  options: Pick<MonidSearchOptions, 'fetchImpl' | 'signal' | 'timeoutMs' | 'maxPriceUsd'> = {},
+): Promise<MonidKeyValidation> {
+  const normalizedKey = key.trim();
+  if (!normalizedKey) {
+    return {
+      valid: false,
+      searchReady: false,
+      message: 'Enter a Monid API key before testing it.',
+    };
+  }
+
+  const fetchImpl = options.fetchImpl || browserFetch;
+  const timeoutMs = Math.min(20_000, Math.max(5_000, options.timeoutMs ?? 12_000));
+  const maxPriceUsd = Math.min(0.25, Math.max(0.001, options.maxPriceUsd ?? DEFAULT_MAX_PRICE_USD));
+  try {
+    const wallet = await monidRequest<{
+      balance?: { value?: number; currency?: string };
+      code?: number;
+      message?: string;
+    }>('wallet', normalizedKey, {
+      timeoutMs,
+      fetchImpl,
+      signal: options.signal,
+    });
+    if (wallet.status !== 200) {
+      return {
+        valid: false,
+        searchReady: false,
+        message: monidFailureMessage(wallet.status, wallet.payload, wallet.requestId),
+        requestId: wallet.requestId,
+        status: wallet.status,
+      };
+    }
+
+    const balanceUsd = Number(wallet.payload?.balance?.value);
+    if (!Number.isFinite(balanceUsd)) {
+      return {
+        valid: true,
+        searchReady: false,
+        message: 'Monid authenticated the key but returned an unreadable wallet balance.',
+        requestId: wallet.requestId,
+        status: wallet.status,
+      };
+    }
+    if (balanceUsd <= 0) {
+      return {
+        valid: true,
+        searchReady: false,
+        balanceUsd,
+        message: 'Monid authenticated the key, but the workspace wallet balance is $0.00. Add credit before searching.',
+        requestId: wallet.requestId,
+        status: wallet.status,
+      };
+    }
+
+    const tool = await resolvedSearchTool(normalizedKey, {
+      maxResultsPerQuery: 8,
+      timeoutMs,
+      maxPriceUsd,
+      fetchImpl,
+      signal: options.signal,
+    });
+    if (!tool) {
+      return {
+        valid: true,
+        searchReady: false,
+        balanceUsd,
+        message: `Monid authenticated the key and found a $${balanceUsd.toFixed(2)} balance, but no compatible web-search tool passed the $${maxPriceUsd.toFixed(2)} safety cap.`,
+        requestId: wallet.requestId,
+        status: wallet.status,
+      };
+    }
+
+    const provider = tool.providerName || tool.provider;
+    return {
+      valid: true,
+      searchReady: true,
+      balanceUsd,
+      provider,
+      endpoint: tool.endpoint,
+      message: `Monid is connected. ${provider} ${tool.endpoint} is ready; wallet balance: $${balanceUsd.toFixed(2)}.`,
+      requestId: wallet.requestId,
+      status: wallet.status,
+    };
+  } catch (error) {
+    return {
+      valid: false,
+      searchReady: false,
+      message: `Could not reach the Monid proxy: ${String((error as Error)?.message || error)}`,
+    };
+  }
 }
 
 function firstSchemaField(properties: Record<string, any>, names: string[]): string | null {
@@ -314,7 +463,7 @@ async function completedRun(
   const runId = initial.payload?.runId;
   if (initial.status !== 202 || !runId) return null;
 
-  const fetchImpl = options.fetchImpl || fetch;
+  const fetchImpl = options.fetchImpl || browserFetch;
   const delays = [500, 900, 1400, 2200, 3000];
   const deadline = Date.now() + Math.min(options.timeoutMs, 12_000);
   for (const delay of delays) {
@@ -413,7 +562,7 @@ async function runSearch(
   key: string,
   options: Required<Pick<MonidSearchOptions, 'maxResultsPerQuery' | 'maxTokensPerPage' | 'timeoutMs'>> & Pick<MonidSearchOptions, 'recency' | 'fetchImpl' | 'signal'>,
 ): Promise<MonidSearchResult[]> {
-  const fetchImpl = options.fetchImpl || fetch;
+  const fetchImpl = options.fetchImpl || browserFetch;
   const initial = await monidRequest<MonidRun>('run', key, {
     body: {
       provider: tool.provider,
