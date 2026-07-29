@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import type { FormEvent, KeyboardEvent, FC } from 'react';
 import { createRoot } from 'react-dom/client';
-import { executeLandAnalysis, chatWithGemini, chatFollowUp, getUserKeys, getMapboxToken, getRealEstateApiKey, detectNcCounty, lookupParcelById, fetchConstructionCostEstimate, fetchLandClearingEstimate, fetchUtilitiesEstimate, fetchGoogleDistanceMatrixComps, fetchParcelsInBbox, getCompPrefs, getReportAutoGenerate, clearAddressSearchCache, enformionConfigured, enformionContactEnrich, enformionPersonSearch, enformionBusinessSearch, looksLikeBusiness, enformionDiagMessage, getLastEnformionShape, getLastEnformionDetail, ncAddressSuggestions } from '../services/feasibilityService';
+import { executeLandAnalysis, chatWithGemini, chatFollowUp, getUserKeys, getMapboxToken, getRealEstateApiKey, detectNcCounty, lookupParcelById, fetchConstructionCostEstimate, fetchLandClearingEstimate, fetchUtilitiesEstimate, fetchGoogleDistanceMatrixComps, fetchParcelsInBbox, getCompPrefs, getReportAutoGenerate, clearAddressSearchCache, beginPropertyResearchBudget, enformionConfigured, enformionContactEnrich, enformionPersonSearch, enformionBusinessSearch, looksLikeBusiness, enformionDiagMessage, getLastEnformionShape, getLastEnformionDetail, ncAddressSuggestions } from '../services/feasibilityService';
 import type { ParcelIdLookupResult, SkipTraceContact } from '../services/feasibilityService';
 import type { ChatMessage, ChatAttachment } from '../services/feasibilityService';
 import { fetchRealEstatePropertyTransactions, fetchRealEstateOwnerDetails } from '../services/realEstateApiProperty';
@@ -3090,6 +3090,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
     }
 
     const seq = ++searchSeqRef.current; // invalidates any in-flight previous search
+    beginPropertyResearchBudget(`property:${seq}`);
     clearAddressSearchCache(); // repeat submissions must perform fresh geocode/zoning/comp lookups
     searchedAddressRef.current = addressToSearch.trim(); // full address for exact-address lookups
     // Comp-search preferences (Account & API Settings) drive the search radius +

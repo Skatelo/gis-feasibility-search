@@ -5,11 +5,55 @@ export interface MonidSearchResult {
   date?: string;
 }
 
+export type MonidBudgetMode = 'economy' | 'adaptive' | 'thorough';
+
+export interface MonidBudgetProfile {
+  label: string;
+  softPerRunUsd: number;
+  maxPerRunUsd: number;
+  minimumBatchUsd: number;
+  maxBatchUsd: number;
+  walletFraction: number;
+  concurrency: number;
+}
+
+export const MONID_BUDGET_PROFILES: Record<MonidBudgetMode, MonidBudgetProfile> = {
+  economy: {
+    label: 'Economy',
+    softPerRunUsd: 0.03,
+    maxPerRunUsd: 0.05,
+    minimumBatchUsd: 0.05,
+    maxBatchUsd: 0.10,
+    walletFraction: 0.05,
+    concurrency: 1,
+  },
+  adaptive: {
+    label: 'Adaptive',
+    softPerRunUsd: 0.05,
+    maxPerRunUsd: 0.15,
+    minimumBatchUsd: 0.10,
+    maxBatchUsd: 0.35,
+    walletFraction: 0.15,
+    concurrency: 2,
+  },
+  thorough: {
+    label: 'Thorough',
+    softPerRunUsd: 0.10,
+    maxPerRunUsd: 0.35,
+    minimumBatchUsd: 0.20,
+    maxBatchUsd: 0.75,
+    walletFraction: 0.35,
+    concurrency: 3,
+  },
+};
+
 export interface MonidSearchOptions {
   maxResultsPerQuery?: number;
   maxTokensPerPage?: number;
   recency?: 'day' | 'week' | 'month' | 'year';
   timeoutMs?: number;
+  budgetMode?: MonidBudgetMode;
+  /** Explicit compatibility override. Normal app searches use budgetMode. */
   maxPriceUsd?: number;
   fetchImpl?: typeof fetch;
   signal?: AbortSignal;
@@ -42,16 +86,55 @@ interface MonidRun {
   runId?: string;
   status?: string;
   output?: unknown;
+  billing?: {
+    actualCost?: MonidMoney | null;
+    calculatedCost?: MonidMoney | null;
+    reportedCost?: MonidMoney | null;
+  } | null;
+  resultCount?: number | null;
   providerResponse?: {
     httpStatus?: number;
     error?: unknown;
   } | null;
 }
 
+interface MonidMoney {
+  value?: number | string;
+  amount?: number | string;
+  unit?: string;
+  currency?: string;
+}
+
+export interface MonidBudgetSnapshot {
+  sessionId: string;
+  mode: MonidBudgetMode;
+  walletBalanceUsd?: number;
+  totalBudgetUsd: number;
+  actualSpentUsd: number;
+  estimatedSpentUsd: number;
+  reservedUsd: number;
+  remainingUsd: number;
+  runsCompleted: number;
+  skippedQueries: number;
+}
+
+interface MutableMonidBudgetSession {
+  sessionId: string;
+  mode: MonidBudgetMode;
+  controller: AbortController;
+  walletBalanceUsd?: number;
+  walletPromise?: Promise<void>;
+  totalBudgetUsd: number;
+  actualSpentUsd: number;
+  estimatedSpentUsd: number;
+  reservedUsd: number;
+  runsCompleted: number;
+  skippedQueries: number;
+}
+
 const MONID_PROXY = '/.netlify/functions/monid';
 const SEARCH_DISCOVERY_QUERY = 'web search with ranked URLs, semantic relevance, page text, highlights, and published dates';
 const TOOL_METADATA_TTL_MS = 30 * 60 * 1000;
-const DEFAULT_MAX_PRICE_USD = 0.05;
 const browserFetch: typeof fetch = (...args) => globalThis.fetch(...args);
 const NOISE_DOMAINS = [
   'reddit.com',
@@ -70,10 +153,97 @@ let searchToolCache: {
   expiresAt: number;
   promise: Promise<MonidTool | null>;
 } | null = null;
+let activeBudgetSession: MutableMonidBudgetSession | null = null;
+const budgetListeners = new Set<(snapshot: MonidBudgetSnapshot | null) => void>();
+
+function budgetProfile(mode: MonidBudgetMode | undefined): MonidBudgetProfile {
+  return MONID_BUDGET_PROFILES[mode || 'adaptive'] || MONID_BUDGET_PROFILES.adaptive;
+}
+
+function budgetForWallet(mode: MonidBudgetMode, balanceUsd: number | undefined): number {
+  const profile = budgetProfile(mode);
+  if (!Number.isFinite(balanceUsd)) return profile.minimumBatchUsd;
+  const balance = Math.max(0, Number(balanceUsd));
+  return Math.min(
+    balance,
+    profile.maxBatchUsd,
+    Math.max(profile.minimumBatchUsd, balance * profile.walletFraction),
+  );
+}
+
+function sessionAccountedSpend(session: MutableMonidBudgetSession): number {
+  return session.actualSpentUsd + session.estimatedSpentUsd;
+}
+
+function budgetSnapshot(session: MutableMonidBudgetSession | null): MonidBudgetSnapshot | null {
+  if (!session) return null;
+  return {
+    sessionId: session.sessionId,
+    mode: session.mode,
+    walletBalanceUsd: session.walletBalanceUsd,
+    totalBudgetUsd: session.totalBudgetUsd,
+    actualSpentUsd: session.actualSpentUsd,
+    estimatedSpentUsd: session.estimatedSpentUsd,
+    reservedUsd: session.reservedUsd,
+    remainingUsd: Math.max(
+      0,
+      session.totalBudgetUsd - sessionAccountedSpend(session) - session.reservedUsd,
+    ),
+    runsCompleted: session.runsCompleted,
+    skippedQueries: session.skippedQueries,
+  };
+}
+
+function emitBudgetSnapshot(session: MutableMonidBudgetSession | null): void {
+  if (session && activeBudgetSession !== session) return;
+  const snapshot = budgetSnapshot(session);
+  for (const listener of budgetListeners) listener(snapshot);
+}
+
+export function beginMonidBudgetSession(sessionId: string, mode: MonidBudgetMode = 'adaptive'): void {
+  activeBudgetSession?.controller.abort();
+  activeBudgetSession = {
+    sessionId,
+    mode,
+    controller: new AbortController(),
+    totalBudgetUsd: budgetForWallet(mode, undefined),
+    actualSpentUsd: 0,
+    estimatedSpentUsd: 0,
+    reservedUsd: 0,
+    runsCompleted: 0,
+    skippedQueries: 0,
+  };
+  emitBudgetSnapshot(activeBudgetSession);
+}
+
+export function getMonidBudgetSnapshot(): MonidBudgetSnapshot | null {
+  return budgetSnapshot(activeBudgetSession);
+}
+
+export function subscribeMonidBudget(
+  listener: (snapshot: MonidBudgetSnapshot | null) => void,
+): () => void {
+  budgetListeners.add(listener);
+  return () => budgetListeners.delete(listener);
+}
+
+export function resetMonidBudgetSession(): void {
+  activeBudgetSession?.controller.abort();
+  activeBudgetSession = null;
+  emitBudgetSnapshot(null);
+}
 
 function requestSignal(signal: AbortSignal | undefined, timeoutMs: number): AbortSignal {
   const timeout = AbortSignal.timeout(timeoutMs);
   return signal ? AbortSignal.any([signal, timeout]) : timeout;
+}
+
+function combineSignals(
+  first: AbortSignal | undefined,
+  second: AbortSignal | undefined,
+): AbortSignal | undefined {
+  if (first && second) return AbortSignal.any([first, second]);
+  return first || second;
 }
 
 async function monidRequest<T>(
@@ -146,6 +316,37 @@ function monidFailureMessage(status: number, payload: unknown, requestId?: strin
     message += ` ${providerMessage}`;
   }
   return requestId ? `${message} Request ID: ${requestId}` : message;
+}
+
+async function ensureSessionWallet(
+  session: MutableMonidBudgetSession,
+  key: string,
+  fetchImpl: typeof fetch,
+  timeoutMs: number,
+  signal?: AbortSignal,
+): Promise<void> {
+  if (session.walletPromise) return session.walletPromise;
+  session.walletPromise = (async () => {
+    try {
+      const wallet = await monidRequest<{
+        balance?: { value?: number; currency?: string };
+      }>('wallet', key, {
+        timeoutMs: Math.min(timeoutMs, 12_000),
+        fetchImpl,
+        signal,
+      });
+      const balanceUsd = Number(wallet.payload?.balance?.value);
+      if (wallet.status === 200 && Number.isFinite(balanceUsd)) {
+        session.walletBalanceUsd = Math.max(0, balanceUsd);
+        session.totalBudgetUsd = budgetForWallet(session.mode, session.walletBalanceUsd);
+      }
+    } catch {
+      // Keep the profile's conservative minimum when wallet telemetry is unavailable.
+    } finally {
+      emitBudgetSnapshot(session);
+    }
+  })();
+  return session.walletPromise;
 }
 
 function estimatedPrice(tool: MonidTool, maxResults: number): number {
@@ -289,6 +490,33 @@ async function resolvedSearchTool(
   return promise;
 }
 
+interface MonidToolSelection {
+  tool: MonidTool;
+  maxPriceUsd: number;
+}
+
+async function resolveSearchToolWithinBudget(
+  key: string,
+  options: Required<Pick<MonidSearchOptions, 'maxResultsPerQuery' | 'timeoutMs'>>
+    & Pick<MonidSearchOptions, 'fetchImpl' | 'signal'>,
+  softCapUsd: number,
+  hardCapUsd: number,
+): Promise<MonidToolSelection | null> {
+  const boundedSoftCap = Math.max(0.001, Math.min(1, softCapUsd));
+  const boundedHardCap = Math.max(boundedSoftCap, Math.min(1, hardCapUsd));
+  const softTool = await resolvedSearchTool(key, {
+    ...options,
+    maxPriceUsd: boundedSoftCap,
+  });
+  if (softTool) return { tool: softTool, maxPriceUsd: boundedSoftCap };
+  if (boundedHardCap <= boundedSoftCap + 1e-9) return null;
+  const hardTool = await resolvedSearchTool(key, {
+    ...options,
+    maxPriceUsd: boundedHardCap,
+  });
+  return hardTool ? { tool: hardTool, maxPriceUsd: boundedHardCap } : null;
+}
+
 export interface MonidKeyValidation {
   valid: boolean;
   searchReady: boolean;
@@ -296,6 +524,8 @@ export interface MonidKeyValidation {
   balanceUsd?: number;
   provider?: string;
   endpoint?: string;
+  budgetMode?: MonidBudgetMode;
+  totalBudgetUsd?: number;
   maxResultsPerQuery?: number;
   estimatedPriceUsd?: number;
   requestId?: string;
@@ -306,7 +536,10 @@ export interface MonidKeyValidation {
  *  Discovery and inspection do not execute a paid provider run. */
 export async function validateMonidApiKey(
   key: string,
-  options: Pick<MonidSearchOptions, 'fetchImpl' | 'signal' | 'timeoutMs' | 'maxPriceUsd'> = {},
+  options: Pick<
+    MonidSearchOptions,
+    'fetchImpl' | 'signal' | 'timeoutMs' | 'maxPriceUsd' | 'budgetMode'
+  > = {},
 ): Promise<MonidKeyValidation> {
   const normalizedKey = key.trim();
   if (!normalizedKey) {
@@ -319,7 +552,11 @@ export async function validateMonidApiKey(
 
   const fetchImpl = options.fetchImpl || browserFetch;
   const timeoutMs = Math.min(20_000, Math.max(5_000, options.timeoutMs ?? 12_000));
-  const maxPriceUsd = Math.min(0.25, Math.max(0.001, options.maxPriceUsd ?? DEFAULT_MAX_PRICE_USD));
+  const mode = options.budgetMode || 'adaptive';
+  const profile = budgetProfile(mode);
+  const explicitMaxPriceUsd = Number.isFinite(options.maxPriceUsd)
+    ? Math.min(1, Math.max(0.001, Number(options.maxPriceUsd)))
+    : null;
   try {
     const wallet = await monidRequest<{
       balance?: { value?: number; currency?: string };
@@ -361,24 +598,31 @@ export async function validateMonidApiKey(
       };
     }
 
-    const tool = await resolvedSearchTool(normalizedKey, {
+    const totalBudgetUsd = explicitMaxPriceUsd ?? budgetForWallet(mode, balanceUsd);
+    const softCapUsd = explicitMaxPriceUsd
+      ?? Math.min(totalBudgetUsd, profile.softPerRunUsd);
+    const hardCapUsd = explicitMaxPriceUsd
+      ?? Math.min(totalBudgetUsd, profile.maxPerRunUsd);
+    const selection = await resolveSearchToolWithinBudget(normalizedKey, {
       maxResultsPerQuery: 8,
       timeoutMs,
-      maxPriceUsd,
       fetchImpl,
       signal: options.signal,
-    });
-    if (!tool) {
+    }, softCapUsd, hardCapUsd);
+    if (!selection) {
       return {
         valid: true,
         searchReady: false,
         balanceUsd,
-        message: `Monid authenticated the key and found a $${balanceUsd.toFixed(2)} balance, but no compatible web-search tool passed the $${maxPriceUsd.toFixed(2)} safety cap.`,
+        budgetMode: mode,
+        totalBudgetUsd,
+        message: `Monid authenticated the key and found a $${balanceUsd.toFixed(2)} balance, but no compatible web-search tool fit the ${profile.label} mode's wallet-aware $${hardCapUsd.toFixed(2)} per-run ceiling.`,
         requestId: wallet.requestId,
         status: wallet.status,
       };
     }
 
+    const { tool, maxPriceUsd } = selection;
     const provider = tool.providerName || tool.provider;
     const maxResultsPerQuery = affordableResultCount(tool, 8, maxPriceUsd);
     const estimatedPriceUsd = estimatedPrice(tool, maxResultsPerQuery);
@@ -388,9 +632,11 @@ export async function validateMonidApiKey(
       balanceUsd,
       provider,
       endpoint: tool.endpoint,
+      budgetMode: mode,
+      totalBudgetUsd,
       maxResultsPerQuery,
       estimatedPriceUsd,
-      message: `Monid is connected. ${provider} ${tool.endpoint} can return up to ${maxResultsPerQuery} results per query within the $${maxPriceUsd.toFixed(2)} cap; estimated maximum: $${estimatedPriceUsd.toFixed(3)}. Wallet balance: $${balanceUsd.toFixed(2)}.`,
+      message: `Monid is connected in ${profile.label} mode. ${provider} ${tool.endpoint} can return up to ${maxResultsPerQuery} results per query; estimated run cost: $${estimatedPriceUsd.toFixed(3)}. Soft target: $${softCapUsd.toFixed(2)}. Property research budget: $${totalBudgetUsd.toFixed(2)}. Wallet balance: $${balanceUsd.toFixed(2)}.`,
       requestId: wallet.requestId,
       status: wallet.status,
     };
@@ -488,9 +734,7 @@ async function completedRun(
   key: string,
   options: Required<Pick<MonidSearchOptions, 'timeoutMs'>> & Pick<MonidSearchOptions, 'fetchImpl' | 'signal'>,
 ): Promise<MonidRun | null> {
-  if (initial.status === 200 && initial.payload && providerSucceeded(initial.payload)) {
-    return initial.payload;
-  }
+  if (initial.status === 200 && initial.payload) return initial.payload;
   const runId = initial.payload?.runId;
   if (initial.status !== 202 || !runId) return null;
 
@@ -507,12 +751,31 @@ async function completedRun(
       signal: options.signal,
     });
     if (response.status !== 200 || !response.payload) continue;
-    if (response.payload.status === 'COMPLETED') {
-      return providerSucceeded(response.payload) ? response.payload : null;
+    if (response.payload.status === 'COMPLETED' || response.payload.status === 'FAILED') {
+      return response.payload;
     }
-    if (response.payload.status === 'FAILED') return null;
   }
   return null;
+}
+
+function moneyToUsd(money: MonidMoney | null | undefined): number | null {
+  if (!money) return null;
+  if (money.currency && money.currency.toUpperCase() !== 'USD') return null;
+  const rawValue = Number(money.value ?? money.amount);
+  if (!Number.isFinite(rawValue) || rawValue < 0) return null;
+  const unit = String(money.unit || 'DOLLAR').trim().toUpperCase().replace(/[\s-]+/g, '_');
+  if (unit === 'MICRO_DOLLAR' || unit === 'MICRODOLLAR' || unit === 'MICRO_USD') {
+    return rawValue / 1_000_000;
+  }
+  if (unit === 'CENT' || unit === 'CENTS' || unit === 'USD_CENT') {
+    return rawValue / 100;
+  }
+  if (unit === 'DOLLAR' || unit === 'DOLLARS' || unit === 'USD') return rawValue;
+  return null;
+}
+
+function actualRunCostUsd(run: MonidRun | null): number | null {
+  return moneyToUsd(run?.billing?.actualCost);
 }
 
 function asText(value: unknown): string {
@@ -587,13 +850,20 @@ export function normalizeMonidSearchOutput(output: unknown): MonidSearchResult[]
   return results;
 }
 
+interface MonidRunOutcome {
+  results: MonidSearchResult[];
+  actualCostUsd: number | null;
+  estimatedCostUsd: number;
+}
+
 async function runSearch(
   tool: MonidTool,
   query: string,
   key: string,
   options: Required<Pick<MonidSearchOptions, 'maxResultsPerQuery' | 'maxTokensPerPage' | 'timeoutMs'>> & Pick<MonidSearchOptions, 'recency' | 'fetchImpl' | 'signal'>,
-): Promise<MonidSearchResult[]> {
+): Promise<MonidRunOutcome> {
   const fetchImpl = options.fetchImpl || browserFetch;
+  const estimatedCostUsd = estimatedPrice(tool, options.maxResultsPerQuery);
   const initial = await monidRequest<MonidRun>('run', key, {
     body: {
       provider: tool.provider,
@@ -605,7 +875,11 @@ async function runSearch(
     signal: options.signal,
   });
   const run = await completedRun(initial, key, options);
-  return run ? normalizeMonidSearchOutput(run.output) : [];
+  return {
+    results: run && providerSucceeded(run) ? normalizeMonidSearchOutput(run.output) : [],
+    actualCostUsd: actualRunCostUsd(run),
+    estimatedCostUsd,
+  };
 }
 
 function interleave(groups: MonidSearchResult[][]): MonidSearchResult[] {
@@ -632,42 +906,170 @@ export async function monidSearchBatchWithKey(
   const uniqueQueries = [...new Set(queries.map((query) => query.trim()).filter(Boolean))];
   if (!normalizedKey || !uniqueQueries.length) return [];
 
+  const explicitMaxPriceUsd = Number.isFinite(options.maxPriceUsd)
+    ? Math.min(1, Math.max(0.001, Number(options.maxPriceUsd)))
+    : null;
+  const session = explicitMaxPriceUsd == null ? activeBudgetSession : null;
+  const mode = session?.mode || options.budgetMode || 'adaptive';
+  const profile = budgetProfile(mode);
+  const fetchImpl = options.fetchImpl || browserFetch;
+  const signal = combineSignals(options.signal, session?.controller.signal);
   const resolvedOptions = {
     maxResultsPerQuery: Math.min(20, Math.max(1, options.maxResultsPerQuery ?? 8)),
     maxTokensPerPage: Math.min(4000, Math.max(200, options.maxTokensPerPage ?? 1500)),
     timeoutMs: Math.min(30_000, Math.max(5_000, options.timeoutMs ?? 15_000)),
-    maxPriceUsd: Math.min(0.25, Math.max(0.001, options.maxPriceUsd ?? DEFAULT_MAX_PRICE_USD)),
     recency: options.recency,
-    fetchImpl: options.fetchImpl,
-    signal: options.signal,
+    fetchImpl,
+    signal,
   };
-  const tool = await resolvedSearchTool(normalizedKey, resolvedOptions);
-  if (!tool) return [];
+  if (signal?.aborted) return [];
+  if (session) {
+    await ensureSessionWallet(
+      session,
+      normalizedKey,
+      fetchImpl,
+      resolvedOptions.timeoutMs,
+      signal,
+    );
+    if (signal?.aborted) return [];
+  }
+
+  const availableBeforeDiscovery = explicitMaxPriceUsd ?? (
+    session
+      ? Math.max(
+        0,
+        session.totalBudgetUsd - sessionAccountedSpend(session) - session.reservedUsd,
+      )
+      : profile.minimumBatchUsd
+  );
+  if (availableBeforeDiscovery < 0.001) {
+    if (session) {
+      session.skippedQueries += uniqueQueries.length;
+      emitBudgetSnapshot(session);
+    }
+    return [];
+  }
+  const softCapUsd = explicitMaxPriceUsd
+    ?? Math.min(profile.softPerRunUsd, availableBeforeDiscovery);
+  const hardCapUsd = explicitMaxPriceUsd
+    ?? Math.min(profile.maxPerRunUsd, availableBeforeDiscovery);
+  const selection = await resolveSearchToolWithinBudget(
+    normalizedKey,
+    resolvedOptions,
+    softCapUsd,
+    hardCapUsd,
+  );
+  if (!selection || signal?.aborted) {
+    if (session && !signal?.aborted) {
+      session.skippedQueries += uniqueQueries.length;
+      emitBudgetSnapshot(session);
+    }
+    return [];
+  }
+
+  const availableAfterDiscovery = explicitMaxPriceUsd ?? (
+    session
+      ? Math.max(
+        0,
+        session.totalBudgetUsd - sessionAccountedSpend(session) - session.reservedUsd,
+      )
+      : profile.minimumBatchUsd
+  );
+  const { tool } = selection;
+  const perRunCeilingUsd = explicitMaxPriceUsd
+    ?? Math.min(selection.maxPriceUsd, availableAfterDiscovery);
   const affordableMaxResults = affordableResultCount(
     tool,
     resolvedOptions.maxResultsPerQuery,
-    resolvedOptions.maxPriceUsd,
+    perRunCeilingUsd,
   );
-  if (affordableMaxResults < 1) return [];
+  if (affordableMaxResults < 1) {
+    if (session) {
+      session.skippedQueries += uniqueQueries.length;
+      emitBudgetSnapshot(session);
+    }
+    return [];
+  }
+  const estimatedCostPerRunUsd = estimatedPrice(tool, affordableMaxResults);
+  if (!Number.isFinite(estimatedCostPerRunUsd) || estimatedCostPerRunUsd < 0) return [];
+
+  let allowedQueryCount = uniqueQueries.length;
+  if (explicitMaxPriceUsd == null && estimatedCostPerRunUsd > 0) {
+    allowedQueryCount = Math.min(
+      uniqueQueries.length,
+      Math.max(0, Math.floor((availableAfterDiscovery + 1e-9) / estimatedCostPerRunUsd)),
+    );
+  }
+  if (allowedQueryCount < 1) {
+    if (session) {
+      session.skippedQueries += uniqueQueries.length;
+      emitBudgetSnapshot(session);
+    }
+    return [];
+  }
+
+  const selectedQueries = uniqueQueries.slice(0, allowedQueryCount);
+  const reservationUsd = session ? estimatedCostPerRunUsd * allowedQueryCount : 0;
+  if (session) {
+    session.reservedUsd += reservationUsd;
+    session.skippedQueries += uniqueQueries.length - allowedQueryCount;
+    emitBudgetSnapshot(session);
+  }
   const runOptions = {
     ...resolvedOptions,
     maxResultsPerQuery: affordableMaxResults,
   };
 
-  const groups: MonidSearchResult[][] = Array.from({ length: uniqueQueries.length }, () => []);
+  const outcomes: MonidRunOutcome[] = Array.from(
+    { length: selectedQueries.length },
+    () => ({
+      results: [],
+      actualCostUsd: null,
+      estimatedCostUsd: estimatedCostPerRunUsd,
+    }),
+  );
   let cursor = 0;
-  const workers = Array.from({ length: Math.min(3, uniqueQueries.length) }, async () => {
-    while (cursor < uniqueQueries.length) {
+  const workers = Array.from({
+    length: Math.min(
+      explicitMaxPriceUsd == null ? profile.concurrency : 3,
+      selectedQueries.length,
+    ),
+  }, async () => {
+    while (cursor < selectedQueries.length) {
       const index = cursor++;
       try {
-        groups[index] = await runSearch(tool, uniqueQueries[index], normalizedKey, runOptions);
+        outcomes[index] = await runSearch(
+          tool,
+          selectedQueries[index],
+          normalizedKey,
+          runOptions,
+        );
       } catch {
-        groups[index] = [];
+        outcomes[index] = {
+          results: [],
+          actualCostUsd: null,
+          estimatedCostUsd: estimatedCostPerRunUsd,
+        };
       }
     }
   });
-  await Promise.all(workers);
-  return interleave(groups);
+  try {
+    await Promise.all(workers);
+  } finally {
+    if (session) {
+      session.reservedUsd = Math.max(0, session.reservedUsd - reservationUsd);
+      for (const outcome of outcomes) {
+        if (outcome.actualCostUsd != null) {
+          session.actualSpentUsd += outcome.actualCostUsd;
+        } else {
+          session.estimatedSpentUsd += outcome.estimatedCostUsd;
+        }
+      }
+      session.runsCompleted += outcomes.length;
+      emitBudgetSnapshot(session);
+    }
+  }
+  return interleave(outcomes.map((outcome) => outcome.results));
 }
 
 export interface SearchQualitySummary {

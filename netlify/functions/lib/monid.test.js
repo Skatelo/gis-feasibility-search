@@ -61,7 +61,7 @@ function exaInspection(price = { type: 'PER_CALL', amount: 0.002, currency: 'USD
   };
 }
 
-function completedSearch(query, suffix = '') {
+function completedSearch(query, suffix = '', actualCostUsd = 0.002) {
   return {
     runId: `01HXYZ1234567890ABCDE${suffix || 'F'}`,
     provider: 'exa',
@@ -74,6 +74,13 @@ function completedSearch(query, suffix = '') {
         highlights: [`Official evidence for ${query} with enough detail to exercise content coverage scoring.`],
         publishedDate: '2026-07-28T00:00:00.000Z',
       }],
+    },
+    billing: {
+      actualCost: {
+        value: Math.round(actualCostUsd * 1_000_000),
+        unit: 'MICRO_DOLLAR',
+        currency: 'USD',
+      },
     },
     providerResponse: { httpStatus: 200 },
   };
@@ -239,7 +246,10 @@ test('Monid validation accepts an affordable reduced result count', async () => 
   assert.equal(result.maxResultsPerQuery, 5);
   assert.equal(result.estimatedPriceUsd, 0.05);
   assert.match(result.message, /up to 5 results per query/i);
-  assert.match(result.message, /\$0\.05 cap/i);
+  assert.equal(result.budgetMode, 'adaptive');
+  assert.equal(result.totalBudgetUsd, 0.15);
+  assert.match(result.message, /soft target: \$0\.05/i);
+  assert.match(result.message, /property research budget: \$0\.15/i);
 });
 
 test('Monid still rejects a per-call tool that exceeds the safety cap', async () => {
@@ -264,7 +274,7 @@ test('Monid still rejects a per-call tool that exceeds the safety cap', async ()
   assert.deepEqual(calls, ['discover', 'inspect']);
 });
 
-test('a transient discovery failure is retried instead of being cached', async () => {
+test('a transient discovery failure is retried during adaptive escalation instead of being cached', async () => {
   monid.resetMonidSearchToolCache();
   let discoveryCalls = 0;
   const fetchImpl = async (url, init) => {
@@ -284,9 +294,128 @@ test('a transient discovery failure is retried instead of being cached', async (
   const first = await monid.monidSearchBatchWithKey('monid-retry-key', ['county water rates'], { fetchImpl });
   const second = await monid.monidSearchBatchWithKey('monid-retry-key', ['county water rates'], { fetchImpl });
 
-  assert.deepEqual(first, []);
+  assert.equal(first.length, 1);
   assert.equal(second.length, 1);
-  assert.equal(discoveryCalls, 2);
+  assert.equal(discoveryCalls, 3);
+});
+
+test('Adaptive mode escalates beyond the soft target and records actual billing', async () => {
+  monid.resetMonidSearchToolCache();
+  monid.resetMonidBudgetSession();
+  const calls = [];
+  const price = { type: 'PER_CALL', amount: 0.06, currency: 'USD' };
+  const fetchImpl = async (url, init) => {
+    const endpoint = new URL(String(url), 'http://localhost').searchParams.get('endpoint');
+    const body = init.body ? JSON.parse(init.body) : null;
+    calls.push(endpoint);
+    if (endpoint === 'wallet') {
+      return jsonResponse({ balance: { value: 1, currency: 'USD' } });
+    }
+    if (endpoint === 'discover') return jsonResponse(exaDiscovery(price));
+    if (endpoint === 'inspect') return jsonResponse(exaInspection(price));
+    if (endpoint === 'run') {
+      return jsonResponse(completedSearch(body.input.query, '', 0.06));
+    }
+    throw new Error(`Unexpected endpoint: ${endpoint}`);
+  };
+
+  monid.beginMonidBudgetSession('property:adaptive', 'adaptive');
+  const results = await monid.monidSearchBatchWithKey(
+    'monid-adaptive-key',
+    ['York County current water tap fees'],
+    { fetchImpl },
+  );
+  const snapshot = monid.getMonidBudgetSnapshot();
+
+  assert.equal(results.length, 1);
+  assert.deepEqual(calls, ['wallet', 'discover', 'inspect', 'discover', 'inspect', 'run']);
+  assert.equal(snapshot.mode, 'adaptive');
+  assert.equal(snapshot.walletBalanceUsd, 1);
+  assert.equal(snapshot.totalBudgetUsd, 0.15);
+  assert.equal(snapshot.actualSpentUsd, 0.06);
+  assert.equal(snapshot.estimatedSpentUsd, 0);
+  assert.equal(snapshot.remainingUsd, 0.09);
+  assert.equal(snapshot.runsCompleted, 1);
+  assert.equal(snapshot.skippedQueries, 0);
+  monid.resetMonidBudgetSession();
+});
+
+test('one address budget reserves concurrent runs and skips queries that do not fit', async () => {
+  monid.resetMonidSearchToolCache();
+  monid.resetMonidBudgetSession();
+  const price = { type: 'PER_CALL', amount: 0.06, currency: 'USD' };
+  let runCalls = 0;
+  const fetchImpl = async (url, init) => {
+    const endpoint = new URL(String(url), 'http://localhost').searchParams.get('endpoint');
+    const body = init.body ? JSON.parse(init.body) : null;
+    if (endpoint === 'wallet') {
+      return jsonResponse({ balance: { value: 1, currency: 'USD' } });
+    }
+    if (endpoint === 'discover') return jsonResponse(exaDiscovery(price));
+    if (endpoint === 'inspect') return jsonResponse(exaInspection(price));
+    if (endpoint === 'run') {
+      runCalls += 1;
+      return jsonResponse(completedSearch(body.input.query, String(runCalls), 0.06));
+    }
+    throw new Error(`Unexpected endpoint: ${endpoint}`);
+  };
+
+  monid.beginMonidBudgetSession('property:shared', 'adaptive');
+  const results = await monid.monidSearchBatchWithKey(
+    'monid-shared-budget-key',
+    ['county water rates', 'county sewer tap fees', 'county building permit fees'],
+    { fetchImpl },
+  );
+  const snapshot = monid.getMonidBudgetSnapshot();
+
+  assert.equal(results.length, 2);
+  assert.equal(runCalls, 2);
+  assert.equal(snapshot.actualSpentUsd, 0.12);
+  assert.equal(snapshot.remainingUsd, 0.03);
+  assert.equal(snapshot.runsCompleted, 2);
+  assert.equal(snapshot.skippedQueries, 1);
+  monid.resetMonidBudgetSession();
+});
+
+test('Economy rejects an expensive provider while Thorough can use it', async () => {
+  const price = { type: 'PER_CALL', amount: 0.06, currency: 'USD' };
+  const fetchImpl = async (url, init) => {
+    const endpoint = new URL(String(url), 'http://localhost').searchParams.get('endpoint');
+    const body = init.body ? JSON.parse(init.body) : null;
+    if (endpoint === 'wallet') {
+      return jsonResponse({ balance: { value: 1, currency: 'USD' } });
+    }
+    if (endpoint === 'discover') return jsonResponse(exaDiscovery(price));
+    if (endpoint === 'inspect') return jsonResponse(exaInspection(price));
+    if (endpoint === 'run') {
+      return jsonResponse(completedSearch(body.input.query, '', 0.06));
+    }
+    throw new Error(`Unexpected endpoint: ${endpoint}`);
+  };
+
+  monid.resetMonidSearchToolCache();
+  monid.resetMonidBudgetSession();
+  monid.beginMonidBudgetSession('property:economy', 'economy');
+  const economyResults = await monid.monidSearchBatchWithKey(
+    'monid-mode-economy-key',
+    ['county utility fees'],
+    { fetchImpl },
+  );
+  assert.deepEqual(economyResults, []);
+  assert.equal(monid.getMonidBudgetSnapshot().skippedQueries, 1);
+
+  monid.resetMonidSearchToolCache();
+  monid.beginMonidBudgetSession('property:thorough', 'thorough');
+  const thoroughResults = await monid.monidSearchBatchWithKey(
+    'monid-mode-thorough-key',
+    ['county utility fees'],
+    { fetchImpl },
+  );
+  const thoroughSnapshot = monid.getMonidBudgetSnapshot();
+  assert.equal(thoroughResults.length, 1);
+  assert.equal(thoroughSnapshot.totalBudgetUsd, 0.35);
+  assert.equal(thoroughSnapshot.actualSpentUsd, 0.06);
+  monid.resetMonidBudgetSession();
 });
 
 test('Monid normalizes nested search output and computes a transparent quality score', () => {
@@ -390,7 +519,10 @@ test('application wiring removes Octen and preserves Gemini zoning', async () =>
   assert.match(feasibility, /Promise\.all\(\[\s*perplexitySearchBatch[\s\S]*monidSearchBatch/);
   assert.match(feasibility, /summarizeSearchQuality\(perplexityResults, queries\)/);
   assert.match(settings, /monid: monidKey\.trim\(\)/);
-  assert.match(settings, /validateMonidApiKey\(monidKey\)/);
+  assert.match(settings, /validateMonidApiKey\(monidKey, \{ budgetMode: monidBudgetMode \}\)/);
+  assert.match(source, /economy:\s*\{[\s\S]*adaptive:\s*\{[\s\S]*thorough:\s*\{/);
+  assert.match(settings, /Object\.keys\(MONID_BUDGET_PROFILES\)/);
+  assert.match(feasibility, /beginMonidBudgetSession\(sessionId, getMonidBudgetMode\(\)\)/);
   assert.match(settings, /'Test key'/);
   assert.match(vite, /https:\/\/api\.monid\.ai/);
   assert.match(vite, /\/v1\/wallet\/balance/);
