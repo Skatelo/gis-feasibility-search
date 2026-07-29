@@ -142,6 +142,8 @@ test('Monid key validation checks wallet and search readiness without a paid run
   assert.equal(result.searchReady, true);
   assert.equal(result.balanceUsd, 2.85);
   assert.equal(result.provider, 'Exa');
+  assert.equal(result.maxResultsPerQuery, 8);
+  assert.equal(result.estimatedPriceUsd, 0.002);
   assert.equal(result.requestId, 'req-wallet-ready');
   assert.match(result.message, /Monid is connected/);
   assert.deepEqual(calls.map((call) => call.endpoint), ['wallet', 'discover', 'inspect']);
@@ -192,16 +194,20 @@ test('Monid key validation surfaces authentication and wallet failures', async (
   assert.match(emptyWallet.message, /balance is \$0\.00/i);
 });
 
-test('Monid rejects a discovered tool whose estimated per-result cost exceeds the cap', async () => {
+test('Monid shrinks per-result searches to stay within the safety cap', async () => {
   monid.resetMonidSearchToolCache();
   const calls = [];
+  const price = { type: 'PER_RESULT', amount: 0.01, flatFee: 0, currency: 'USD' };
   const fetchImpl = async (url, init) => {
     const endpoint = new URL(String(url), 'http://localhost').searchParams.get('endpoint');
-    calls.push({ endpoint, init });
-    if (endpoint === 'discover') {
-      return jsonResponse(exaDiscovery({ type: 'PER_RESULT', amount: 0.01, flatFee: 0, currency: 'USD' }));
+    const body = init.body ? JSON.parse(init.body) : null;
+    calls.push({ endpoint, init, body });
+    if (endpoint === 'discover') return jsonResponse(exaDiscovery(price));
+    if (endpoint === 'inspect') return jsonResponse(exaInspection(price));
+    if (endpoint === 'run') {
+      return jsonResponse(completedSearch(body.input.query));
     }
-    throw new Error(`The expensive tool should not reach ${endpoint}`);
+    throw new Error(`Unexpected endpoint: ${endpoint}`);
   };
 
   const results = await monid.monidSearchBatchWithKey(
@@ -210,8 +216,52 @@ test('Monid rejects a discovered tool whose estimated per-result cost exceeds th
     { fetchImpl, maxResultsPerQuery: 8, maxPriceUsd: 0.05 },
   );
 
+  assert.equal(results.length, 1);
+  assert.deepEqual(calls.map((call) => call.endpoint), ['discover', 'inspect', 'run']);
+  assert.equal(calls.find((call) => call.endpoint === 'run').body.input.numResults, 5);
+});
+
+test('Monid validation accepts an affordable reduced result count', async () => {
+  monid.resetMonidSearchToolCache();
+  const price = { type: 'PER_RESULT', amount: 0.01, flatFee: 0, currency: 'USD' };
+  const fetchImpl = async (url) => {
+    const endpoint = new URL(String(url), 'http://localhost').searchParams.get('endpoint');
+    if (endpoint === 'wallet') return jsonResponse({ balance: { value: 1, currency: 'USD' } });
+    if (endpoint === 'discover') return jsonResponse(exaDiscovery(price));
+    if (endpoint === 'inspect') return jsonResponse(exaInspection(price));
+    throw new Error(`Validation must not execute ${endpoint}`);
+  };
+
+  const result = await monid.validateMonidApiKey('monid-adaptive-price-key', { fetchImpl });
+
+  assert.equal(result.valid, true);
+  assert.equal(result.searchReady, true);
+  assert.equal(result.maxResultsPerQuery, 5);
+  assert.equal(result.estimatedPriceUsd, 0.05);
+  assert.match(result.message, /up to 5 results per query/i);
+  assert.match(result.message, /\$0\.05 cap/i);
+});
+
+test('Monid still rejects a per-call tool that exceeds the safety cap', async () => {
+  monid.resetMonidSearchToolCache();
+  const calls = [];
+  const price = { type: 'PER_CALL', amount: 0.06, currency: 'USD' };
+  const fetchImpl = async (url) => {
+    const endpoint = new URL(String(url), 'http://localhost').searchParams.get('endpoint');
+    calls.push(endpoint);
+    if (endpoint === 'discover') return jsonResponse(exaDiscovery(price));
+    if (endpoint === 'inspect') return jsonResponse(exaInspection(price));
+    throw new Error(`The over-cap tool should not reach ${endpoint}`);
+  };
+
+  const results = await monid.monidSearchBatchWithKey(
+    'monid-over-cap-key',
+    ['current county permit fees'],
+    { fetchImpl, maxResultsPerQuery: 8, maxPriceUsd: 0.05 },
+  );
+
   assert.deepEqual(results, []);
-  assert.deepEqual(calls.map((call) => call.endpoint), ['discover']);
+  assert.deepEqual(calls, ['discover', 'inspect']);
 });
 
 test('a transient discovery failure is retried instead of being cached', async () => {

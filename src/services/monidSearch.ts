@@ -150,20 +150,36 @@ function monidFailureMessage(status: number, payload: unknown, requestId?: strin
 
 function estimatedPrice(tool: MonidTool, maxResults: number): number {
   if (!tool.price || tool.price.amount == null) return Number.POSITIVE_INFINITY;
-  if (tool.price.currency && tool.price.currency !== 'USD') return Number.POSITIVE_INFINITY;
+  if (tool.price.currency && tool.price.currency.toUpperCase() !== 'USD') return Number.POSITIVE_INFINITY;
   const amount = Number(tool.price.amount);
   const flatFee = Number(tool.price?.flatFee || 0);
-  if (!Number.isFinite(amount) || !Number.isFinite(flatFee)) return Number.POSITIVE_INFINITY;
-  return tool.price?.type === 'PER_RESULT'
+  if (!Number.isFinite(amount) || amount < 0 || !Number.isFinite(flatFee) || flatFee < 0) {
+    return Number.POSITIVE_INFINITY;
+  }
+  return tool.price?.type?.toUpperCase() === 'PER_RESULT'
     ? flatFee + amount * maxResults
     : amount;
 }
 
-function toolRank(tool: MonidTool, maxResults: number, maxPriceUsd: number): number {
+function affordableResultCount(tool: MonidTool, requestedResults: number, maxPriceUsd: number): number {
+  const requested = Math.max(1, Math.floor(requestedResults));
+  if (!tool.price || tool.price.amount == null) return 0;
+  if (tool.price.currency && tool.price.currency.toUpperCase() !== 'USD') return 0;
+  const amount = Number(tool.price.amount);
+  const flatFee = Number(tool.price.flatFee || 0);
+  if (!Number.isFinite(amount) || amount < 0 || !Number.isFinite(flatFee) || flatFee < 0) return 0;
+  if (tool.price.type?.toUpperCase() !== 'PER_RESULT') {
+    return amount <= maxPriceUsd + 1e-9 ? requested : 0;
+  }
+  const remaining = maxPriceUsd - flatFee;
+  if (remaining < -1e-9) return 0;
+  if (amount === 0) return requested;
+  return Math.min(requested, Math.max(0, Math.floor((remaining + 1e-9) / amount)));
+}
+
+function toolRelevance(tool: MonidTool): number {
   const provider = tool.provider.toLowerCase();
   const text = `${tool.endpoint} ${tool.description || ''} ${tool.summary || ''}`.toLowerCase();
-  const cost = estimatedPrice(tool, maxResults);
-  if (cost > maxPriceUsd) return Number.NEGATIVE_INFINITY;
   let score = 0;
   if (provider === 'exa') score += 120;
   if (provider === 'strale') score += 45;
@@ -172,6 +188,15 @@ function toolRank(tool: MonidTool, maxResults: number, maxPriceUsd: number): num
   if (/search/.test(tool.endpoint.toLowerCase())) score += 15;
   if (/twitter|linkedin|tiktok|instagram|amazon|people|company|image|video/.test(text)) score -= 100;
   if (provider === 'apify' || provider === 'browserbase') score -= 45;
+  return score;
+}
+
+function toolRank(tool: MonidTool, maxResults: number, maxPriceUsd: number): number {
+  const affordableResults = affordableResultCount(tool, maxResults, maxPriceUsd);
+  if (affordableResults < 1) return Number.NEGATIVE_INFINITY;
+  const cost = estimatedPrice(tool, affordableResults);
+  let score = toolRelevance(tool);
+  score += Math.min(12, affordableResults);
   score -= Math.min(25, cost * 500);
   return score;
 }
@@ -196,7 +221,7 @@ async function discoverSearchTool(
 ): Promise<MonidTool | null> {
   const fetchImpl = options.fetchImpl || browserFetch;
   const discovered = await monidRequest<{ results?: MonidTool[] }>('discover', key, {
-    body: { query: SEARCH_DISCOVERY_QUERY, limit: 10 },
+    body: { query: SEARCH_DISCOVERY_QUERY, limit: 20 },
     timeoutMs: Math.min(options.timeoutMs, 10_000),
     fetchImpl,
     signal: options.signal,
@@ -207,10 +232,10 @@ async function discoverSearchTool(
   }
 
   const ranked = discovered.payload.results
-    .map((tool) => ({ tool, score: toolRank(tool, options.maxResultsPerQuery, options.maxPriceUsd) }))
+    .map((tool) => ({ tool, score: toolRelevance(tool) }))
     .filter(({ score }) => Number.isFinite(score))
     .sort((a, b) => b.score - a.score)
-    .slice(0, 4);
+    .slice(0, 6);
 
   const inspected = await Promise.all(ranked.map(async ({ tool }) => {
     try {
@@ -236,7 +261,7 @@ async function discoverSearchTool(
     .filter(({ tool, score }) =>
       Number.isFinite(score)
       && !!queryFieldFor(tool)
-      && estimatedPrice(tool, options.maxResultsPerQuery) <= options.maxPriceUsd)
+      && affordableResultCount(tool, options.maxResultsPerQuery, options.maxPriceUsd) > 0)
     .sort((a, b) => b.score - a.score)[0]?.tool || null;
 }
 
@@ -271,6 +296,8 @@ export interface MonidKeyValidation {
   balanceUsd?: number;
   provider?: string;
   endpoint?: string;
+  maxResultsPerQuery?: number;
+  estimatedPriceUsd?: number;
   requestId?: string;
   status?: number;
 }
@@ -353,13 +380,17 @@ export async function validateMonidApiKey(
     }
 
     const provider = tool.providerName || tool.provider;
+    const maxResultsPerQuery = affordableResultCount(tool, 8, maxPriceUsd);
+    const estimatedPriceUsd = estimatedPrice(tool, maxResultsPerQuery);
     return {
       valid: true,
       searchReady: true,
       balanceUsd,
       provider,
       endpoint: tool.endpoint,
-      message: `Monid is connected. ${provider} ${tool.endpoint} is ready; wallet balance: $${balanceUsd.toFixed(2)}.`,
+      maxResultsPerQuery,
+      estimatedPriceUsd,
+      message: `Monid is connected. ${provider} ${tool.endpoint} can return up to ${maxResultsPerQuery} results per query within the $${maxPriceUsd.toFixed(2)} cap; estimated maximum: $${estimatedPriceUsd.toFixed(3)}. Wallet balance: $${balanceUsd.toFixed(2)}.`,
       requestId: wallet.requestId,
       status: wallet.status,
     };
@@ -612,6 +643,16 @@ export async function monidSearchBatchWithKey(
   };
   const tool = await resolvedSearchTool(normalizedKey, resolvedOptions);
   if (!tool) return [];
+  const affordableMaxResults = affordableResultCount(
+    tool,
+    resolvedOptions.maxResultsPerQuery,
+    resolvedOptions.maxPriceUsd,
+  );
+  if (affordableMaxResults < 1) return [];
+  const runOptions = {
+    ...resolvedOptions,
+    maxResultsPerQuery: affordableMaxResults,
+  };
 
   const groups: MonidSearchResult[][] = Array.from({ length: uniqueQueries.length }, () => []);
   let cursor = 0;
@@ -619,7 +660,7 @@ export async function monidSearchBatchWithKey(
     while (cursor < uniqueQueries.length) {
       const index = cursor++;
       try {
-        groups[index] = await runSearch(tool, uniqueQueries[index], normalizedKey, resolvedOptions);
+        groups[index] = await runSearch(tool, uniqueQueries[index], normalizedKey, runOptions);
       } catch {
         groups[index] = [];
       }
