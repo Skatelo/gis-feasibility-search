@@ -68,9 +68,14 @@ export interface MonidSearchOptions {
 
 interface MonidPrice {
   type?: 'PER_CALL' | 'PER_RESULT' | string;
-  amount?: number;
-  flatFee?: number | null;
+  amount?: number | string | MonidMoney;
+  flatFee?: number | string | MonidMoney | null;
   currency?: string;
+  unit?: string;
+  amountUnit?: string;
+  flatFeeUnit?: string;
+  amountMicros?: number | string;
+  flatFeeMicros?: number | string;
 }
 
 interface MonidTool {
@@ -415,33 +420,71 @@ async function ensureSessionWallet(
   return session.walletPromise;
 }
 
+function normalizedMonidPrice(price: MonidPrice | null | undefined): {
+  type: string;
+  amountUsd: number;
+  flatFeeUsd: number;
+} | null {
+  if (!price) return null;
+  const amountUsd = price.amountMicros != null
+    ? moneyToUsd({ value: price.amountMicros, unit: 'MICRO_DOLLAR', currency: price.currency })
+    : typeof price.amount === 'object' && price.amount
+      ? moneyToUsd({
+        ...price.amount,
+        unit: price.amount.unit || price.amountUnit || price.unit,
+        currency: price.amount.currency || price.currency,
+      })
+      : moneyToUsd({
+        value: price.amount,
+        unit: price.amountUnit || price.unit,
+        currency: price.currency,
+      });
+  const flatFeeUsd = price.flatFeeMicros != null
+    ? moneyToUsd({ value: price.flatFeeMicros, unit: 'MICRO_DOLLAR', currency: price.currency })
+    : typeof price.flatFee === 'object' && price.flatFee
+      ? moneyToUsd({
+        ...price.flatFee,
+        unit: price.flatFee.unit || price.flatFeeUnit || price.unit,
+        currency: price.flatFee.currency || price.currency,
+      })
+      : moneyToUsd({
+        value: price.flatFee ?? 0,
+        unit: price.flatFeeUnit || price.unit,
+        currency: price.currency,
+      });
+  if (amountUsd == null || flatFeeUsd == null) return null;
+  return {
+    type: String(price.type || 'PER_CALL').toUpperCase(),
+    amountUsd,
+    flatFeeUsd,
+  };
+}
+
 function estimatedPrice(tool: MonidTool, maxResults: number): number {
-  if (!tool.price || tool.price.amount == null) return Number.POSITIVE_INFINITY;
-  if (tool.price.currency && tool.price.currency.toUpperCase() !== 'USD') return Number.POSITIVE_INFINITY;
-  const amount = Number(tool.price.amount);
-  const flatFee = Number(tool.price?.flatFee || 0);
-  if (!Number.isFinite(amount) || amount < 0 || !Number.isFinite(flatFee) || flatFee < 0) {
+  const price = normalizedMonidPrice(tool.price);
+  if (!price) return Number.POSITIVE_INFINITY;
+  if (!Number.isFinite(price.amountUsd) || price.amountUsd < 0
+    || !Number.isFinite(price.flatFeeUsd) || price.flatFeeUsd < 0) {
     return Number.POSITIVE_INFINITY;
   }
-  return tool.price?.type?.toUpperCase() === 'PER_RESULT'
-    ? flatFee + amount * maxResults
-    : amount;
+  return price.type === 'PER_RESULT'
+    ? price.flatFeeUsd + price.amountUsd * maxResults
+    : price.flatFeeUsd + price.amountUsd;
 }
 
 function affordableResultCount(tool: MonidTool, requestedResults: number, maxPriceUsd: number): number {
   const requested = Math.max(1, Math.floor(requestedResults));
-  if (!tool.price || tool.price.amount == null) return 0;
-  if (tool.price.currency && tool.price.currency.toUpperCase() !== 'USD') return 0;
-  const amount = Number(tool.price.amount);
-  const flatFee = Number(tool.price.flatFee || 0);
-  if (!Number.isFinite(amount) || amount < 0 || !Number.isFinite(flatFee) || flatFee < 0) return 0;
-  if (tool.price.type?.toUpperCase() !== 'PER_RESULT') {
-    return amount <= maxPriceUsd + 1e-9 ? requested : 0;
+  const price = normalizedMonidPrice(tool.price);
+  if (!price) return 0;
+  if (!Number.isFinite(price.amountUsd) || price.amountUsd < 0
+    || !Number.isFinite(price.flatFeeUsd) || price.flatFeeUsd < 0) return 0;
+  if (price.type !== 'PER_RESULT') {
+    return price.flatFeeUsd + price.amountUsd <= maxPriceUsd + 1e-9 ? requested : 0;
   }
-  const remaining = maxPriceUsd - flatFee;
+  const remaining = maxPriceUsd - price.flatFeeUsd;
   if (remaining < -1e-9) return 0;
-  if (amount === 0) return requested;
-  return Math.min(requested, Math.max(0, Math.floor((remaining + 1e-9) / amount)));
+  if (price.amountUsd === 0) return requested;
+  return Math.min(requested, Math.max(0, Math.floor((remaining + 1e-9) / price.amountUsd)));
 }
 
 function toolRelevance(tool: MonidTool): number {
@@ -539,7 +582,7 @@ async function discoverOctenTool(
   }
 
   const discovered = await monidRequest<{ results?: MonidTool[] }>('discover', key, {
-    body: { query: spec.discoveryQuery, limit: 20 },
+    body: { query: spec.discoveryQuery, limit: 10 },
     timeoutMs: Math.min(options.timeoutMs, 10_000),
     fetchImpl,
     signal: options.signal,
@@ -671,6 +714,42 @@ interface MonidToolSelection {
   role?: OctenToolRole;
 }
 
+interface AffordableOctenSelection extends MonidToolSelection {
+  maxResults: number;
+  estimatedCostUsd: number;
+}
+
+function selectAffordableOctenTool(
+  candidates: Array<{ tool: MonidTool; role: OctenToolRole }>,
+  requestedResults: number,
+  maxPriceUsd: number,
+  preferredRole?: OctenToolRole,
+): AffordableOctenSelection | null {
+  const affordable = candidates
+    .map(({ tool, role }) => {
+      const maxResults = affordableResultCount(tool, requestedResults, maxPriceUsd);
+      return {
+        tool,
+        role,
+        maxResults,
+        maxPriceUsd,
+        estimatedCostUsd: maxResults > 0
+          ? estimatedPrice(tool, maxResults)
+          : Number.POSITIVE_INFINITY,
+      };
+    })
+    .filter(({ maxResults, estimatedCostUsd }) =>
+      maxResults > 0 && Number.isFinite(estimatedCostUsd))
+    .sort((left, right) =>
+      left.estimatedCostUsd - right.estimatedCostUsd
+      || right.maxResults - left.maxResults
+      || (left.role === 'search' ? -1 : 1));
+  if (!affordable.length) return null;
+  return (preferredRole
+    ? affordable.find(({ role }) => role === preferredRole)
+    : null) || affordable[0];
+}
+
 async function resolveSearchToolWithinBudget(
   key: string,
   options: Required<Pick<MonidSearchOptions, 'maxResultsPerQuery' | 'timeoutMs'>>
@@ -683,19 +762,41 @@ async function resolveSearchToolWithinBudget(
   const preferredRole: OctenToolRole = options.strategy === 'broad' ? 'broad-search' : 'search';
   const octenRoles: OctenToolRole[] = preferredRole === 'broad-search'
     ? ['broad-search', 'search']
-    : ['search'];
-  let octenCatalogMatched = false;
-
-  for (const role of octenRoles) {
-    const tool = await resolvedOctenTool(key, role, options);
-    if (!tool) continue;
-    octenCatalogMatched = true;
-    const softResults = affordableResultCount(tool, options.maxResultsPerQuery, boundedSoftCap);
-    if (softResults > 0) return { tool, maxPriceUsd: boundedSoftCap, role };
-    const hardResults = affordableResultCount(tool, options.maxResultsPerQuery, boundedHardCap);
-    if (hardResults > 0) return { tool, maxPriceUsd: boundedHardCap, role };
+    : ['search', 'broad-search'];
+  const preferredTool = await resolvedOctenTool(key, preferredRole, options);
+  if (preferredTool) {
+    const preferredSoftSelection = selectAffordableOctenTool(
+      [{ role: preferredRole, tool: preferredTool }],
+      options.maxResultsPerQuery,
+      boundedSoftCap,
+      preferredRole,
+    );
+    if (preferredSoftSelection) return preferredSoftSelection;
   }
-  if (octenCatalogMatched) return null;
+
+  const fallbackRole = octenRoles.find((role) => role !== preferredRole);
+  const fallbackTool = fallbackRole
+    ? await resolvedOctenTool(key, fallbackRole, options)
+    : null;
+  const octenCandidates = [
+    ...(preferredTool ? [{ role: preferredRole, tool: preferredTool }] : []),
+    ...(fallbackRole && fallbackTool ? [{ role: fallbackRole, tool: fallbackTool }] : []),
+  ];
+  if (octenCandidates.length) {
+    const softSelection = selectAffordableOctenTool(
+      octenCandidates,
+      options.maxResultsPerQuery,
+      boundedSoftCap,
+      preferredRole,
+    );
+    if (softSelection) return softSelection;
+    const hardSelection = selectAffordableOctenTool(
+      octenCandidates,
+      options.maxResultsPerQuery,
+      boundedHardCap,
+    );
+    return hardSelection;
+  }
 
   // Keep a generic search fallback for temporary catalog outages. Octen remains
   // the deterministic first choice for every normal and broad research run.
@@ -811,9 +912,14 @@ export async function validateMonidApiKey(
     const octenCapabilities = Object.fromEntries(
       roles.map((role, index) => [role, !!resolvedTools[index]]),
     ) as Record<OctenToolRole, boolean>;
-    const searchTool = resolvedTools[roles.indexOf('search')]
-      || resolvedTools[roles.indexOf('broad-search')];
-    if (!searchTool) {
+    const searchCandidates = (['search', 'broad-search'] as OctenToolRole[])
+      .map((role) => ({
+        role,
+        tool: resolvedTools[roles.indexOf(role)],
+      }))
+      .filter((candidate): candidate is { role: OctenToolRole; tool: MonidTool } =>
+        !!candidate.tool);
+    if (!searchCandidates.length) {
       return {
         valid: true,
         searchReady: false,
@@ -827,10 +933,24 @@ export async function validateMonidApiKey(
       };
     }
 
-    const softResultCount = affordableResultCount(searchTool, 8, softCapUsd);
-    const maxPriceUsd = softResultCount > 0 ? softCapUsd : hardCapUsd;
-    const maxResultsPerQuery = affordableResultCount(searchTool, 8, maxPriceUsd);
-    if (maxResultsPerQuery < 1) {
+    const selection = selectAffordableOctenTool(
+      searchCandidates,
+      8,
+      softCapUsd,
+      'search',
+    ) || selectAffordableOctenTool(searchCandidates, 8, hardCapUsd);
+    if (!selection) {
+      const cheapest = searchCandidates
+        .map(({ role, tool }) => ({
+          role,
+          tool,
+          estimatedCostUsd: estimatedPrice(tool, 1),
+        }))
+        .filter(({ estimatedCostUsd }) => Number.isFinite(estimatedCostUsd))
+        .sort((left, right) => left.estimatedCostUsd - right.estimatedCostUsd)[0];
+      const priceDetail = cheapest
+        ? ` The least expensive published option is ${cheapest.tool.endpoint} at $${cheapest.estimatedCostUsd.toFixed(3)} per minimum run.`
+        : ' Monid returned pricing metadata that could not be normalized to USD.';
       return {
         valid: true,
         searchReady: false,
@@ -839,15 +959,17 @@ export async function validateMonidApiKey(
         totalBudgetUsd: initialBudgetUsd,
         octenCapabilities,
         message: profile.allowWalletEscalation
-          ? `Monid authenticated the key and found Octen, but the selected Octen search run exceeds the available $${balanceUsd.toFixed(2)} wallet balance.`
-          : `Monid authenticated the key and found Octen, but the selected Octen search run exceeds the ${profile.label} mode's $${hardCapUsd.toFixed(2)} per-run ceiling.`,
+          ? `Monid authenticated the key and found Octen, but no Octen search run fits the available $${balanceUsd.toFixed(2)} wallet balance.${priceDetail}`
+          : `Monid authenticated the key and found Octen, but no Octen search run fits the ${profile.label} mode's $${hardCapUsd.toFixed(2)} per-run ceiling.${priceDetail}`,
         requestId: wallet.requestId,
         status: wallet.status,
       };
     }
 
+    const searchTool = selection.tool;
+    const maxResultsPerQuery = selection.maxResults;
     const provider = searchTool.providerName || searchTool.provider;
-    const estimatedPriceUsd = estimatedPrice(searchTool, maxResultsPerQuery);
+    const estimatedPriceUsd = selection.estimatedCostUsd;
     const totalBudgetUsd = explicitMaxPriceUsd ?? initialBudgetUsd;
     const readyLabels = roles
       .filter((role) => octenCapabilities[role])
@@ -1724,6 +1846,18 @@ export function summarizeSearchQuality(
     contentCoverageRate,
     uniqueDomains: domains.size,
   };
+}
+
+export function shouldEscalateToBroadSearch(
+  results: MonidSearchResult[],
+  queries: string[],
+  strict = false,
+): boolean {
+  const quality = summarizeSearchQuality(results, queries);
+  return quality.resultCount < 8
+    || quality.uniqueDomains < 3
+    || quality.contentCoverageRate < 0.45
+    || quality.score < (strict ? 62 : 55);
 }
 
 export function resetMonidSearchToolCache(): void {
