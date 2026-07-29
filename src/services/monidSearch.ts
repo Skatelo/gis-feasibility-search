@@ -15,6 +15,7 @@ export interface MonidBudgetProfile {
   maxBatchUsd: number;
   walletFraction: number;
   concurrency: number;
+  allowWalletEscalation: boolean;
 }
 
 export const MONID_BUDGET_PROFILES: Record<MonidBudgetMode, MonidBudgetProfile> = {
@@ -26,6 +27,7 @@ export const MONID_BUDGET_PROFILES: Record<MonidBudgetMode, MonidBudgetProfile> 
     maxBatchUsd: 0.10,
     walletFraction: 0.05,
     concurrency: 1,
+    allowWalletEscalation: false,
   },
   adaptive: {
     label: 'Adaptive',
@@ -35,6 +37,7 @@ export const MONID_BUDGET_PROFILES: Record<MonidBudgetMode, MonidBudgetProfile> 
     maxBatchUsd: 0.35,
     walletFraction: 0.15,
     concurrency: 2,
+    allowWalletEscalation: true,
   },
   thorough: {
     label: 'Thorough',
@@ -44,6 +47,7 @@ export const MONID_BUDGET_PROFILES: Record<MonidBudgetMode, MonidBudgetProfile> 
     maxBatchUsd: 0.75,
     walletFraction: 0.35,
     concurrency: 3,
+    allowWalletEscalation: true,
   },
 };
 
@@ -86,6 +90,7 @@ interface MonidRun {
   runId?: string;
   status?: string;
   output?: unknown;
+  cost?: MonidMoney | null;
   billing?: {
     actualCost?: MonidMoney | null;
     calculatedCost?: MonidMoney | null;
@@ -164,6 +169,7 @@ function budgetForWallet(mode: MonidBudgetMode, balanceUsd: number | undefined):
   const profile = budgetProfile(mode);
   if (!Number.isFinite(balanceUsd)) return profile.minimumBatchUsd;
   const balance = Math.max(0, Number(balanceUsd));
+  if (profile.allowWalletEscalation) return balance;
   return Math.min(
     balance,
     profile.maxBatchUsd,
@@ -173,6 +179,19 @@ function budgetForWallet(mode: MonidBudgetMode, balanceUsd: number | undefined):
 
 function sessionAccountedSpend(session: MutableMonidBudgetSession): number {
   return session.actualSpentUsd + session.estimatedSpentUsd;
+}
+
+function sessionWalletRemaining(session: MutableMonidBudgetSession): number {
+  if (!Number.isFinite(session.walletBalanceUsd)) {
+    return Math.max(
+      0,
+      session.totalBudgetUsd - sessionAccountedSpend(session) - session.reservedUsd,
+    );
+  }
+  return Math.max(
+    0,
+    Number(session.walletBalanceUsd) - sessionAccountedSpend(session) - session.reservedUsd,
+  );
 }
 
 function budgetSnapshot(session: MutableMonidBudgetSession | null): MonidBudgetSnapshot | null {
@@ -336,7 +355,8 @@ async function ensureSessionWallet(
         signal,
       });
       const balanceUsd = Number(wallet.payload?.balance?.value);
-      if (wallet.status === 200 && Number.isFinite(balanceUsd)) {
+      const currency = String(wallet.payload?.balance?.currency || 'USD').toUpperCase();
+      if (wallet.status === 200 && currency === 'USD' && Number.isFinite(balanceUsd)) {
         session.walletBalanceUsd = Math.max(0, balanceUsd);
         session.totalBudgetUsd = budgetForWallet(session.mode, session.walletBalanceUsd);
       }
@@ -502,8 +522,8 @@ async function resolveSearchToolWithinBudget(
   softCapUsd: number,
   hardCapUsd: number,
 ): Promise<MonidToolSelection | null> {
-  const boundedSoftCap = Math.max(0.001, Math.min(1, softCapUsd));
-  const boundedHardCap = Math.max(boundedSoftCap, Math.min(1, hardCapUsd));
+  const boundedSoftCap = Math.max(0.001, softCapUsd);
+  const boundedHardCap = Math.max(boundedSoftCap, hardCapUsd);
   const softTool = await resolvedSearchTool(key, {
     ...options,
     maxPriceUsd: boundedSoftCap,
@@ -555,7 +575,7 @@ export async function validateMonidApiKey(
   const mode = options.budgetMode || 'adaptive';
   const profile = budgetProfile(mode);
   const explicitMaxPriceUsd = Number.isFinite(options.maxPriceUsd)
-    ? Math.min(1, Math.max(0.001, Number(options.maxPriceUsd)))
+    ? Math.max(0.001, Number(options.maxPriceUsd))
     : null;
   try {
     const wallet = await monidRequest<{
@@ -598,11 +618,13 @@ export async function validateMonidApiKey(
       };
     }
 
-    const totalBudgetUsd = explicitMaxPriceUsd ?? budgetForWallet(mode, balanceUsd);
+    const initialBudgetUsd = explicitMaxPriceUsd ?? budgetForWallet(mode, balanceUsd);
     const softCapUsd = explicitMaxPriceUsd
-      ?? Math.min(totalBudgetUsd, profile.softPerRunUsd);
+      ?? Math.min(initialBudgetUsd, profile.softPerRunUsd);
     const hardCapUsd = explicitMaxPriceUsd
-      ?? Math.min(totalBudgetUsd, profile.maxPerRunUsd);
+      ?? (profile.allowWalletEscalation
+        ? balanceUsd
+        : Math.min(initialBudgetUsd, profile.maxPerRunUsd));
     const selection = await resolveSearchToolWithinBudget(normalizedKey, {
       maxResultsPerQuery: 8,
       timeoutMs,
@@ -615,8 +637,10 @@ export async function validateMonidApiKey(
         searchReady: false,
         balanceUsd,
         budgetMode: mode,
-        totalBudgetUsd,
-        message: `Monid authenticated the key and found a $${balanceUsd.toFixed(2)} balance, but no compatible web-search tool fit the ${profile.label} mode's wallet-aware $${hardCapUsd.toFixed(2)} per-run ceiling.`,
+        totalBudgetUsd: initialBudgetUsd,
+        message: profile.allowWalletEscalation
+          ? `Monid authenticated the key and found a $${balanceUsd.toFixed(2)} balance, but no compatible web-search tool was affordable with the available wallet.`
+          : `Monid authenticated the key and found a $${balanceUsd.toFixed(2)} balance, but no compatible web-search tool fit the ${profile.label} mode's $${hardCapUsd.toFixed(2)} per-run ceiling.`,
         requestId: wallet.requestId,
         status: wallet.status,
       };
@@ -626,6 +650,7 @@ export async function validateMonidApiKey(
     const provider = tool.providerName || tool.provider;
     const maxResultsPerQuery = affordableResultCount(tool, 8, maxPriceUsd);
     const estimatedPriceUsd = estimatedPrice(tool, maxResultsPerQuery);
+    const totalBudgetUsd = explicitMaxPriceUsd ?? initialBudgetUsd;
     return {
       valid: true,
       searchReady: true,
@@ -636,7 +661,7 @@ export async function validateMonidApiKey(
       totalBudgetUsd,
       maxResultsPerQuery,
       estimatedPriceUsd,
-      message: `Monid is connected in ${profile.label} mode. ${provider} ${tool.endpoint} can return up to ${maxResultsPerQuery} results per query; estimated run cost: $${estimatedPriceUsd.toFixed(3)}. Soft target: $${softCapUsd.toFixed(2)}. Property research budget: $${totalBudgetUsd.toFixed(2)}. Wallet balance: $${balanceUsd.toFixed(2)}.`,
+      message: `Monid is connected in ${profile.label} mode. ${provider} ${tool.endpoint} can return up to ${maxResultsPerQuery} results per query; estimated run cost: $${estimatedPriceUsd.toFixed(3)}. Soft target: $${softCapUsd.toFixed(2)}. ${profile.allowWalletEscalation ? 'No fixed provider ceiling; the available wallet is the final limit.' : `Per-run ceiling: $${hardCapUsd.toFixed(2)}.`} Property research budget: $${totalBudgetUsd.toFixed(2)}. Wallet balance: $${balanceUsd.toFixed(2)}.`,
       requestId: wallet.requestId,
       status: wallet.status,
     };
@@ -775,7 +800,7 @@ function moneyToUsd(money: MonidMoney | null | undefined): number | null {
 }
 
 function actualRunCostUsd(run: MonidRun | null): number | null {
-  return moneyToUsd(run?.billing?.actualCost);
+  return moneyToUsd(run?.cost) ?? moneyToUsd(run?.billing?.actualCost);
 }
 
 function asText(value: unknown): string {
@@ -907,7 +932,7 @@ export async function monidSearchBatchWithKey(
   if (!normalizedKey || !uniqueQueries.length) return [];
 
   const explicitMaxPriceUsd = Number.isFinite(options.maxPriceUsd)
-    ? Math.min(1, Math.max(0.001, Number(options.maxPriceUsd)))
+    ? Math.max(0.001, Number(options.maxPriceUsd))
     : null;
   const session = explicitMaxPriceUsd == null ? activeBudgetSession : null;
   const mode = session?.mode || options.budgetMode || 'adaptive';
@@ -934,13 +959,18 @@ export async function monidSearchBatchWithKey(
     if (signal?.aborted) return [];
   }
 
-  const availableBeforeDiscovery = explicitMaxPriceUsd ?? (
+  const plannedAvailableBeforeDiscovery = explicitMaxPriceUsd ?? (
     session
       ? Math.max(
         0,
         session.totalBudgetUsd - sessionAccountedSpend(session) - session.reservedUsd,
       )
       : profile.minimumBatchUsd
+  );
+  const availableBeforeDiscovery = explicitMaxPriceUsd ?? (
+    session && profile.allowWalletEscalation
+      ? sessionWalletRemaining(session)
+      : plannedAvailableBeforeDiscovery
   );
   if (availableBeforeDiscovery < 0.001) {
     if (session) {
@@ -952,7 +982,9 @@ export async function monidSearchBatchWithKey(
   const softCapUsd = explicitMaxPriceUsd
     ?? Math.min(profile.softPerRunUsd, availableBeforeDiscovery);
   const hardCapUsd = explicitMaxPriceUsd
-    ?? Math.min(profile.maxPerRunUsd, availableBeforeDiscovery);
+    ?? (profile.allowWalletEscalation
+      ? availableBeforeDiscovery
+      : Math.min(profile.maxPerRunUsd, availableBeforeDiscovery));
   const selection = await resolveSearchToolWithinBudget(
     normalizedKey,
     resolvedOptions,
@@ -977,7 +1009,12 @@ export async function monidSearchBatchWithKey(
   );
   const { tool } = selection;
   const perRunCeilingUsd = explicitMaxPriceUsd
-    ?? Math.min(selection.maxPriceUsd, availableAfterDiscovery);
+    ?? Math.min(
+      selection.maxPriceUsd,
+      session && profile.allowWalletEscalation
+        ? sessionWalletRemaining(session)
+        : availableAfterDiscovery,
+    );
   const affordableMaxResults = affordableResultCount(
     tool,
     resolvedOptions.maxResultsPerQuery,
