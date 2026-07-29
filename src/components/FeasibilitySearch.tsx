@@ -3285,6 +3285,20 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
   // The comp type filter chips are DRIVEN BY THE ZONING: only the building types
   // this district permits (data.compAllowedTypes) are offered, defaulting to
   // "All allowed" (a mix of every permitted type).
+  // Does the county GIS record actually carry anything? For parcels with no
+  // queryable county data (the SC counties behind Cloudflare-protected assessor
+  // portals) the Land and Parcel & Tax cards render as walls of "Unavailable"/
+  // "N/A", so they are hidden and the on-demand "Look up Owner & Land" result
+  // stands in instead. Any single real field brings both cards back.
+  const notApplicable = (value?: string) => !value || value.trim().toUpperCase() === 'N/A';
+  const hasParcelRecord = !!data && (
+    !notApplicable(data.ownerName)
+    || (data.gisAcres ?? 0) > 0
+    || !notApplicable(data.parcelId)
+    || (data.assessedPropertyValue ?? 0) > 0
+    || !notApplicable(data.mailingAddress)
+  );
+
   const allComps = data?.comps || [];
   const compDateWindow = data?.compDateWindow || getRollingCompDateWindow();
   const compPhotoGoogleKey = getUserKeys().googleMaps || '';
@@ -4137,7 +4151,9 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                 </div>
               </div>
 
-              {/* Card 2: Land Information */}
+              {/* Card 2: Land Information — hidden when the county GIS record is
+                  empty, since every row would read "Unavailable". */}
+              {hasParcelRecord && (
               <div className="card registry-card">
                 <h3 className="registry-card-header">Land Information</h3>
                 <div className="registry-list">
@@ -4304,8 +4320,10 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                   </div>
                 </div>
               </div>
+              )}
 
-              {/* Card 3: Parcel & Tax Information */}
+              {/* Card 3: Parcel & Tax Information — hidden for the same reason. */}
+              {hasParcelRecord && (
               <div className="card registry-card">
                 <h3 className="registry-card-header">Parcel & Tax Information</h3>
                 <div className="registry-list">
@@ -4397,6 +4415,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                   </div>
                 </div>
               </div>
+              )}
 
               {/* Card 4: Zoning & Development allowances */}
               <div className="card registry-card gridics-card">
