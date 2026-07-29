@@ -13,6 +13,7 @@ function monidProxyPath(path: string): string {
       ? `/v1/runs/${runId}`
       : '/v1/runs/invalid';
   }
+  if (endpoint === 'wallet') return '/v1/wallet/balance';
   return '/v1/invalid';
 }
 

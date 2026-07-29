@@ -2821,6 +2821,56 @@ code {
   color: var(--text-muted);
 }
 
+.monid-key-check {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  flex-wrap: wrap;
+}
+
+.btn-test-api-key {
+  min-height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+  padding: 0.35rem 0.65rem;
+  border: 1px solid var(--bg-card-border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-card);
+  color: var(--text-secondary);
+  font-size: 0.72rem;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.btn-test-api-key:hover:not(:disabled) {
+  border-color: var(--primary);
+  color: var(--primary);
+}
+
+.btn-test-api-key:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.api-key-check-message {
+  flex: 1 1 220px;
+  min-width: 0;
+  font-size: 0.7rem;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+  color: var(--text-muted);
+}
+
+.api-key-check-message.success {
+  color: var(--success);
+}
+
+.api-key-check-message.error {
+  color: var(--error);
+}
+
 .drawer-footer {
   padding: 1.5rem;
   border-top: 1px solid var(--bg-card-border);

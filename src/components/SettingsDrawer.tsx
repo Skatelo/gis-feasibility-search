@@ -1,8 +1,9 @@
 import { useState, useEffect } from 'react';
-import { X, Key, User, ShieldAlert, LogOut, CheckCircle, Eye, EyeOff, Info, Cloud, Ruler, Home, FileText } from 'lucide-react';
+import { X, Key, User, ShieldAlert, LogOut, CheckCircle, Eye, EyeOff, Info, Cloud, Ruler, Home, FileText, Loader2 } from 'lucide-react';
 import { persistUserKeys } from '../services/authService';
 import { isSupabaseConfigured } from '../services/supabaseClient';
 import { getCompPrefs, setCompPrefs, getReportAutoGenerate, setReportAutoGenerate } from '../services/feasibilityService';
+import { validateMonidApiKey, type MonidKeyValidation } from '../services/monidSearch';
 
 const COMP_TYPE_OPTIONS = [
   { value: 'all', label: 'All types' },
@@ -34,6 +35,10 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
   const [showPerplexityKey, setShowPerplexityKey] = useState(false);
   const [monidKey, setMonidKey] = useState('');
   const [showMonidKey, setShowMonidKey] = useState(false);
+  const [monidCheck, setMonidCheck] = useState<{
+    status: 'idle' | 'testing' | 'success' | 'error';
+    message: string;
+  }>({ status: 'idle', message: '' });
   const [mapboxToken, setMapboxToken] = useState('');
   const [showMapboxToken, setShowMapboxToken] = useState(false);
   const [enformionName, setEnformionName] = useState('');
@@ -67,6 +72,7 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
       setGeminiKey2(activeUser.keys?.gemini2 || '');
       setPerplexityKey(activeUser.keys?.perplexity || '');
       setMonidKey(activeUser.keys?.monid || '');
+      setMonidCheck({ status: 'idle', message: '' });
       setMapboxToken(activeUser.keys?.mapbox || '');
       setEnformionName(activeUser.keys?.enformionApName || '');
       setEnformionPassword(activeUser.keys?.enformionApPassword || '');
@@ -86,6 +92,16 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
 
   if (!isOpen) return null;
 
+  const checkMonidKey = async (): Promise<MonidKeyValidation> => {
+    setMonidCheck({ status: 'testing', message: 'Checking authentication, wallet, and search provider...' });
+    const result = await validateMonidApiKey(monidKey);
+    setMonidCheck({
+      status: result.valid && result.searchReady ? 'success' : 'error',
+      message: result.message,
+    });
+    return result;
+  };
+
   const handleSave = async () => {
     setValidationError(null);
     setSaveSuccess(false);
@@ -98,6 +114,13 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
     if (!geminiKey.trim()) {
       setValidationError("Gemini API Key is required for zoning research, comp exterior-photo selection, and the chatbot.");
       return;
+    }
+    if (monidKey.trim()) {
+      const monidValidation = await checkMonidKey();
+      if (!monidValidation.valid || !monidValidation.searchReady) {
+        setValidationError(monidValidation.message);
+        return;
+      }
     }
     const updatedKeys = {
       googleMaps: googleMapsKey.trim(),
@@ -317,7 +340,10 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
                   type={showMonidKey ? "text" : "password"}
                   placeholder="Monid API key"
                   value={monidKey}
-                  onChange={(e) => setMonidKey(e.target.value)}
+                  onChange={(e) => {
+                    setMonidKey(e.target.value);
+                    setMonidCheck({ status: 'idle', message: '' });
+                  }}
                 />
                 <button
                   type="button"
@@ -326,6 +352,28 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
                 >
                   {showMonidKey ? <EyeOff size={16} /> : <Eye size={16} />}
                 </button>
+              </div>
+              <div className="monid-key-check">
+                <button
+                  type="button"
+                  className="btn-test-api-key"
+                  onClick={() => void checkMonidKey()}
+                  disabled={!monidKey.trim() || monidCheck.status === 'testing'}
+                >
+                  {monidCheck.status === 'testing'
+                    ? <Loader2 size={14} className="spinner" />
+                    : <CheckCircle size={14} />}
+                  <span>{monidCheck.status === 'testing' ? 'Testing...' : 'Test key'}</span>
+                </button>
+                {monidCheck.message && (
+                  <span
+                    className={`api-key-check-message ${monidCheck.status}`}
+                    role="status"
+                    aria-live="polite"
+                  >
+                    {monidCheck.message}
+                  </span>
+                )}
               </div>
               <p className="field-help">
                 {monidKey.trim()
