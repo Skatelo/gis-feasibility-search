@@ -11,8 +11,10 @@ export {
 } from './source-discovery.service';
 export {
   perplexitySearchProvider,
+  monidSearchProvider,
   httpPageFetcher,
   crawleePageFetcher,
   type PerplexityProviderConfig,
+  type MonidProviderConfig,
   type CrawleeProviderConfig,
 } from './providers';

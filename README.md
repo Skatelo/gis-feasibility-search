@@ -11,7 +11,7 @@ A high-performance real estate feasibility screening dashboard built with React,
   - **Cabarrus County** (Concord/Kannapolis)
 * **Topography & Elevation Metrics**: Integrates with OpenTopography (Copernicus COP30 DEM) to gauge site slope and buildability classification (Buildable vs. Non-Buildable).
 * **Zoning & Allowances**: sends the complete NC or SC address to Gemini 3.6 Flash with Google Search grounding to return a source-backed district, setbacks, restrictions, and allowances.
-* **Hybrid Live Web Data**: the Perplexity Search API handles non-zoning ranked searches and source discovery; a bounded Crawlee scraper reads harder utility, fee, cost, and report sources plus linked PDF, DOCX, XLSX, CSV, JSON, XML, and text documents.
+* **Adaptive Live Web Data**: Perplexity handles the fast non-zoning search lane, Monid adds semantic coverage for hard or thin searches, and a bounded Crawlee scraper reads selected utility, fee, cost, and report pages plus linked PDF, DOCX, XLSX, CSV, JSON, XML, and text documents.
 * **Comparable Sold Listings**: Scrapes verified sold properties from Realtor.com via Google Search grounding to calculateDeveloped After Repair Value (ARV).
 * **Mortgage & Sales Transactions**: Runs an explicit, on-demand RealEstateAPI.com Property Detail lookup for the exact NC or SC address and displays recorded mortgage and sale history in the left report column.
 * **Interactive Gemini Q&A Chatbot**: A contextual chatbot capable of explaining setbacks, zoning rules, or construction options utilizing the current parcel context.
@@ -36,11 +36,21 @@ npm run build
 
 ## Crawlee Research
 
-Crawlee runs inside the Netlify backend and does not require a separate API key. Configure a Perplexity key in **Account & API Settings** so the app can discover source URLs; scrape-heavy searches are then automatically sent to Crawlee for page and document extraction.
+Crawlee runs inside the Netlify backend and does not require a separate API key. Configure Perplexity, Monid, or both in **Account & API Settings** so the app can discover source URLs; scrape-heavy searches are then automatically sent to Crawlee for page and document extraction.
 
 The crawler uses HTTP + Cheerio rather than a browser for speed. Each run is limited by page count, crawl depth, concurrency, request timeout, and a 12 MB response cap. It follows only relevant same-site links, respects `robots.txt`, blocks private-network targets, and is rate-limited per visitor in production.
 
-For local testing of the crawler endpoint, use `npx netlify dev`. Plain `npm run dev` still supports Perplexity search, but it does not execute Netlify functions.
+For local testing of the crawler endpoint, use `npx netlify dev`. Plain `npm run dev` supports both Perplexity and Monid search through Vite proxies, but it does not execute the Crawlee Netlify function.
+
+## Monid Research
+
+The app uses Monid's direct HTTP API instead of its MCP server. That fits a browser application better: the same-origin proxy supplies deterministic authentication, strict timeouts, provider-status checks, and a maximum estimated price per call without requiring an interactive MCP session.
+
+When both credentials are configured, easy searches stay on Perplexity. Hard searches run Perplexity and Monid concurrently, while an automatic Monid top-up runs only when Perplexity returns too few results, too few domains, or thin snippets. With only a Monid key, Monid supplies the normal live-search path. Crawlee remains responsible for reading the chosen pages and documents.
+
+Only Monid endpoint metadata is cached in memory for 30 minutes. Search and address results are never cached or prefetched; every property lookup makes fresh source requests. Create a key at `https://app.monid.ai/access/api-keys` and set it in **Account & API Settings** or as `VITE_MONID_API_KEY`.
+
+Run `npm run benchmark:search -- --allow-paid` with both keys configured to compare the providers on concurrent Carolina research cases. See `docs/search-provider-comparison.md` for the routing decision, scoring method, and tradeoffs.
 
 ## Mortgage & Sales History
 

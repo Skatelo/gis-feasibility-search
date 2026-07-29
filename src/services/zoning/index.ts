@@ -11,6 +11,7 @@ export { resolveJurisdiction } from './jurisdiction';
 export {
   SourceDiscoveryService,
   perplexitySearchProvider,
+  monidSearchProvider,
   crawleePageFetcher,
   httpPageFetcher,
   type SearchProvider,

@@ -32,8 +32,8 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
   const [showGeminiKey2, setShowGeminiKey2] = useState(false);
   const [perplexityKey, setPerplexityKey] = useState('');
   const [showPerplexityKey, setShowPerplexityKey] = useState(false);
-  const [octenKey, setOctenKey] = useState('');
-  const [showOctenKey, setShowOctenKey] = useState(false);
+  const [monidKey, setMonidKey] = useState('');
+  const [showMonidKey, setShowMonidKey] = useState(false);
   const [mapboxToken, setMapboxToken] = useState('');
   const [showMapboxToken, setShowMapboxToken] = useState(false);
   const [enformionName, setEnformionName] = useState('');
@@ -66,7 +66,7 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
       setGeminiKey(activeUser.keys?.gemini || '');
       setGeminiKey2(activeUser.keys?.gemini2 || '');
       setPerplexityKey(activeUser.keys?.perplexity || '');
-      setOctenKey(activeUser.keys?.octen || '');
+      setMonidKey(activeUser.keys?.monid || '');
       setMapboxToken(activeUser.keys?.mapbox || '');
       setEnformionName(activeUser.keys?.enformionApName || '');
       setEnformionPassword(activeUser.keys?.enformionApPassword || '');
@@ -104,7 +104,7 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
       gemini: geminiKey.trim(),
       gemini2: geminiKey2.trim(),
       perplexity: perplexityKey.trim(),
-      octen: octenKey.trim(),
+      monid: monidKey.trim(),
       mapbox: mapboxToken.trim(),
       enformionApName: enformionName.trim(),
       enformionApPassword: enformionPassword.trim(),
@@ -299,34 +299,40 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
                   {showPerplexityKey ? <EyeOff size={16} /> : <Eye size={16} />}
                 </button>
               </div>
-              <p className="field-help">Optional non-zoning research for utilities, fees, costs, and reports. Zoning never uses Perplexity or Crawlee; it uses Gemini 3.6 Flash with Google Search grounding only.{octenKey.trim() ? ' Currently INACTIVE — your Octen key is set and takes over live web search.' : ''}</p>
+              <p className="field-help">
+                Optional fast search for utilities, fees, costs, and reports. When both keys are set, Perplexity handles the fast lane and Monid cross-checks hard or thin searches. Zoning is unchanged and continues to use Gemini 3.6 Flash plus official GIS evidence.
+              </p>
             </div>
 
-            {/* Octen — optional live web search engine; replaces Perplexity when set */}
+            {/* Monid - bounded semantic search for hard or thin research */}
             <div className="settings-field-group">
               <div className="field-label-row">
-                <label htmlFor="octenKey">Octen API Key (live web search)</label>
+                <label htmlFor="monidKey">Monid API Key (adaptive web research)</label>
                 <span className="badge optional">Optional</span>
               </div>
               <div className="field-input-container">
                 <Key className="input-icon" size={16} />
                 <input
-                  id="octenKey"
-                  type={showOctenKey ? "text" : "password"}
-                  placeholder="Octen API key…"
-                  value={octenKey}
-                  onChange={(e) => setOctenKey(e.target.value)}
+                  id="monidKey"
+                  type={showMonidKey ? "text" : "password"}
+                  placeholder="Monid API key"
+                  value={monidKey}
+                  onChange={(e) => setMonidKey(e.target.value)}
                 />
                 <button
                   type="button"
                   className="field-toggle-btn"
-                  onClick={() => setShowOctenKey(!showOctenKey)}
+                  onClick={() => setShowMonidKey(!showMonidKey)}
                 >
-                  {showOctenKey ? <EyeOff size={16} /> : <Eye size={16} />}
+                  {showMonidKey ? <EyeOff size={16} /> : <Eye size={16} />}
                 </button>
               </div>
               <p className="field-help">
-                {octenKey.trim() ? 'ACTIVE — Octen is handling all live web research.' : 'Optional alternative to Perplexity.'} When set, Octen fully replaces Perplexity: its Search API finds sources, its Extract API pulls page/PDF/ordinance text (in place of Crawlee), and Broad Search widens deep research passes. Leave blank to keep using Perplexity. Get a key at docs.octen.ai.
+                {monidKey.trim()
+                  ? (perplexityKey.trim()
+                    ? 'ACTIVE - Monid will run beside Perplexity for hard searches and when Perplexity evidence is thin.'
+                    : 'ACTIVE - Monid will provide live web search because no Perplexity key is set.')
+                  : 'Optional semantic-search fallback for harder research.'} The app dynamically selects a low-cost Monid search provider with strict price and timeout limits. Crawlee still reads selected pages and documents. Get a key at app.monid.ai.
               </p>
             </div>
 
