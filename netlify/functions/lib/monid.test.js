@@ -247,9 +247,9 @@ test('Monid validation accepts an affordable reduced result count', async () => 
   assert.equal(result.estimatedPriceUsd, 0.05);
   assert.match(result.message, /up to 5 results per query/i);
   assert.equal(result.budgetMode, 'adaptive');
-  assert.equal(result.totalBudgetUsd, 0.15);
+  assert.equal(result.totalBudgetUsd, 1);
   assert.match(result.message, /soft target: \$0\.05/i);
-  assert.match(result.message, /property research budget: \$0\.15/i);
+  assert.match(result.message, /property research budget: \$1\.00/i);
 });
 
 test('Monid still rejects a per-call tool that exceeds the safety cap', async () => {
@@ -299,11 +299,61 @@ test('a transient discovery failure is retried during adaptive escalation instea
   assert.equal(discoveryCalls, 3);
 });
 
-test('Adaptive mode escalates beyond the soft target and records actual billing', async () => {
+test('Adaptive validation accepts a provider above the initial address budget', async () => {
+  monid.resetMonidSearchToolCache();
+  const price = { type: 'PER_CALL', amount: 0.20, currency: 'USD' };
+  const fetchImpl = async (url) => {
+    const endpoint = new URL(String(url), 'http://localhost').searchParams.get('endpoint');
+    if (endpoint === 'wallet') {
+      return jsonResponse({ balance: { value: 1, currency: 'USD' } });
+    }
+    if (endpoint === 'discover') return jsonResponse(exaDiscovery(price));
+    if (endpoint === 'inspect') return jsonResponse(exaInspection(price));
+    throw new Error(`Validation must not execute ${endpoint}`);
+  };
+
+  const result = await monid.validateMonidApiKey(
+    'monid-no-fixed-ceiling-validation-key',
+    { fetchImpl, budgetMode: 'adaptive' },
+  );
+
+  assert.equal(result.valid, true);
+  assert.equal(result.searchReady, true);
+  assert.equal(result.estimatedPriceUsd, 0.20);
+  assert.equal(result.totalBudgetUsd, 1);
+  assert.match(result.message, /no fixed provider ceiling/i);
+  assert.match(result.message, /wallet is the final limit/i);
+});
+
+test('Adaptive validation still rejects a provider that exceeds the wallet balance', async () => {
+  monid.resetMonidSearchToolCache();
+  const price = { type: 'PER_CALL', amount: 1.20, currency: 'USD' };
+  const fetchImpl = async (url) => {
+    const endpoint = new URL(String(url), 'http://localhost').searchParams.get('endpoint');
+    if (endpoint === 'wallet') {
+      return jsonResponse({ balance: { value: 1, currency: 'USD' } });
+    }
+    if (endpoint === 'discover') return jsonResponse(exaDiscovery(price));
+    if (endpoint === 'inspect') return jsonResponse(exaInspection(price));
+    throw new Error(`Validation must not execute ${endpoint}`);
+  };
+
+  const result = await monid.validateMonidApiKey(
+    'monid-wallet-guardrail-key',
+    { fetchImpl, budgetMode: 'adaptive' },
+  );
+
+  assert.equal(result.valid, true);
+  assert.equal(result.searchReady, false);
+  assert.match(result.message, /no compatible web-search tool was affordable/i);
+  assert.match(result.message, /\$1\.00 balance/i);
+});
+
+test('Adaptive mode uses the available wallet without a fixed provider ceiling', async () => {
   monid.resetMonidSearchToolCache();
   monid.resetMonidBudgetSession();
   const calls = [];
-  const price = { type: 'PER_CALL', amount: 0.06, currency: 'USD' };
+  const price = { type: 'PER_CALL', amount: 0.20, currency: 'USD' };
   const fetchImpl = async (url, init) => {
     const endpoint = new URL(String(url), 'http://localhost').searchParams.get('endpoint');
     const body = init.body ? JSON.parse(init.body) : null;
@@ -314,7 +364,7 @@ test('Adaptive mode escalates beyond the soft target and records actual billing'
     if (endpoint === 'discover') return jsonResponse(exaDiscovery(price));
     if (endpoint === 'inspect') return jsonResponse(exaInspection(price));
     if (endpoint === 'run') {
-      return jsonResponse(completedSearch(body.input.query, '', 0.06));
+      return jsonResponse(completedSearch(body.input.query, '', 0.20));
     }
     throw new Error(`Unexpected endpoint: ${endpoint}`);
   };
@@ -331,16 +381,16 @@ test('Adaptive mode escalates beyond the soft target and records actual billing'
   assert.deepEqual(calls, ['wallet', 'discover', 'inspect', 'discover', 'inspect', 'run']);
   assert.equal(snapshot.mode, 'adaptive');
   assert.equal(snapshot.walletBalanceUsd, 1);
-  assert.equal(snapshot.totalBudgetUsd, 0.15);
-  assert.equal(snapshot.actualSpentUsd, 0.06);
+  assert.equal(snapshot.totalBudgetUsd, 1);
+  assert.equal(snapshot.actualSpentUsd, 0.20);
   assert.equal(snapshot.estimatedSpentUsd, 0);
-  assert.equal(snapshot.remainingUsd, 0.09);
+  assert.equal(snapshot.remainingUsd, 0.80);
   assert.equal(snapshot.runsCompleted, 1);
   assert.equal(snapshot.skippedQueries, 0);
   monid.resetMonidBudgetSession();
 });
 
-test('one address budget reserves concurrent runs and skips queries that do not fit', async () => {
+test('the wallet guardrail reserves concurrent runs and skips queries that do not fit', async () => {
   monid.resetMonidSearchToolCache();
   monid.resetMonidBudgetSession();
   const price = { type: 'PER_CALL', amount: 0.06, currency: 'USD' };
@@ -349,7 +399,7 @@ test('one address budget reserves concurrent runs and skips queries that do not 
     const endpoint = new URL(String(url), 'http://localhost').searchParams.get('endpoint');
     const body = init.body ? JSON.parse(init.body) : null;
     if (endpoint === 'wallet') {
-      return jsonResponse({ balance: { value: 1, currency: 'USD' } });
+      return jsonResponse({ balance: { value: 0.12, currency: 'USD' } });
     }
     if (endpoint === 'discover') return jsonResponse(exaDiscovery(price));
     if (endpoint === 'inspect') return jsonResponse(exaInspection(price));
@@ -370,10 +420,59 @@ test('one address budget reserves concurrent runs and skips queries that do not 
 
   assert.equal(results.length, 2);
   assert.equal(runCalls, 2);
+  assert.equal(snapshot.totalBudgetUsd, 0.12);
   assert.equal(snapshot.actualSpentUsd, 0.12);
-  assert.equal(snapshot.remainingUsd, 0.03);
+  assert.equal(snapshot.remainingUsd, 0);
   assert.equal(snapshot.runsCompleted, 2);
   assert.equal(snapshot.skippedQueries, 1);
+  monid.resetMonidBudgetSession();
+});
+
+test('async runs reconcile the documented dollar cost returned by GET /v1/runs/:runId', async () => {
+  monid.resetMonidSearchToolCache();
+  monid.resetMonidBudgetSession();
+  const price = { type: 'PER_CALL', amount: 0.07, currency: 'USD' };
+  const calls = [];
+  const fetchImpl = async (url, init) => {
+    const endpoint = new URL(String(url), 'http://localhost').searchParams.get('endpoint');
+    const body = init.body ? JSON.parse(init.body) : null;
+    calls.push(endpoint);
+    if (endpoint === 'wallet') {
+      return jsonResponse({ balance: { value: 0.10, currency: 'USD' } });
+    }
+    if (endpoint === 'discover') return jsonResponse(exaDiscovery(price));
+    if (endpoint === 'inspect') return jsonResponse(exaInspection(price));
+    if (endpoint === 'run') {
+      return jsonResponse({
+        runId: '01HXYZ1234567890ABCDEF',
+        provider: 'exa',
+        endpoint: '/search',
+        status: 'RUNNING',
+        price,
+      }, 202);
+    }
+    if (endpoint === 'runs') {
+      const completed = completedSearch('York County sewer tap fees');
+      delete completed.billing;
+      completed.cost = { value: 0.07, currency: 'USD' };
+      return jsonResponse(completed);
+    }
+    throw new Error(`Unexpected endpoint: ${endpoint} ${body ? JSON.stringify(body) : ''}`);
+  };
+
+  monid.beginMonidBudgetSession('property:async-cost', 'adaptive');
+  const results = await monid.monidSearchBatchWithKey(
+    'monid-async-cost-key',
+    ['York County sewer tap fees'],
+    { fetchImpl },
+  );
+  const snapshot = monid.getMonidBudgetSnapshot();
+
+  assert.equal(results.length, 1);
+  assert.deepEqual(calls, ['wallet', 'discover', 'inspect', 'discover', 'inspect', 'run', 'runs']);
+  assert.equal(snapshot.actualSpentUsd, 0.07);
+  assert.equal(snapshot.estimatedSpentUsd, 0);
+  assert.equal(snapshot.remainingUsd, 0.03);
   monid.resetMonidBudgetSession();
 });
 
@@ -413,7 +512,7 @@ test('Economy rejects an expensive provider while Thorough can use it', async ()
   );
   const thoroughSnapshot = monid.getMonidBudgetSnapshot();
   assert.equal(thoroughResults.length, 1);
-  assert.equal(thoroughSnapshot.totalBudgetUsd, 0.35);
+  assert.equal(thoroughSnapshot.totalBudgetUsd, 1);
   assert.equal(thoroughSnapshot.actualSpentUsd, 0.06);
   monid.resetMonidBudgetSession();
 });

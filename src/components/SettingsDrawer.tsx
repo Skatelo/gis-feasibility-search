@@ -412,7 +412,9 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
                       role="radio"
                       aria-checked={monidBudgetMode === mode}
                       className={`monid-budget-mode${monidBudgetMode === mode ? ' active' : ''}`}
-                      title={`${profile.label}: $${profile.softPerRunUsd.toFixed(2)} soft target, up to $${profile.maxBatchUsd.toFixed(2)} per address when the wallet allows`}
+                      title={profile.allowWalletEscalation
+                        ? `${profile.label}: $${profile.softPerRunUsd.toFixed(2)} soft target with no fixed provider ceiling; available wallet is the final limit`
+                        : `${profile.label}: $${profile.softPerRunUsd.toFixed(2)} soft target, capped at $${profile.maxBatchUsd.toFixed(2)} per address`}
                       onClick={() => {
                         setMonidBudgetMode(mode);
                         setMonidCheck({ status: 'idle', message: '' });
@@ -468,7 +470,7 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
                   ? (perplexityKey.trim()
                     ? 'ACTIVE - Monid will run beside Perplexity for hard searches and when Perplexity evidence is thin.'
                     : 'ACTIVE - Monid will provide live web search because no Perplexity key is set.')
-                  : 'Optional semantic-search fallback for harder research.'} The selected mode shares one wallet-aware budget across the address analysis, starts with a soft price target, and escalates only when a compatible lower-cost provider is unavailable. Crawlee still reads selected pages and documents. Get a key at app.monid.ai.
+                  : 'Optional semantic-search fallback for harder research.'} Adaptive and Thorough start with a soft price target but have no fixed provider ceiling; the available wallet and actual Monid billing are the final guardrails. Economy remains capped. Crawlee still reads selected pages and documents. Get a key at app.monid.ai.
               </p>
             </div>
 
