@@ -35,9 +35,11 @@ import {
 } from './parcels/parcel-identity';
 import {
   beginMonidBudgetSession,
+  monidExtractUrlsWithKey,
   monidSearchBatchWithKey,
   summarizeSearchQuality,
   type MonidBudgetMode,
+  type MonidResearchStrategy,
   type MonidSearchResult,
 } from './monidSearch';
 
@@ -52,8 +54,8 @@ export interface UserKeys {
   /** Perplexity API key for utilities, tree rates, cost estimates, takeoff,
    *  LLC trace, and report research. Zoning never uses this credential. */
   perplexity?: string;
-  /** Optional Monid API key. Monid supplies a wallet-aware semantic-search
-   *  fallback for hard or thin non-zoning research through its tool catalog. */
+  /** Optional Monid API key. The app uses Monid's Octen Search, Broad Search,
+   *  Extract, and Embedding tools for wallet-aware non-zoning research. */
   monid?: string;
   /** Controls Monid's shared budget for one property analysis. */
   monidBudgetMode?: MonidBudgetMode;
@@ -470,15 +472,98 @@ function formatCrawleeSources(results: CrawleeResult[], maxSources = 24, maxSnip
   }).join('\n\n');
 }
 
+function extractedSourceKind(url: string): CrawleeResult['kind'] {
+  const pathname = (() => {
+    try { return new URL(url).pathname.toLowerCase(); } catch { return url.toLowerCase(); }
+  })();
+  if (pathname.endsWith('.pdf')) return 'pdf';
+  if (pathname.endsWith('.docx')) return 'docx';
+  if (pathname.endsWith('.xlsx') || pathname.endsWith('.xls')) return 'xlsx';
+  if (pathname.endsWith('.csv')) return 'csv';
+  if (pathname.endsWith('.json') || pathname.includes('/query')) return 'json';
+  if (pathname.endsWith('.txt')) return 'text';
+  return 'html';
+}
+
+async function octenExtractBatch(
+  urls: string[],
+  queries: string[],
+  maxTargets = 8,
+): Promise<CrawleeResult[]> {
+  const key = getMonidKey();
+  if (!key) return [];
+  const targets = [...new Set(urls.map((url) => url.trim()).filter(Boolean))]
+    .slice(0, Math.min(12, Math.max(4, maxTargets)));
+  if (!targets.length) return [];
+  const extracted = await monidExtractUrlsWithKey(
+    key,
+    targets,
+    queries.join('\n'),
+    {
+      timeoutMs: 20_000,
+      budgetMode: getMonidBudgetMode(),
+    },
+  );
+  return extracted.map((result) => ({
+    ...result,
+    kind: extractedSourceKind(result.url),
+  }));
+}
+
+function mergeExtractedSources(groups: CrawleeResult[][]): CrawleeResult[] {
+  const merged = new Map<string, CrawleeResult>();
+  for (const group of groups) {
+    for (const result of group) {
+      const key = (() => {
+        try {
+          const url = new URL(result.url);
+          url.hash = '';
+          return url.toString();
+        } catch {
+          return result.url;
+        }
+      })();
+      const previous = merged.get(key);
+      if (!previous || (result.content || result.snippet).length > (previous.content || previous.snippet).length) {
+        merged.set(key, result);
+      }
+    }
+  }
+  return [...merged.values()];
+}
+
 async function crawleeResearchBlock(searchResults: PplxResult[], queries: string[], opts?: WebResearchOptions): Promise<{ block: string; urls: string[] }> {
   const urls = [
     ...(opts?.seedUrls || []),
     ...searchResults.map((result) => result.url),
   ];
-  const results = await crawleeScrapeBatch(urls, queries, opts?.maxScrapeTargets);
+  let crawleeResults: CrawleeResult[];
+  let octenResults: CrawleeResult[] = [];
+  if (opts?.mode === 'hard' && monidConfigured()) {
+    [crawleeResults, octenResults] = await Promise.all([
+      crawleeScrapeBatch(urls, queries, opts?.maxScrapeTargets),
+      octenExtractBatch(urls, queries, opts?.maxScrapeTargets),
+    ]);
+  } else {
+    crawleeResults = await crawleeScrapeBatch(urls, queries, opts?.maxScrapeTargets);
+    const extractedChars = crawleeResults.reduce(
+      (total, result) => total + (result.content || result.snippet).length,
+      0,
+    );
+    const extractionIsThin = crawleeResults.length < Math.min(2, urls.length)
+      || extractedChars < 1600;
+    if (extractionIsThin && monidConfigured()) {
+      octenResults = await octenExtractBatch(urls, queries, opts?.maxScrapeTargets);
+    }
+  }
+  const results = mergeExtractedSources([crawleeResults, octenResults]);
   if (!results.length) return { block: '', urls: [] };
+  const extractors = [
+    crawleeResults.length ? 'bounded Crawlee page/document extraction' : '',
+    octenResults.length ? 'Octen Extract' : '',
+  ].filter(Boolean).join(' + ');
   return {
-    block: `\n\nLIVE WEB RESEARCH (${activeWebSearchProvider() === 'hybrid' ? 'Perplexity + Monid discovery' : `${activeWebSearchProvider()} discovery`} + bounded Crawlee page/document extraction). Base every figure on THESE extracted sources and cite their URLs in "sources"; do not invent anything beyond them:\n\n${formatCrawleeSources(results, opts?.maxSources ?? 24)}`,
+    block: `\n\nLIVE WEB RESEARCH (${activeWebSearchProvider() === 'hybrid' ? 'Perplexity + Octen via Monid discovery' : `${activeWebSearchProvider()} discovery`} + ${extractors}). Base every figure on THESE extracted sources and cite their URLs in "sources"; do not invent anything beyond them:\n\n${formatCrawleeSources(results, opts?.maxSources ?? 24)}`,
     urls: results.map((r) => r.url),
   };
 }
@@ -498,10 +583,16 @@ function interleaveDedupe(groups: PplxResult[][]): PplxResult[] {
   return merged;
 }
 
-/** Monid semantic search with the same result contract as Perplexity. */
+/** Octen Search/Broad Search through Monid with the Perplexity result contract. */
 export async function monidSearchBatch(
   queries: string[],
-  opts?: { maxResultsPerQuery?: number; maxTokensPerPage?: number; recency?: 'day' | 'week' | 'month' | 'year' },
+  opts?: {
+    maxResultsPerQuery?: number;
+    maxTokensPerPage?: number;
+    recency?: 'day' | 'week' | 'month' | 'year';
+    strategy?: MonidResearchStrategy;
+    semanticRerank?: boolean;
+  },
 ): Promise<PplxResult[]> {
   const key = getMonidKey();
   if (!key) return [];
@@ -509,6 +600,8 @@ export async function monidSearchBatch(
     maxResultsPerQuery: opts?.maxResultsPerQuery,
     maxTokensPerPage: opts?.maxTokensPerPage,
     recency: opts?.recency,
+    strategy: opts?.strategy,
+    semanticRerank: opts?.semanticRerank,
     budgetMode: getMonidBudgetMode(),
   });
   return results;
@@ -655,7 +748,11 @@ async function perplexityResearchBlock(queries: string[], opts?: WebResearchOpti
     // extending the Perplexity wait.
     [perplexityResults, monidResults] = await Promise.all([
       perplexitySearchBatch(queries, { maxResultsPerQuery: perQuery }),
-      monidSearchBatch(queries, { maxResultsPerQuery: perQuery }),
+      monidSearchBatch(queries, {
+        maxResultsPerQuery: perQuery,
+        strategy: 'broad',
+        semanticRerank: true,
+      }),
     ]);
   } else if (hasPerplexity) {
     perplexityResults = await perplexitySearchBatch(queries, {
@@ -668,12 +765,31 @@ async function perplexityResearchBlock(queries: string[], opts?: WebResearchOpti
     if (hasMonid && opts?.mode !== 'easy' && opts?.mode !== 'perplexity' && thin) {
       monidResults = await monidSearchBatch(queries, {
         maxResultsPerQuery: perQuery,
+        strategy: 'broad',
+        semanticRerank: true,
       });
     }
   } else if (hasMonid) {
+    const monidStrategy: MonidResearchStrategy = opts?.mode === 'hard' ? 'broad' : 'search';
     monidResults = await monidSearchBatch(queries, {
       maxResultsPerQuery: perQuery,
+      strategy: monidStrategy,
+      semanticRerank: opts?.mode === 'hard',
     });
+    if (monidStrategy === 'search' && opts?.mode !== 'easy' && opts?.mode !== 'perplexity') {
+      const quality = summarizeSearchQuality(monidResults, queries);
+      const thin = quality.resultCount < 8
+        || quality.uniqueDomains < 3
+        || quality.contentCoverageRate < 0.45;
+      if (thin) {
+        const broadResults = await monidSearchBatch(queries, {
+          maxResultsPerQuery: perQuery,
+          strategy: 'broad',
+          semanticRerank: true,
+        });
+        monidResults = interleaveDedupe([monidResults, broadResults]);
+      }
+    }
   }
 
   const results = interleaveDedupe([perplexityResults, monidResults]);
@@ -684,7 +800,7 @@ async function perplexityResearchBlock(queries: string[], opts?: WebResearchOpti
   if (!results.length) return { block: '', urls: [] };
   const providers = [
     perplexityResults.length ? 'Perplexity Search API' : '',
-    monidResults.length ? 'Monid semantic search' : '',
+    monidResults.length ? 'Octen Search via Monid' : '',
   ].filter(Boolean).join(' + ');
   return {
     block: `\n\nLIVE WEB SEARCH RESULTS (${providers || 'live web search'} — ranked, current, with extracted page content). Base every figure on THESE sources and cite their URLs in "sources"; do not invent anything beyond them:\n\n${formatPplxSources(results, opts?.maxSources ?? (opts?.mode === 'hard' ? 32 : 24))}`,

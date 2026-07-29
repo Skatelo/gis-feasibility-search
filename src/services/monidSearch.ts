@@ -6,6 +6,7 @@ export interface MonidSearchResult {
 }
 
 export type MonidBudgetMode = 'economy' | 'adaptive' | 'thorough';
+export type MonidResearchStrategy = 'search' | 'broad';
 
 export interface MonidBudgetProfile {
   label: string;
@@ -55,6 +56,8 @@ export interface MonidSearchOptions {
   maxResultsPerQuery?: number;
   maxTokensPerPage?: number;
   recency?: 'day' | 'week' | 'month' | 'year';
+  strategy?: MonidResearchStrategy;
+  semanticRerank?: boolean;
   timeoutMs?: number;
   budgetMode?: MonidBudgetMode;
   /** Explicit compatibility override. Normal app searches use budgetMode. */
@@ -79,6 +82,37 @@ interface MonidTool {
   inputSchema?: Record<string, unknown> | null;
   price?: MonidPrice;
 }
+
+interface MonidSchemaNode {
+  type?: string;
+  properties?: Record<string, MonidSchemaNode>;
+}
+
+export type OctenToolRole = 'search' | 'broad-search' | 'extract' | 'embedding';
+
+interface OctenToolSpec {
+  endpoint: string;
+  discoveryQuery: string;
+}
+
+const OCTEN_TOOL_SPECS: Record<OctenToolRole, OctenToolSpec> = {
+  search: {
+    endpoint: '/search',
+    discoveryQuery: 'Octen web search',
+  },
+  'broad-search': {
+    endpoint: '/broad-search',
+    discoveryQuery: 'Octen broad search',
+  },
+  extract: {
+    endpoint: '/extract',
+    discoveryQuery: 'Octen URL content extract',
+  },
+  embedding: {
+    endpoint: '/embedding',
+    discoveryQuery: 'Octen text embedding',
+  },
+};
 
 interface MonidResponse<T = unknown> {
   status: number;
@@ -123,6 +157,14 @@ export interface MonidBudgetSnapshot {
   skippedQueries: number;
 }
 
+export interface MonidExtractResult {
+  title: string;
+  url: string;
+  content: string;
+  snippet: string;
+  date?: string;
+}
+
 interface MutableMonidBudgetSession {
   sessionId: string;
   mode: MonidBudgetMode;
@@ -158,6 +200,10 @@ let searchToolCache: {
   expiresAt: number;
   promise: Promise<MonidTool | null>;
 } | null = null;
+const octenToolCache = new Map<string, {
+  expiresAt: number;
+  promise: Promise<MonidTool | null>;
+}>();
 let activeBudgetSession: MutableMonidBudgetSession | null = null;
 const budgetListeners = new Set<(snapshot: MonidBudgetSnapshot | null) => void>();
 
@@ -422,18 +468,128 @@ function toolRank(tool: MonidTool, maxResults: number, maxPriceUsd: number): num
   return score;
 }
 
-function schemaProperties(schema: Record<string, unknown> | null | undefined): Record<string, any> {
-  const properties = schema && typeof schema.properties === 'object' && schema.properties
-    ? schema.properties
+function schemaProperties(schema: unknown): Record<string, MonidSchemaNode> {
+  const candidate = schema && typeof schema === 'object'
+    ? schema as MonidSchemaNode
+    : null;
+  const properties = candidate && typeof candidate.properties === 'object' && candidate.properties
+    ? candidate.properties
     : {};
-  return properties as Record<string, any>;
+  return properties;
 }
 
 function queryFieldFor(tool: MonidTool): string | null {
   const properties = schemaProperties(tool.inputSchema);
   const candidates = ['query', 'q', 'searchQuery', 'search_query', 'searchTerm', 'search_term'];
   return candidates.find((name) => Object.prototype.hasOwnProperty.call(properties, name))
-    || (tool.provider.toLowerCase() === 'exa' ? 'query' : null);
+    || (['exa', 'octen'].includes(tool.provider.toLowerCase()) ? 'query' : null);
+}
+
+function normalizedToolEndpoint(endpoint: string): string {
+  const withoutMethod = endpoint.trim().replace(/^(GET|POST|PUT|PATCH|DELETE)\s+/i, '');
+  try {
+    return new URL(withoutMethod, 'https://provider.invalid').pathname
+      .replace(/\/+$/, '')
+      .toLowerCase() || '/';
+  } catch {
+    return withoutMethod.split('?')[0].replace(/\/+$/, '').toLowerCase() || '/';
+  }
+}
+
+function isOctenProvider(tool: MonidTool): boolean {
+  return `${tool.provider} ${tool.providerName || ''}`.toLowerCase().includes('octen');
+}
+
+function isOctenToolForRole(tool: MonidTool, role: OctenToolRole): boolean {
+  return isOctenProvider(tool)
+    && normalizedToolEndpoint(tool.endpoint) === OCTEN_TOOL_SPECS[role].endpoint;
+}
+
+function inspectedTool(payload: unknown): MonidTool | null {
+  if (!payload || typeof payload !== 'object') return null;
+  const value = payload as Record<string, unknown>;
+  const candidate = value.tool && typeof value.tool === 'object'
+    ? value.tool as Record<string, unknown>
+    : value;
+  if (typeof candidate.provider !== 'string' || typeof candidate.endpoint !== 'string') return null;
+  return candidate as unknown as MonidTool;
+}
+
+async function discoverOctenTool(
+  key: string,
+  role: OctenToolRole,
+  options: Pick<MonidSearchOptions, 'fetchImpl' | 'signal'> & { timeoutMs: number },
+): Promise<MonidTool | null> {
+  const fetchImpl = options.fetchImpl || browserFetch;
+  const spec = OCTEN_TOOL_SPECS[role];
+
+  try {
+    const direct = await monidRequest<MonidTool>('inspect', key, {
+      body: { provider: 'octen', endpoint: spec.endpoint },
+      timeoutMs: Math.min(options.timeoutMs, 8_000),
+      fetchImpl,
+      signal: options.signal,
+    });
+    const directTool = inspectedTool(direct.payload);
+    if (direct.status === 200 && directTool && isOctenToolForRole(directTool, role)) {
+      return directTool;
+    }
+  } catch {
+    // Catalog discovery below handles provider aliases and endpoint changes.
+  }
+
+  const discovered = await monidRequest<{ results?: MonidTool[] }>('discover', key, {
+    body: { query: spec.discoveryQuery, limit: 20 },
+    timeoutMs: Math.min(options.timeoutMs, 10_000),
+    fetchImpl,
+    signal: options.signal,
+  });
+  if (discovered.status !== 200 || !Array.isArray(discovered.payload?.results)) return null;
+
+  const candidates = discovered.payload.results.filter((tool) => isOctenToolForRole(tool, role));
+  for (const candidate of candidates) {
+    try {
+      const response = await monidRequest<MonidTool>('inspect', key, {
+        body: { provider: candidate.provider, endpoint: candidate.endpoint },
+        timeoutMs: Math.min(options.timeoutMs, 8_000),
+        fetchImpl,
+        signal: options.signal,
+      });
+      const metadata = inspectedTool(response.payload);
+      if (response.status === 200 && metadata) {
+        const merged = { ...candidate, ...metadata };
+        if (isOctenToolForRole(merged, role)) return merged;
+      }
+    } catch {
+      // Try the next exact Octen candidate.
+    }
+  }
+  return null;
+}
+
+async function resolvedOctenTool(
+  key: string,
+  role: OctenToolRole,
+  options: Pick<MonidSearchOptions, 'fetchImpl' | 'signal'> & { timeoutMs: number },
+): Promise<MonidTool | null> {
+  const now = Date.now();
+  const cacheKey = `${key}:${role}`;
+  const cached = octenToolCache.get(cacheKey);
+  if (cached && cached.expiresAt > now) return cached.promise;
+
+  const promise: Promise<MonidTool | null> = discoverOctenTool(key, role, options)
+    .catch(() => null)
+    .then((tool) => {
+      if (!tool && octenToolCache.get(cacheKey)?.promise === promise) {
+        octenToolCache.delete(cacheKey);
+      }
+      return tool;
+    });
+  octenToolCache.set(cacheKey, {
+    expiresAt: now + TOOL_METADATA_TTL_MS,
+    promise,
+  });
+  return promise;
 }
 
 async function discoverSearchTool(
@@ -495,8 +651,7 @@ async function resolvedSearchTool(
   if (searchToolCache && searchToolCache.key === cacheKey && searchToolCache.expiresAt > now) {
     return searchToolCache.promise;
   }
-  let promise: Promise<MonidTool | null>;
-  promise = discoverSearchTool(key, options)
+  const promise: Promise<MonidTool | null> = discoverSearchTool(key, options)
     .catch(() => null)
     .then((tool) => {
       if (!tool && searchToolCache?.promise === promise) searchToolCache = null;
@@ -513,17 +668,37 @@ async function resolvedSearchTool(
 interface MonidToolSelection {
   tool: MonidTool;
   maxPriceUsd: number;
+  role?: OctenToolRole;
 }
 
 async function resolveSearchToolWithinBudget(
   key: string,
   options: Required<Pick<MonidSearchOptions, 'maxResultsPerQuery' | 'timeoutMs'>>
-    & Pick<MonidSearchOptions, 'fetchImpl' | 'signal'>,
+    & Pick<MonidSearchOptions, 'fetchImpl' | 'signal' | 'strategy'>,
   softCapUsd: number,
   hardCapUsd: number,
 ): Promise<MonidToolSelection | null> {
   const boundedSoftCap = Math.max(0.001, softCapUsd);
   const boundedHardCap = Math.max(boundedSoftCap, hardCapUsd);
+  const preferredRole: OctenToolRole = options.strategy === 'broad' ? 'broad-search' : 'search';
+  const octenRoles: OctenToolRole[] = preferredRole === 'broad-search'
+    ? ['broad-search', 'search']
+    : ['search'];
+  let octenCatalogMatched = false;
+
+  for (const role of octenRoles) {
+    const tool = await resolvedOctenTool(key, role, options);
+    if (!tool) continue;
+    octenCatalogMatched = true;
+    const softResults = affordableResultCount(tool, options.maxResultsPerQuery, boundedSoftCap);
+    if (softResults > 0) return { tool, maxPriceUsd: boundedSoftCap, role };
+    const hardResults = affordableResultCount(tool, options.maxResultsPerQuery, boundedHardCap);
+    if (hardResults > 0) return { tool, maxPriceUsd: boundedHardCap, role };
+  }
+  if (octenCatalogMatched) return null;
+
+  // Keep a generic search fallback for temporary catalog outages. Octen remains
+  // the deterministic first choice for every normal and broad research run.
   const softTool = await resolvedSearchTool(key, {
     ...options,
     maxPriceUsd: boundedSoftCap,
@@ -548,11 +723,12 @@ export interface MonidKeyValidation {
   totalBudgetUsd?: number;
   maxResultsPerQuery?: number;
   estimatedPriceUsd?: number;
+  octenCapabilities?: Partial<Record<OctenToolRole, boolean>>;
   requestId?: string;
   status?: number;
 }
 
-/** Verifies authentication, wallet access, and an affordable web-search tool.
+/** Verifies authentication, wallet access, and the Octen tools used by the app.
  *  Discovery and inspection do not execute a paid provider run. */
 export async function validateMonidApiKey(
   key: string,
@@ -625,43 +801,74 @@ export async function validateMonidApiKey(
       ?? (profile.allowWalletEscalation
         ? balanceUsd
         : Math.min(initialBudgetUsd, profile.maxPerRunUsd));
-    const selection = await resolveSearchToolWithinBudget(normalizedKey, {
-      maxResultsPerQuery: 8,
-      timeoutMs,
-      fetchImpl,
-      signal: options.signal,
-    }, softCapUsd, hardCapUsd);
-    if (!selection) {
+    const roles: OctenToolRole[] = ['search', 'broad-search', 'extract', 'embedding'];
+    const resolvedTools = await Promise.all(roles.map((role) =>
+      resolvedOctenTool(normalizedKey, role, {
+        timeoutMs,
+        fetchImpl,
+        signal: options.signal,
+      })));
+    const octenCapabilities = Object.fromEntries(
+      roles.map((role, index) => [role, !!resolvedTools[index]]),
+    ) as Record<OctenToolRole, boolean>;
+    const searchTool = resolvedTools[roles.indexOf('search')]
+      || resolvedTools[roles.indexOf('broad-search')];
+    if (!searchTool) {
       return {
         valid: true,
         searchReady: false,
         balanceUsd,
         budgetMode: mode,
         totalBudgetUsd: initialBudgetUsd,
-        message: profile.allowWalletEscalation
-          ? `Monid authenticated the key and found a $${balanceUsd.toFixed(2)} balance, but no compatible web-search tool was affordable with the available wallet.`
-          : `Monid authenticated the key and found a $${balanceUsd.toFixed(2)} balance, but no compatible web-search tool fit the ${profile.label} mode's $${hardCapUsd.toFixed(2)} per-run ceiling.`,
+        octenCapabilities,
+        message: `Monid authenticated the key and found a $${balanceUsd.toFixed(2)} balance, but its tool catalog did not expose Octen Search or Broad Search.`,
         requestId: wallet.requestId,
         status: wallet.status,
       };
     }
 
-    const { tool, maxPriceUsd } = selection;
-    const provider = tool.providerName || tool.provider;
-    const maxResultsPerQuery = affordableResultCount(tool, 8, maxPriceUsd);
-    const estimatedPriceUsd = estimatedPrice(tool, maxResultsPerQuery);
+    const softResultCount = affordableResultCount(searchTool, 8, softCapUsd);
+    const maxPriceUsd = softResultCount > 0 ? softCapUsd : hardCapUsd;
+    const maxResultsPerQuery = affordableResultCount(searchTool, 8, maxPriceUsd);
+    if (maxResultsPerQuery < 1) {
+      return {
+        valid: true,
+        searchReady: false,
+        balanceUsd,
+        budgetMode: mode,
+        totalBudgetUsd: initialBudgetUsd,
+        octenCapabilities,
+        message: profile.allowWalletEscalation
+          ? `Monid authenticated the key and found Octen, but the selected Octen search run exceeds the available $${balanceUsd.toFixed(2)} wallet balance.`
+          : `Monid authenticated the key and found Octen, but the selected Octen search run exceeds the ${profile.label} mode's $${hardCapUsd.toFixed(2)} per-run ceiling.`,
+        requestId: wallet.requestId,
+        status: wallet.status,
+      };
+    }
+
+    const provider = searchTool.providerName || searchTool.provider;
+    const estimatedPriceUsd = estimatedPrice(searchTool, maxResultsPerQuery);
     const totalBudgetUsd = explicitMaxPriceUsd ?? initialBudgetUsd;
+    const readyLabels = roles
+      .filter((role) => octenCapabilities[role])
+      .map((role) => OCTEN_TOOL_SPECS[role].endpoint)
+      .join(', ');
+    const missingLabels = roles
+      .filter((role) => !octenCapabilities[role])
+      .map((role) => OCTEN_TOOL_SPECS[role].endpoint)
+      .join(', ');
     return {
       valid: true,
       searchReady: true,
       balanceUsd,
       provider,
-      endpoint: tool.endpoint,
+      endpoint: searchTool.endpoint,
       budgetMode: mode,
       totalBudgetUsd,
       maxResultsPerQuery,
       estimatedPriceUsd,
-      message: `Monid is connected in ${profile.label} mode. ${provider} ${tool.endpoint} can return up to ${maxResultsPerQuery} results per query; estimated run cost: $${estimatedPriceUsd.toFixed(3)}. Soft target: $${softCapUsd.toFixed(2)}. ${profile.allowWalletEscalation ? 'No fixed provider ceiling; the available wallet is the final limit.' : `Per-run ceiling: $${hardCapUsd.toFixed(2)}.`} Property research budget: $${totalBudgetUsd.toFixed(2)}. Wallet balance: $${balanceUsd.toFixed(2)}.`,
+      octenCapabilities,
+      message: `Monid is connected to Octen in ${profile.label} mode. Ready: ${readyLabels}. ${missingLabels ? `Not exposed by this workspace: ${missingLabels}. ` : ''}${provider} ${searchTool.endpoint} can return up to ${maxResultsPerQuery} results per query; estimated run cost: $${estimatedPriceUsd.toFixed(3)}. Soft target: $${softCapUsd.toFixed(2)}. ${profile.allowWalletEscalation ? 'No fixed provider ceiling; the available wallet is the final limit.' : `Per-run ceiling: $${hardCapUsd.toFixed(2)}.`} Property research budget: $${totalBudgetUsd.toFixed(2)}. Wallet balance: $${balanceUsd.toFixed(2)}.`,
       requestId: wallet.requestId,
       status: wallet.status,
     };
@@ -674,7 +881,7 @@ export async function validateMonidApiKey(
   }
 }
 
-function firstSchemaField(properties: Record<string, any>, names: string[]): string | null {
+function firstSchemaField(properties: Record<string, MonidSchemaNode>, names: string[]): string | null {
   return names.find((name) => Object.prototype.hasOwnProperty.call(properties, name)) || null;
 }
 
@@ -688,7 +895,7 @@ function recencyStart(recency: MonidSearchOptions['recency']): string | null {
   return date.toISOString();
 }
 
-function objectOption(schema: any, maxTokensPerPage: number): unknown {
+function objectOption(schema: MonidSchemaNode | undefined, maxTokensPerPage: number): unknown {
   if (schema?.type === 'boolean') return true;
   const properties = schemaProperties(schema);
   const option: Record<string, unknown> = {};
@@ -701,11 +908,47 @@ function objectOption(schema: any, maxTokensPerPage: number): unknown {
   return Object.keys(option).length ? option : true;
 }
 
+function buildOctenSearchInput(
+  query: string,
+  role: Extract<OctenToolRole, 'search' | 'broad-search'>,
+  options: Required<Pick<MonidSearchOptions, 'maxResultsPerQuery' | 'maxTokensPerPage'>>
+    & Pick<MonidSearchOptions, 'recency'>,
+): Record<string, unknown> {
+  const searchOptions: Record<string, unknown> = {
+    count: Math.min(100, options.maxResultsPerQuery),
+    exclude_domains: NOISE_DOMAINS,
+    language: ['en'],
+    highlight: { format: 'markdown' },
+  };
+  if (options.recency) searchOptions.time_range = options.recency;
+
+  if (role === 'broad-search') {
+    return {
+      query: query.slice(0, 500),
+      max_queries: Math.min(5, Math.max(2, Math.ceil(options.maxResultsPerQuery / 3))),
+      search_options: {
+        ...searchOptions,
+        count: Math.min(8, options.maxResultsPerQuery),
+      },
+    };
+  }
+  return {
+    query: query.slice(0, 500),
+    ...searchOptions,
+  };
+}
+
 function buildSearchInput(
   tool: MonidTool,
   query: string,
-  options: Required<Pick<MonidSearchOptions, 'maxResultsPerQuery' | 'maxTokensPerPage'>> & Pick<MonidSearchOptions, 'recency'>,
+  options: Required<Pick<MonidSearchOptions, 'maxResultsPerQuery' | 'maxTokensPerPage'>>
+    & Pick<MonidSearchOptions, 'recency'>,
+  role?: OctenToolRole,
 ): Record<string, unknown> {
+  if (role === 'search' || role === 'broad-search') {
+    return buildOctenSearchInput(query, role, options);
+  }
+
   const properties = schemaProperties(tool.inputSchema);
   const input: Record<string, unknown> = {};
   const queryField = queryFieldFor(tool) || 'query';
@@ -858,6 +1101,7 @@ export function normalizeMonidSearchOutput(output: unknown): MonidSearchResult[]
     const snippet = [
       asText(row.highlights),
       asText(row.highlight),
+      asText(row.full_content),
       asText(row.snippet),
       asText(row.summary),
       asText(row.text),
@@ -881,19 +1125,28 @@ interface MonidRunOutcome {
   estimatedCostUsd: number;
 }
 
-async function runSearch(
+interface MonidRawRunOutcome {
+  output: unknown;
+  succeeded: boolean;
+  actualCostUsd: number | null;
+  estimatedCostUsd: number;
+}
+
+async function runMonidTool(
   tool: MonidTool,
-  query: string,
+  input: Record<string, unknown>,
   key: string,
-  options: Required<Pick<MonidSearchOptions, 'maxResultsPerQuery' | 'maxTokensPerPage' | 'timeoutMs'>> & Pick<MonidSearchOptions, 'recency' | 'fetchImpl' | 'signal'>,
-): Promise<MonidRunOutcome> {
+  itemCount: number,
+  options: Required<Pick<MonidSearchOptions, 'timeoutMs'>>
+    & Pick<MonidSearchOptions, 'fetchImpl' | 'signal'>,
+): Promise<MonidRawRunOutcome> {
   const fetchImpl = options.fetchImpl || browserFetch;
-  const estimatedCostUsd = estimatedPrice(tool, options.maxResultsPerQuery);
+  const estimatedCostUsd = estimatedPrice(tool, itemCount);
   const initial = await monidRequest<MonidRun>('run', key, {
     body: {
       provider: tool.provider,
       endpoint: tool.endpoint,
-      input: buildSearchInput(tool, query, options),
+      input,
     },
     timeoutMs: options.timeoutMs,
     fetchImpl,
@@ -901,10 +1154,292 @@ async function runSearch(
   });
   const run = await completedRun(initial, key, options);
   return {
-    results: run && providerSucceeded(run) ? normalizeMonidSearchOutput(run.output) : [],
+    output: run?.output,
+    succeeded: !!run && providerSucceeded(run),
     actualCostUsd: actualRunCostUsd(run),
     estimatedCostUsd,
   };
+}
+
+async function runSearch(
+  tool: MonidTool,
+  query: string,
+  key: string,
+  options: Required<Pick<MonidSearchOptions, 'maxResultsPerQuery' | 'maxTokensPerPage' | 'timeoutMs'>> & Pick<MonidSearchOptions, 'recency' | 'fetchImpl' | 'signal'>,
+  role?: OctenToolRole,
+): Promise<MonidRunOutcome> {
+  const outcome = await runMonidTool(
+    tool,
+    buildSearchInput(tool, query, options, role),
+    key,
+    options.maxResultsPerQuery,
+    options,
+  );
+  return {
+    results: outcome.succeeded ? normalizeMonidSearchOutput(outcome.output) : [],
+    actualCostUsd: outcome.actualCostUsd,
+    estimatedCostUsd: outcome.estimatedCostUsd,
+  };
+}
+
+interface BudgetedToolRunOptions extends MonidSearchOptions {
+  itemCount: number;
+  buildInput: (allowedItemCount: number) => Record<string, unknown>;
+}
+
+async function runBudgetedTool(
+  key: string,
+  tool: MonidTool,
+  options: BudgetedToolRunOptions,
+): Promise<MonidRawRunOutcome | null> {
+  const explicitMaxPriceUsd = Number.isFinite(options.maxPriceUsd)
+    ? Math.max(0.001, Number(options.maxPriceUsd))
+    : null;
+  const session = explicitMaxPriceUsd == null ? activeBudgetSession : null;
+  const mode = session?.mode || options.budgetMode || 'adaptive';
+  const profile = budgetProfile(mode);
+  const fetchImpl = options.fetchImpl || browserFetch;
+  const timeoutMs = Math.min(30_000, Math.max(5_000, options.timeoutMs ?? 20_000));
+  const signal = combineSignals(options.signal, session?.controller.signal);
+  if (signal?.aborted) return null;
+
+  if (session) {
+    await ensureSessionWallet(session, key, fetchImpl, timeoutMs, signal);
+    if (signal?.aborted) return null;
+  }
+  const plannedAvailable = explicitMaxPriceUsd ?? (
+    session
+      ? Math.max(0, session.totalBudgetUsd - sessionAccountedSpend(session) - session.reservedUsd)
+      : profile.minimumBatchUsd
+  );
+  const available = explicitMaxPriceUsd ?? (
+    session && profile.allowWalletEscalation
+      ? sessionWalletRemaining(session)
+      : Math.min(profile.maxPerRunUsd, plannedAvailable)
+  );
+  const allowedItemCount = affordableResultCount(
+    tool,
+    Math.max(1, Math.floor(options.itemCount)),
+    available,
+  );
+  if (allowedItemCount < 1) return null;
+
+  const estimatedCostUsd = estimatedPrice(tool, allowedItemCount);
+  if (!Number.isFinite(estimatedCostUsd) || estimatedCostUsd < 0) return null;
+  if (session) {
+    session.reservedUsd += estimatedCostUsd;
+    emitBudgetSnapshot(session);
+  }
+
+  let outcome: MonidRawRunOutcome = {
+    output: null,
+    succeeded: false,
+    actualCostUsd: null,
+    estimatedCostUsd,
+  };
+  try {
+    outcome = await runMonidTool(
+      tool,
+      options.buildInput(allowedItemCount),
+      key,
+      allowedItemCount,
+      { timeoutMs, fetchImpl, signal },
+    );
+    return outcome;
+  } catch {
+    return outcome;
+  } finally {
+    if (session) {
+      session.reservedUsd = Math.max(0, session.reservedUsd - estimatedCostUsd);
+      if (outcome.actualCostUsd != null) session.actualSpentUsd += outcome.actualCostUsd;
+      else session.estimatedSpentUsd += outcome.estimatedCostUsd;
+      session.runsCompleted += 1;
+      emitBudgetSnapshot(session);
+    }
+  }
+}
+
+function octenDataResults(output: unknown): Record<string, unknown>[] {
+  if (!output || typeof output !== 'object') return [];
+  const root = output as Record<string, unknown>;
+  const data = root.data && typeof root.data === 'object'
+    ? root.data as Record<string, unknown>
+    : root;
+  return Array.isArray(data.results)
+    ? data.results.filter((entry): entry is Record<string, unknown> =>
+      !!entry && typeof entry === 'object')
+    : [];
+}
+
+export async function monidExtractUrlsWithKey(
+  key: string,
+  urls: string[],
+  query = '',
+  options: MonidSearchOptions = {},
+): Promise<MonidExtractResult[]> {
+  const normalizedKey = key.trim();
+  const uniqueUrls = [...new Set(urls
+    .map((url) => canonicalUrl(url.trim()))
+    .filter((url) => /^https?:\/\//i.test(url)))]
+    .slice(0, 20);
+  if (!normalizedKey || !uniqueUrls.length) return [];
+
+  const timeoutMs = Math.min(30_000, Math.max(5_000, options.timeoutMs ?? 20_000));
+  const fetchImpl = options.fetchImpl || browserFetch;
+  const signal = combineSignals(options.signal, activeBudgetSession?.controller.signal);
+  const tool = await resolvedOctenTool(normalizedKey, 'extract', {
+    timeoutMs,
+    fetchImpl,
+    signal,
+  });
+  if (!tool || signal?.aborted) return [];
+
+  const outcome = await runBudgetedTool(normalizedKey, tool, {
+    ...options,
+    timeoutMs,
+    fetchImpl,
+    signal,
+    itemCount: uniqueUrls.length,
+    buildInput: (allowedItemCount) => ({
+      urls: uniqueUrls.slice(0, allowedItemCount),
+      ...(query.trim() ? { query: query.trim().slice(0, 500) } : {}),
+      max_age_seconds: 300,
+      format: 'markdown',
+      timeout: Math.min(25, Math.max(5, Math.floor(timeoutMs / 1000))),
+      include_images: false,
+      include_videos: false,
+      include_audio: false,
+    }),
+  });
+  if (!outcome?.succeeded) return [];
+
+  const seen = new Set<string>();
+  const results: MonidExtractResult[] = [];
+  for (const row of octenDataResults(outcome.output)) {
+    const rawUrl = asText(row.url);
+    if (!/^https?:\/\//i.test(rawUrl)) continue;
+    const url = canonicalUrl(rawUrl);
+    if (seen.has(url)) continue;
+    const status = asText(row.status).toLowerCase();
+    if (status && !['success', 'completed', 'ok'].includes(status)) continue;
+    const content = asText(row.full_content || row.content || row.markdown || row.text);
+    const snippet = asText(row.highlights || row.highlight || row.snippet);
+    if (!content && !snippet) continue;
+    seen.add(url);
+    const rawDate = asText(row.time_published || row.published_date || row.date);
+    results.push({
+      title: asText(row.title) || rawUrl,
+      url,
+      content,
+      snippet,
+      date: rawDate ? rawDate.slice(0, 10) : undefined,
+    });
+  }
+  return results;
+}
+
+function queryTerms(queries: string[]): Set<string> {
+  return new Set(
+    queries.join(' ').toLowerCase().split(/[^a-z0-9]+/)
+      .filter((token) => token.length >= 4),
+  );
+}
+
+function needsSemanticRerank(results: MonidSearchResult[], queries: string[]): boolean {
+  if (results.length < 8) return false;
+  const terms = queryTerms(queries);
+  if (!terms.size) return false;
+  const requiredOverlap = terms.size >= 5 ? 2 : 1;
+  const weakResults = results.filter((result) => {
+    const haystack = `${result.title} ${result.snippet}`.toLowerCase();
+    const overlap = [...terms].filter((term) => haystack.includes(term)).length;
+    return overlap < requiredOverlap;
+  }).length;
+  const quality = summarizeSearchQuality(results, queries);
+  return results.length > 12
+    || weakResults >= Math.ceil(results.length / 3)
+    || quality.score < 65;
+}
+
+function embeddingRows(output: unknown): Map<number, number[]> {
+  const rows = new Map<number, number[]>();
+  for (const row of octenDataResults(output)) {
+    const index = Number(row.index);
+    if (!Number.isInteger(index) || !Array.isArray(row.embedding)) continue;
+    const vector = row.embedding.map(Number);
+    if (vector.length && vector.every(Number.isFinite)) rows.set(index, vector);
+  }
+  return rows;
+}
+
+function cosineSimilarity(left: number[], right: number[]): number {
+  const length = Math.min(left.length, right.length);
+  if (!length) return Number.NEGATIVE_INFINITY;
+  let dot = 0;
+  let leftMagnitude = 0;
+  let rightMagnitude = 0;
+  for (let index = 0; index < length; index += 1) {
+    dot += left[index] * right[index];
+    leftMagnitude += left[index] ** 2;
+    rightMagnitude += right[index] ** 2;
+  }
+  if (!leftMagnitude || !rightMagnitude) return Number.NEGATIVE_INFINITY;
+  return dot / Math.sqrt(leftMagnitude * rightMagnitude);
+}
+
+export async function rerankMonidSearchResultsWithKey(
+  key: string,
+  results: MonidSearchResult[],
+  queries: string[],
+  options: MonidSearchOptions = {},
+): Promise<MonidSearchResult[]> {
+  if (!key.trim() || !needsSemanticRerank(results, queries)) return results;
+  const timeoutMs = Math.min(30_000, Math.max(5_000, options.timeoutMs ?? 15_000));
+  const fetchImpl = options.fetchImpl || browserFetch;
+  const signal = combineSignals(options.signal, activeBudgetSession?.controller.signal);
+  const tool = await resolvedOctenTool(key.trim(), 'embedding', {
+    timeoutMs,
+    fetchImpl,
+    signal,
+  });
+  if (!tool || signal?.aborted) return results;
+
+  const candidates = results.slice(0, 20);
+  const texts = [
+    queries.join('\n').slice(0, 2000),
+    ...candidates.map((result) =>
+      `${result.title}\n${result.snippet}`.slice(0, 2500)),
+  ];
+  const outcome = await runBudgetedTool(key.trim(), tool, {
+    ...options,
+    timeoutMs,
+    fetchImpl,
+    signal,
+    itemCount: texts.length,
+    buildInput: (allowedItemCount) => ({
+      input: texts.slice(0, allowedItemCount),
+      model: 'octen-embedding-0.6b',
+      dimension: 256,
+    }),
+  });
+  if (!outcome?.succeeded) return results;
+
+  const vectors = embeddingRows(outcome.output);
+  const queryVector = vectors.get(0);
+  if (!queryVector || vectors.size < 3) return results;
+  const rerankedCount = Math.min(candidates.length, vectors.size - 1);
+  const reranked = candidates.slice(0, rerankedCount)
+    .map((result, index) => ({
+      result,
+      index,
+      score: cosineSimilarity(queryVector, vectors.get(index + 1) || []),
+    }))
+    .sort((left, right) => right.score - left.score || left.index - right.index)
+    .map(({ result }) => result);
+  return [
+    ...reranked,
+    ...results.slice(rerankedCount),
+  ];
 }
 
 function interleave(groups: MonidSearchResult[][]): MonidSearchResult[] {
@@ -944,6 +1479,7 @@ export async function monidSearchBatchWithKey(
     maxTokensPerPage: Math.min(4000, Math.max(200, options.maxTokensPerPage ?? 1500)),
     timeoutMs: Math.min(30_000, Math.max(5_000, options.timeoutMs ?? 15_000)),
     recency: options.recency,
+    strategy: options.strategy || 'search',
     fetchImpl,
     signal,
   };
@@ -1007,7 +1543,7 @@ export async function monidSearchBatchWithKey(
       )
       : profile.minimumBatchUsd
   );
-  const { tool } = selection;
+  const { tool, role } = selection;
   const perRunCeilingUsd = explicitMaxPriceUsd
     ?? Math.min(
       selection.maxPriceUsd,
@@ -1080,6 +1616,7 @@ export async function monidSearchBatchWithKey(
           selectedQueries[index],
           normalizedKey,
           runOptions,
+          role,
         );
       } catch {
         outcomes[index] = {
@@ -1106,7 +1643,20 @@ export async function monidSearchBatchWithKey(
       emitBudgetSnapshot(session);
     }
   }
-  return interleave(outcomes.map((outcome) => outcome.results));
+  const merged = interleave(outcomes.map((outcome) => outcome.results));
+  if (!options.semanticRerank || resolvedOptions.strategy !== 'broad') return merged;
+  return rerankMonidSearchResultsWithKey(
+    normalizedKey,
+    merged,
+    selectedQueries,
+    {
+      ...options,
+      timeoutMs: resolvedOptions.timeoutMs,
+      fetchImpl,
+      signal,
+      budgetMode: mode,
+    },
+  );
 }
 
 export interface SearchQualitySummary {
@@ -1178,4 +1728,5 @@ export function summarizeSearchQuality(
 
 export function resetMonidSearchToolCache(): void {
   searchToolCache = null;
+  octenToolCache.clear();
 }

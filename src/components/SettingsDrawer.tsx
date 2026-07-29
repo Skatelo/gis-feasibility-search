@@ -115,7 +115,7 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
   if (!isOpen) return null;
 
   const checkMonidKey = async (): Promise<MonidKeyValidation> => {
-    setMonidCheck({ status: 'testing', message: 'Checking authentication, wallet, and search provider...' });
+    setMonidCheck({ status: 'testing', message: 'Checking Monid authentication, wallet, and Octen tools...' });
     const result = await validateMonidApiKey(monidKey, { budgetMode: monidBudgetMode });
     setMonidCheck({
       status: result.valid && result.searchReady ? 'success' : 'error',
@@ -346,14 +346,14 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
                 </button>
               </div>
               <p className="field-help">
-                Optional fast search for utilities, fees, costs, and reports. When both keys are set, Perplexity handles the fast lane and Monid cross-checks hard or thin searches. Zoning is unchanged and continues to use Gemini 3.6 Flash plus official GIS evidence.
+                Optional fast search for utilities, fees, costs, and reports. When both keys are set, Perplexity handles the fast lane and Octen through Monid cross-checks hard or thin searches. Zoning is unchanged and continues to use Gemini 3.6 Flash plus official GIS evidence.
               </p>
             </div>
 
-            {/* Monid - wallet-aware semantic search for hard or thin research */}
+            {/* Monid - wallet-aware access to Octen research tools */}
             <div className="settings-field-group">
               <div className="field-label-row">
-                <label htmlFor="monidKey">Monid API Key (adaptive web research)</label>
+                <label htmlFor="monidKey">Monid API Key (Octen research tools)</label>
                 <span className="badge optional">Optional</span>
               </div>
               <div className="field-input-container">
@@ -468,9 +468,9 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
               <p className="field-help">
                 {monidKey.trim()
                   ? (perplexityKey.trim()
-                    ? 'ACTIVE - Monid will run beside Perplexity for hard searches and when Perplexity evidence is thin.'
-                    : 'ACTIVE - Monid will provide live web search because no Perplexity key is set.')
-                  : 'Optional semantic-search fallback for harder research.'} Adaptive and Thorough start with a soft price target but have no fixed provider ceiling; the available wallet and actual Monid billing are the final guardrails. Economy remains capped. Crawlee still reads selected pages and documents. Get a key at app.monid.ai.
+                    ? 'ACTIVE - Octen Broad Search will run beside Perplexity for hard or thin searches; Extract and Embedding run only when needed.'
+                    : 'ACTIVE - Octen Search will provide live web research; Broad Search, Extract, and Embedding run when needed.')
+                  : 'Optional Monid access to Octen Search, Broad Search, Extract, and Embedding.'} Adaptive and Thorough start with a soft price target but have no fixed provider ceiling; the available wallet and actual Monid billing are the final guardrails. Economy remains capped. Crawlee remains available for selected pages and documents. Get a key at app.monid.ai.
               </p>
             </div>
 
