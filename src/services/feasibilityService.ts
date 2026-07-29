@@ -34,8 +34,10 @@ import {
   type RankedParcelCandidate,
 } from './parcels/parcel-identity';
 import {
+  beginMonidBudgetSession,
   monidSearchBatchWithKey,
   summarizeSearchQuality,
+  type MonidBudgetMode,
   type MonidSearchResult,
 } from './monidSearch';
 
@@ -50,9 +52,11 @@ export interface UserKeys {
   /** Perplexity API key for utilities, tree rates, cost estimates, takeoff,
    *  LLC trace, and report research. Zoning never uses this credential. */
   perplexity?: string;
-  /** Optional Monid API key. Monid supplies a bounded semantic-search fallback
-   *  for hard or thin non-zoning research through its managed tool catalog. */
+  /** Optional Monid API key. Monid supplies a wallet-aware semantic-search
+   *  fallback for hard or thin non-zoning research through its tool catalog. */
   monid?: string;
+  /** Controls Monid's shared budget for one property analysis. */
+  monidBudgetMode?: MonidBudgetMode;
   /** Mapbox public access token (pk.…) — satellite base map for the parcel aerial view. */
   mapbox?: string;
   /** RealEstateAPI.com Property Detail key for on-demand mortgage and sale history. */
@@ -377,6 +381,15 @@ export function monidConfigured(): boolean {
   return !!getMonidKey();
 }
 
+export function getMonidBudgetMode(): MonidBudgetMode {
+  const mode = getUserKeys().monidBudgetMode;
+  return mode === 'economy' || mode === 'thorough' ? mode : 'adaptive';
+}
+
+export function beginPropertyResearchBudget(sessionId: string): void {
+  beginMonidBudgetSession(sessionId, getMonidBudgetMode());
+}
+
 /** Easy research stays on Perplexity for minimum latency. Hard or thin source
  *  searches use both providers when both keys exist. */
 export function activeWebSearchProvider(): 'hybrid' | 'monid' | 'perplexity' | 'none' {
@@ -496,6 +509,7 @@ export async function monidSearchBatch(
     maxResultsPerQuery: opts?.maxResultsPerQuery,
     maxTokensPerPage: opts?.maxTokensPerPage,
     recency: opts?.recency,
+    budgetMode: getMonidBudgetMode(),
   });
   return results;
 }

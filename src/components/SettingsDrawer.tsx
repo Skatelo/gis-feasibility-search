@@ -3,7 +3,15 @@ import { X, Key, User, ShieldAlert, LogOut, CheckCircle, Eye, EyeOff, Info, Clou
 import { persistUserKeys } from '../services/authService';
 import { isSupabaseConfigured } from '../services/supabaseClient';
 import { getCompPrefs, setCompPrefs, getReportAutoGenerate, setReportAutoGenerate } from '../services/feasibilityService';
-import { validateMonidApiKey, type MonidKeyValidation } from '../services/monidSearch';
+import {
+  getMonidBudgetSnapshot,
+  MONID_BUDGET_PROFILES,
+  subscribeMonidBudget,
+  validateMonidApiKey,
+  type MonidBudgetMode,
+  type MonidBudgetSnapshot,
+  type MonidKeyValidation,
+} from '../services/monidSearch';
 
 const COMP_TYPE_OPTIONS = [
   { value: 'all', label: 'All types' },
@@ -35,6 +43,10 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
   const [showPerplexityKey, setShowPerplexityKey] = useState(false);
   const [monidKey, setMonidKey] = useState('');
   const [showMonidKey, setShowMonidKey] = useState(false);
+  const [monidBudgetMode, setMonidBudgetMode] = useState<MonidBudgetMode>('adaptive');
+  const [monidSpend, setMonidSpend] = useState<MonidBudgetSnapshot | null>(
+    () => getMonidBudgetSnapshot(),
+  );
   const [monidCheck, setMonidCheck] = useState<{
     status: 'idle' | 'testing' | 'success' | 'error';
     message: string;
@@ -72,6 +84,12 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
       setGeminiKey2(activeUser.keys?.gemini2 || '');
       setPerplexityKey(activeUser.keys?.perplexity || '');
       setMonidKey(activeUser.keys?.monid || '');
+      const savedMonidMode = activeUser.keys?.monidBudgetMode;
+      setMonidBudgetMode(
+        savedMonidMode === 'economy' || savedMonidMode === 'thorough'
+          ? savedMonidMode
+          : 'adaptive',
+      );
       setMonidCheck({ status: 'idle', message: '' });
       setMapboxToken(activeUser.keys?.mapbox || '');
       setEnformionName(activeUser.keys?.enformionApName || '');
@@ -90,11 +108,15 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen]);
 
+  useEffect(() => {
+    return subscribeMonidBudget(setMonidSpend);
+  }, []);
+
   if (!isOpen) return null;
 
   const checkMonidKey = async (): Promise<MonidKeyValidation> => {
     setMonidCheck({ status: 'testing', message: 'Checking authentication, wallet, and search provider...' });
-    const result = await validateMonidApiKey(monidKey);
+    const result = await validateMonidApiKey(monidKey, { budgetMode: monidBudgetMode });
     setMonidCheck({
       status: result.valid && result.searchReady ? 'success' : 'error',
       message: result.message,
@@ -128,6 +150,7 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
       gemini2: geminiKey2.trim(),
       perplexity: perplexityKey.trim(),
       monid: monidKey.trim(),
+      monidBudgetMode,
       mapbox: mapboxToken.trim(),
       enformionApName: enformionName.trim(),
       enformionApPassword: enformionPassword.trim(),
@@ -327,7 +350,7 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
               </p>
             </div>
 
-            {/* Monid - bounded semantic search for hard or thin research */}
+            {/* Monid - wallet-aware semantic search for hard or thin research */}
             <div className="settings-field-group">
               <div className="field-label-row">
                 <label htmlFor="monidKey">Monid API Key (adaptive web research)</label>
@@ -375,12 +398,77 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
                   </span>
                 )}
               </div>
+              <div className="field-label-row monid-budget-label">
+                <label>Property research budget</label>
+                <span className="badge optional">Per address</span>
+              </div>
+              <div className="monid-budget-modes" role="radiogroup" aria-label="Monid property research budget">
+                {(Object.keys(MONID_BUDGET_PROFILES) as MonidBudgetMode[]).map((mode) => {
+                  const profile = MONID_BUDGET_PROFILES[mode];
+                  return (
+                    <button
+                      key={mode}
+                      type="button"
+                      role="radio"
+                      aria-checked={monidBudgetMode === mode}
+                      className={`monid-budget-mode${monidBudgetMode === mode ? ' active' : ''}`}
+                      title={`${profile.label}: $${profile.softPerRunUsd.toFixed(2)} soft target, up to $${profile.maxBatchUsd.toFixed(2)} per address when the wallet allows`}
+                      onClick={() => {
+                        setMonidBudgetMode(mode);
+                        setMonidCheck({ status: 'idle', message: '' });
+                      }}
+                    >
+                      <span>{profile.label}</span>
+                      <small>${profile.softPerRunUsd.toFixed(2)} target</small>
+                    </button>
+                  );
+                })}
+              </div>
+              {monidSpend && (
+                <div className="monid-spend-status" role="status" aria-live="polite">
+                  <div>
+                    <span>Current address</span>
+                    <strong>
+                      ${(monidSpend.actualSpentUsd + monidSpend.estimatedSpentUsd).toFixed(3)}
+                      {' / '}
+                      ${monidSpend.totalBudgetUsd.toFixed(2)}
+                    </strong>
+                  </div>
+                  <div>
+                    <span>
+                      ${monidSpend.actualSpentUsd.toFixed(3)} billed
+                      {monidSpend.estimatedSpentUsd > 0
+                        ? ` + $${monidSpend.estimatedSpentUsd.toFixed(3)} estimated`
+                        : ''}
+                    </span>
+                    <span>
+                      ${monidSpend.remainingUsd.toFixed(3)} remaining
+                      {monidSpend.reservedUsd > 0
+                        ? `, $${monidSpend.reservedUsd.toFixed(3)} in progress`
+                        : ''}
+                    </span>
+                  </div>
+                  <div>
+                    <span>
+                      {monidSpend.runsCompleted} runs
+                      {monidSpend.walletBalanceUsd != null
+                        ? `, $${monidSpend.walletBalanceUsd.toFixed(2)} wallet`
+                        : ''}
+                    </span>
+                    <span>
+                      {monidSpend.skippedQueries
+                        ? `${monidSpend.skippedQueries} over-budget queries skipped`
+                        : 'No over-budget queries'}
+                    </span>
+                  </div>
+                </div>
+              )}
               <p className="field-help">
                 {monidKey.trim()
                   ? (perplexityKey.trim()
                     ? 'ACTIVE - Monid will run beside Perplexity for hard searches and when Perplexity evidence is thin.'
                     : 'ACTIVE - Monid will provide live web search because no Perplexity key is set.')
-                  : 'Optional semantic-search fallback for harder research.'} The app dynamically selects a low-cost Monid search provider with strict price and timeout limits. Crawlee still reads selected pages and documents. Get a key at app.monid.ai.
+                  : 'Optional semantic-search fallback for harder research.'} The selected mode shares one wallet-aware budget across the address analysis, starts with a soft price target, and escalates only when a compatible lower-cost provider is unavailable. Crawlee still reads selected pages and documents. Get a key at app.monid.ai.
               </p>
             </div>
 
