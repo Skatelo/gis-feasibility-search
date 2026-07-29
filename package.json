@@ -13,6 +13,8 @@
     "test:estimates": "node --test netlify/functions/lib/sourced-estimate.test.js",
     "test:transactions": "node --test netlify/functions/lib/realestateapi-property.test.js",
     "test:vision": "node --test netlify/functions/lib/gemini-vision-config.test.js",
+    "test:monid": "node --test netlify/functions/lib/monid.test.js",
+    "benchmark:search": "node scripts/compare-search-providers.mjs",
     "test:comps": "node scripts/test-comps.mjs",
     "test:parcel-id": "node scripts/test-parcel-identity.mjs",
     "typecheck:zoning-engine": "tsc -p tsconfig.zoning.json",
