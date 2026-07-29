@@ -190,6 +190,55 @@ test('Monid key validation checks wallet and search readiness without a paid run
   assert.doesNotMatch(calls.map((call) => call.endpoint).join(','), /run/);
 });
 
+test('Monid normalizes micro-dollar Octen prices before checking a $15 wallet', async () => {
+  monid.resetMonidSearchToolCache();
+  monid.resetMonidBudgetSession();
+  const calls = [];
+  const price = {
+    type: 'PER_CALL',
+    amount: 25_000,
+    unit: 'MICRO_DOLLAR',
+    currency: 'USD',
+  };
+  const fetchImpl = async (url, init) => {
+    const endpoint = new URL(String(url), 'http://localhost').searchParams.get('endpoint');
+    const body = init.body ? JSON.parse(init.body) : null;
+    calls.push({ endpoint, body });
+    if (endpoint === 'wallet') {
+      return jsonResponse({ balance: { value: 15, currency: 'USD' } });
+    }
+    if (endpoint === 'inspect') return jsonResponse(inspectedOctenRequest(init, price));
+    if (endpoint === 'run') {
+      return jsonResponse(completedSearch(body.input.query, '', 0.025));
+    }
+    throw new Error(`Unexpected endpoint: ${endpoint}`);
+  };
+
+  const validation = await monid.validateMonidApiKey(
+    'monid-micro-dollar-key',
+    { fetchImpl, budgetMode: 'adaptive' },
+  );
+  assert.equal(validation.valid, true);
+  assert.equal(validation.searchReady, true);
+  assert.equal(validation.balanceUsd, 15);
+  assert.equal(validation.endpoint, '/search');
+  assert.equal(validation.estimatedPriceUsd, 0.025);
+  assert.match(validation.message, /estimated run cost: \$0\.025/i);
+
+  monid.beginMonidBudgetSession('property:micro-dollar', 'adaptive');
+  const results = await monid.monidSearchBatchWithKey(
+    'monid-micro-dollar-key',
+    ['York County South Carolina current permit fees'],
+    { fetchImpl },
+  );
+  const snapshot = monid.getMonidBudgetSnapshot();
+  assert.equal(results.length, 1);
+  assert.equal(snapshot.walletBalanceUsd, 15);
+  assert.equal(snapshot.actualSpentUsd, 0.025);
+  assert.equal(calls.filter((call) => call.endpoint === 'run').length, 1);
+  monid.resetMonidBudgetSession();
+});
+
 test('Monid browser requests preserve the fetch receiver', async () => {
   monid.resetMonidSearchToolCache();
   const originalFetch = globalThis.fetch;
@@ -304,7 +353,7 @@ test('Monid still rejects a per-call tool that exceeds the safety cap', async ()
   );
 
   assert.deepEqual(results, []);
-  assert.deepEqual(calls, ['inspect']);
+  assert.deepEqual(calls, ['inspect', 'inspect']);
 });
 
 test('a transient Octen catalog failure is not cached', async () => {
@@ -389,7 +438,35 @@ test('Adaptive validation still rejects a provider that exceeds the wallet balan
 
   assert.equal(result.valid, true);
   assert.equal(result.searchReady, false);
-  assert.match(result.message, /exceeds the available \$1\.00 wallet balance/i);
+  assert.match(result.message, /no Octen search run fits the available \$1\.00 wallet balance/i);
+  assert.match(result.message, /least expensive published option/i);
+});
+
+test('validation falls back to affordable Broad Search when Search exceeds the wallet', async () => {
+  monid.resetMonidSearchToolCache();
+  const fetchImpl = async (url, init) => {
+    const endpoint = new URL(String(url), 'http://localhost').searchParams.get('endpoint');
+    if (endpoint === 'wallet') {
+      return jsonResponse({ balance: { value: 15, currency: 'USD' } });
+    }
+    if (endpoint === 'inspect') {
+      const requested = JSON.parse(init.body).endpoint;
+      const price = requested === '/search'
+        ? { type: 'PER_CALL', amount: 20, currency: 'USD' }
+        : { type: 'PER_CALL', amount: 0.02, currency: 'USD' };
+      return jsonResponse(octenInspection(requested, price));
+    }
+    throw new Error(`Validation must not execute ${endpoint}`);
+  };
+
+  const result = await monid.validateMonidApiKey(
+    'monid-affordable-broad-key',
+    { fetchImpl, budgetMode: 'adaptive' },
+  );
+  assert.equal(result.valid, true);
+  assert.equal(result.searchReady, true);
+  assert.equal(result.endpoint, '/broad-search');
+  assert.equal(result.estimatedPriceUsd, 0.02);
 });
 
 test('Adaptive mode uses the available wallet without a fixed provider ceiling', async () => {
@@ -421,7 +498,7 @@ test('Adaptive mode uses the available wallet without a fixed provider ceiling',
   const snapshot = monid.getMonidBudgetSnapshot();
 
   assert.equal(results.length, 1);
-  assert.deepEqual(calls, ['wallet', 'inspect', 'run']);
+  assert.deepEqual(calls, ['wallet', 'inspect', 'inspect', 'run']);
   assert.equal(snapshot.mode, 'adaptive');
   assert.equal(snapshot.walletBalanceUsd, 1);
   assert.equal(snapshot.totalBudgetUsd, 1);
@@ -512,7 +589,7 @@ test('async runs reconcile the documented dollar cost returned by GET /v1/runs/:
   const snapshot = monid.getMonidBudgetSnapshot();
 
   assert.equal(results.length, 1);
-  assert.deepEqual(calls, ['wallet', 'inspect', 'run', 'runs']);
+  assert.deepEqual(calls, ['wallet', 'inspect', 'inspect', 'run', 'runs']);
   assert.equal(snapshot.actualSpentUsd, 0.07);
   assert.equal(snapshot.estimatedSpentUsd, 0);
   assert.equal(snapshot.remainingUsd, 0.03);
@@ -761,6 +838,22 @@ test('Monid normalizes nested search output and computes a transparent quality s
   assert.ok(summary.score > 0);
 });
 
+test('Broad Search escalation is driven by evidence quality', () => {
+  const queries = ['York County South Carolina official utility tap fees'];
+  const strongResults = Array.from({ length: 8 }, (_, index) => ({
+    title: `York County official utility fee schedule ${index + 1}`,
+    url: `https://department-${index + 1}.yorkcountygov.gov/fees`,
+    snippet: `York County South Carolina official utility tap fee schedule with current water, sewer, permit, effective-date, and source details. ${'Evidence '.repeat(8)}`,
+  }));
+  const weakResults = strongResults.slice(0, 2).map((result) => ({
+    ...result,
+    snippet: 'Brief result without enough source detail.',
+  }));
+
+  assert.equal(monid.shouldEscalateToBroadSearch(strongResults, queries, true), false);
+  assert.equal(monid.shouldEscalateToBroadSearch(weakResults, queries, false), true);
+});
+
 test('Monid Netlify proxy validates auth and forwards allowed endpoints with no-store', async () => {
   const missing = await handler({
     httpMethod: 'POST',
@@ -839,10 +932,16 @@ test('application wiring uses Octen for non-zoning research and preserves Gemini
   assert.match(source, /endpoint: '\/extract'/);
   assert.match(source, /endpoint: '\/embedding'/);
   assert.match(feasibility, /strategy: 'broad'/);
+  assert.match(feasibility, /strategy: 'search'/);
   assert.match(feasibility, /monidExtractUrlsWithKey/);
   assert.match(feasibility, /opts\?\.mode === 'hard'/);
   assert.match(feasibility, /Promise\.all\(\[\s*perplexitySearchBatch[\s\S]*monidSearchBatch/);
-  assert.match(feasibility, /summarizeSearchQuality\(perplexityResults, queries\)/);
+  assert.match(feasibility, /shouldEscalateToBroadSearch\(combined, queries, true\)/);
+  assert.match(feasibility, /compactBroadResearchQuery\(queries\)/);
+  assert.doesNotMatch(
+    feasibility,
+    /Promise\.all\(\[\s*crawleeScrapeBatch[\s\S]*octenExtractBatch/,
+  );
   assert.match(settings, /monid: monidKey\.trim\(\)/);
   assert.match(settings, /validateMonidApiKey\(monidKey, \{ budgetMode: monidBudgetMode \}\)/);
   assert.match(source, /economy:\s*\{[\s\S]*adaptive:\s*\{[\s\S]*thorough:\s*\{/);
