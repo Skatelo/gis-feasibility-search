@@ -3721,6 +3721,31 @@ img, svg, video, canvas, table, pre { max-width: 100%; }
   .chat-fab.pulse { animation-duration: 1.2s !important; }
 }
 
+/* Land price bands (8%–15% of ARV) inside the comps card */
+.land-bands {
+  margin: 0 0 0.9rem;
+  padding: 0.75rem 0.85rem;
+  border: 1px solid var(--bg-card-border);
+  border-radius: var(--radius-md);
+  background: var(--bg-main);
+}
+.land-bands-head { display: flex; flex-direction: column; gap: 2px; margin-bottom: 0.55rem; }
+.land-bands-title { font-size: 0.82rem; font-weight: 700; }
+.land-bands-sub { font-size: 0.7rem; color: var(--text-muted); }
+.land-bands-table { width: 100%; border-collapse: collapse; font-size: 0.78rem; }
+.land-bands-table th,
+.land-bands-table td { border-bottom: 1px solid var(--bg-card-border); padding: 6px 8px; text-align: left; }
+.land-bands-table th { font-weight: 600; color: var(--text-secondary); font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.03em; }
+.land-bands-table tr:last-child td { border-bottom: none; }
+.land-bands-table tr.land-band-active td { background: var(--bg-card-hover, #f1f5f9); }
+.land-band-muted { color: var(--text-muted); font-size: 0.74rem; }
+.land-bands-note { margin: 0.55rem 0 0; font-size: 0.7rem; color: var(--text-muted); line-height: 1.45; }
+
+@media (max-width: 640px) {
+  .land-bands-table { font-size: 0.72rem; }
+  .land-bands-table th, .land-bands-table td { padding: 5px 5px; }
+}
+
 /* Buyer Presentation — client-facing report view */
 .buyer-presentation { display: flex; flex-direction: column; gap: 0.9rem; }
 
