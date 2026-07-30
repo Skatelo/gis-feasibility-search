@@ -451,6 +451,10 @@ async function crawleeScrapeBatch(urls: string[], queries: string[], maxTargets 
         maxPages: Math.min(18, Math.max(8, targets.length + 4)),
         maxDepth: 1,
         maxCharsPerPage: 14000,
+        // Enables the server-side fallback tiers for URLs Cheerio can't read:
+        // Monid, then a Chromium screenshot read by Gemini 3.6 vision. The key is
+        // forwarded so the pixel tier works without a server-side Gemini key.
+        geminiKey: getBackgroundGeminiKey(),
       }),
     });
     if (!response.ok) {
