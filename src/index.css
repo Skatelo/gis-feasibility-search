@@ -3721,6 +3721,46 @@ img, svg, video, canvas, table, pre { max-width: 100%; }
   .chat-fab.pulse { animation-duration: 1.2s !important; }
 }
 
+/* Buyer Presentation — client-facing report view */
+.buyer-presentation { display: flex; flex-direction: column; gap: 0.9rem; }
+
+.buyer-images {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 0.75rem;
+}
+.buyer-image { margin: 0; }
+.buyer-image img {
+  width: 100%;
+  height: auto;
+  display: block;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--bg-card-border);
+  background: var(--bg-main);
+}
+.buyer-image figcaption {
+  margin-top: 4px;
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+}
+
+.buyer-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid var(--bg-card-border);
+  border-radius: var(--radius-md);
+  background: var(--bg-main);
+}
+.buyer-price { font-weight: 700; font-size: 0.95rem; }
+.buyer-price.muted { font-weight: 500; color: var(--text-secondary); }
+
+@media (max-width: 640px) {
+  .buyer-images { grid-template-columns: 1fr; }
+}
+
 /* GIS Feasibility Search — Address / Parcel-ID mode toggle */
 .search-mode-toggle {
   display: inline-flex;

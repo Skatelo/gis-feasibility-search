@@ -7586,6 +7586,96 @@ Use CURRENT LOCAL prices from credible sources; cite them; never invent a price 
 
 // Fallback per-tree rates (Southeast US, used only if the live lookup fails).
 /** Static-map zoom that frames a parcel of the given acreage roughly full-bleed. */
+// ---------------------------------------------------------------------------
+// BUYER PRESENTATION
+// A short, client-facing document built from the SAME verified data as the AI
+// Feasibility Report, but written to be handed to a buyer: property overview,
+// zoning/build potential, sold comps, and next steps — plus the asking price the
+// user enters. Runs through the same fusion path as the feasibility report.
+// ---------------------------------------------------------------------------
+
+export interface BuyerPresentationImages {
+  satelliteUrl: string;
+  streetViewUrl: string;
+  mapsLink: string;
+}
+
+/** Static Google imagery for the presentation header. Returns '' for any image
+ *  that can't be built (missing key), so the UI can skip it cleanly. */
+export function buyerPresentationImages(reportData: SiteFeasibilityData): BuyerPresentationImages {
+  const key = (getUserKeys().googleMaps || '').trim();
+  const lat = reportData.coordinates?.lat;
+  const lng = reportData.coordinates?.lng;
+  if (!key || typeof lat !== 'number' || typeof lng !== 'number') {
+    return { satelliteUrl: '', streetViewUrl: '', mapsLink: '' };
+  }
+  const acres = Number(reportData.gisAcres) > 0 ? Number(reportData.gisAcres) : 1;
+  const zoom = landZoomForAcres(acres);
+  // A marker pins the exact parcel point so the buyer sees WHICH lot it is.
+  const satelliteUrl = `https://maps.googleapis.com/maps/api/staticmap?center=${lat},${lng}&zoom=${zoom}&size=640x400&scale=2&maptype=satellite&markers=color:red%7C${lat},${lng}&key=${key}`;
+  const streetViewUrl = `https://maps.googleapis.com/maps/api/streetview?size=640x400&location=${lat},${lng}&fov=80&pitch=0&key=${key}`;
+  const mapsLink = `https://www.google.com/maps/@${lat},${lng},${zoom}z/data=!3m1!1e3`;
+  return { satelliteUrl, streetViewUrl, mapsLink };
+}
+
+/**
+ * Prompt for the buyer-facing presentation. Deliberately NARROW: it reuses the
+ * verified packet the feasibility report already produced, so the two documents
+ * can never disagree, and it forbids inventing anything the data doesn't support.
+ */
+export function buildBuyerPresentationPrompt(
+  reportData: SiteFeasibilityData,
+  askingPrice: number | null,
+  compsList: string,
+): string {
+  const acres = Number(reportData.gisAcres) > 0 ? Number(reportData.gisAcres).toFixed(2) : 'Unavailable';
+  const priceLine = askingPrice && askingPrice > 0
+    ? `The seller's ASKING PRICE is $${askingPrice.toLocaleString()}. State it plainly in Property Overview, and in the closing analysis say whether it is reasonable versus the land value the comps support — with the numbers behind that judgement.`
+    : 'No asking price was provided — omit price commentary entirely rather than guessing one.';
+
+  return `Produce a BUYER PRESENTATION for "${reportData.inputAddress}". This is a short, client-facing document a land buyer will read — NOT the internal feasibility report. Warm, plain, confident English. No jargon, no hedging filler, no conversational intro or outro.
+
+${priceLine}
+
+Use EXACTLY these sections, in this order, as markdown headers:
+
+# Land Investment & Build Opportunity
+A single line with the full property address, then two or three sentences on why this lot is worth a look.
+
+## 1. Property Overview
+A bullet list covering: Location (full address), Lot Size (acres), Parcel ID, Zoning district, Water setup, and Sewer/septic setup.${askingPrice && askingPrice > 0 ? ' Include an "Asking Price" bullet.' : ''}
+
+## 2. Zoning, Setbacks & Build Potential
+State the jurisdiction and zoning district, then explain in plain English: what may be built (permitted residential forms), the setbacks (front / side / rear) with the numbers, and any lot considerations that shape the build envelope — for example a septic requirement meaning the footprint depends on the soil evaluation (perc test).
+
+## 3. Market Analysis: Recently Sold New Construction Comps
+A markdown TABLE of the verified sold comps below with these columns: Address, Square Feet, Date Sold, Close Price, Price / SqFt, Type. Use ONLY the comps provided and ONLY the fields given for each — never invent a sale, a bedroom/bathroom count, or a lot size. Write "N/A" where a field is not supplied. Follow the table with "Market Averages from Above Sales:" and bullets for Average Close Price, Average Home Size, and Average Price Per SqFt, computed from the rows you listed.
+
+## 4. What This Means for You
+Three to five sentences: what a buyer can realistically build here, the value the comps support, and the main thing to verify.${askingPrice && askingPrice > 0 ? ' Include your read on the asking price versus that supported value.' : ''}
+
+## 5. Clear Next Steps
+A numbered list of four practical actions (for example: review the comps, order a perc test/soil evaluation, bring a builder to match a plan to the site, make an offer).
+
+## References
+Numbered list of the sources actually used (zoning ordinance, county GIS, comp sources).
+
+VERIFIED DATA PACKET — use these figures and do not contradict them:
+- Address: ${reportData.inputAddress}
+- Lot size: ${acres} acres
+- Parcel ID: ${reportData.parcelId || 'Unavailable'}
+- Zoning: ${reportData.zoningCode || 'Unavailable'} — ${reportData.zoningDescription || ''}
+- Jurisdiction: ${reportData.zoningJurisdiction || reportData.countyName || 'Unavailable'}
+- Permitted uses: ${(reportData.zoningPermittedUses || []).join(', ') || 'see zoning source'}
+- Setbacks: ${reportData.zoningSetbackNotes || 'Confirm against the adopted ordinance'}
+- Owner of record: ${reportData.ownerName || 'Unavailable'}
+
+VERIFIED SOLD COMPS (the ONLY sales you may cite):
+${compsList}
+
+Rules: every number must come from the packet above or a cited source. If something is unknown, write "Confirm with the county" rather than estimating. Use plain markdown headers, bullets and tables. Never use asterisks for emphasis, and write math as words or clean tables — never in code blocks.`;
+}
+
 function landZoomForAcres(acres: number): number {
   if (acres <= 0.3) return 19;
   if (acres <= 0.75) return 18;

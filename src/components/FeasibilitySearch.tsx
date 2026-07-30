@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import type { FormEvent, KeyboardEvent, FC } from 'react';
 import { createRoot } from 'react-dom/client';
-import { executeLandAnalysis, chatWithGemini, chatFollowUp, getUserKeys, getMapboxToken, getRealEstateApiKey, detectNcCounty, lookupParcelById, fetchConstructionCostEstimate, fetchLandClearingEstimate, fetchUtilitiesEstimate, fetchGoogleDistanceMatrixComps, fetchParcelsInBbox, getCompPrefs, getReportAutoGenerate, clearAddressSearchCache, beginPropertyResearchBudget, enformionConfigured, enformionContactEnrich, enformionPersonSearch, enformionBusinessSearch, looksLikeBusiness, enformionDiagMessage, getLastEnformionShape, getLastEnformionDetail, ncAddressSuggestions } from '../services/feasibilityService';
+import { executeLandAnalysis, chatWithGemini, chatFollowUp, getUserKeys, getMapboxToken, getRealEstateApiKey, detectNcCounty, lookupParcelById, fetchConstructionCostEstimate, fetchLandClearingEstimate, fetchUtilitiesEstimate, fetchGoogleDistanceMatrixComps, fetchParcelsInBbox, getCompPrefs, getReportAutoGenerate, clearAddressSearchCache, beginPropertyResearchBudget, enformionConfigured, enformionContactEnrich, enformionPersonSearch, enformionBusinessSearch, looksLikeBusiness, enformionDiagMessage, getLastEnformionShape, getLastEnformionDetail, ncAddressSuggestions, buildBuyerPresentationPrompt, buyerPresentationImages } from '../services/feasibilityService';
 import type { ParcelIdLookupResult, SkipTraceContact } from '../services/feasibilityService';
 import type { ChatMessage, ChatAttachment } from '../services/feasibilityService';
 import { fetchRealEstatePropertyTransactions, fetchRealEstateOwnerDetails } from '../services/realEstateApiProperty';
@@ -432,6 +432,81 @@ export const extractValueAdd = (md: string): { rezoning?: string; subdivision?: 
  * this in the prompt; this is the guaranteed safety net so the rendered report
  * never shows code or stray "*".
  */
+/**
+ * Client-facing presentation view: property imagery on top, then the generated
+ * document. The images are rendered as real elements rather than markdown,
+ * because the report renderer intentionally does not process image syntax.
+ */
+const BuyerPresentationView: FC<{
+  data: SiteFeasibilityData;
+  markdown: string;
+  loading: boolean;
+  error: string;
+  askingPrice: number | null;
+  onRetry: () => void;
+  onChangePrice: () => void;
+}> = ({ data, markdown, loading, error, askingPrice, onRetry, onChangePrice }) => {
+  const images = buyerPresentationImages(data);
+  return (
+    <div className="buyer-presentation">
+      {(images.satelliteUrl || images.streetViewUrl) && (
+        <div className="buyer-images">
+          {images.satelliteUrl && (
+            <figure className="buyer-image">
+              <img src={images.satelliteUrl} alt={`Aerial view of ${data.inputAddress}`} loading="lazy" />
+              <figcaption>Aerial view — {data.inputAddress}</figcaption>
+            </figure>
+          )}
+          {images.streetViewUrl && (
+            <figure className="buyer-image">
+              {/* Street View returns a grey "no imagery" tile rather than a 404,
+                  so it is hidden only when the request itself fails. */}
+              <img
+                src={images.streetViewUrl}
+                alt={`Street view of ${data.inputAddress}`}
+                loading="lazy"
+                onError={(e) => { (e.currentTarget.closest('figure') as HTMLElement | null)?.style.setProperty('display', 'none'); }}
+              />
+              <figcaption>Street view</figcaption>
+            </figure>
+          )}
+        </div>
+      )}
+
+      <div className="buyer-meta">
+        {askingPrice ? (
+          <span className="buyer-price">Asking price: ${askingPrice.toLocaleString()}</span>
+        ) : (
+          <span className="buyer-price muted">No asking price set</span>
+        )}
+        <button type="button" className="comp-filter-pill" onClick={onChangePrice} disabled={loading}>
+          {askingPrice ? 'Change price & regenerate' : 'Add asking price'}
+        </button>
+      </div>
+
+      {loading && !markdown ? (
+        <div className="gemini-wave-loader-wrapper">
+          <div className="gemini-wave-loader">
+            <div className="wave-bar bar-1"></div>
+            <div className="wave-bar bar-2"></div>
+            <div className="wave-bar bar-3"></div>
+          </div>
+          <span className="loading-text">Building the buyer presentation…</span>
+        </div>
+      ) : null}
+
+      {error && (
+        <div className="enf-err" style={{ marginBottom: '8px' }}>
+          <AlertCircle size={12} /> {error}
+          <button type="button" className="link-btn" onClick={onRetry}>Retry</button>
+        </div>
+      )}
+
+      {markdown ? <div className="report-text">{parseMarkdown(sanitizeReportText(markdown))}</div> : null}
+    </div>
+  );
+};
+
 export const sanitizeReportText = (md: string): string => {
   if (!md) return md;
   let s = md;
@@ -832,6 +907,16 @@ export const FeasibilitySearch: FC = () => {
   const [ownerLookup, setOwnerLookup] = useState<RealEstateOwnerDetails | null>(null);
   const [ownerLookupLoading, setOwnerLookupLoading] = useState(false);
   const [ownerLookupError, setOwnerLookupError] = useState('');
+  // Buyer presentation: a client-facing document built from the SAME verified
+  // packet as the feasibility report, so the two can never disagree. Kept in its
+  // own state so switching between the two reports preserves both.
+  const [reportMode, setReportMode] = useState<'feasibility' | 'buyer'>('feasibility');
+  const [buyerReport, setBuyerReport] = useState('');
+  const [buyerLoading, setBuyerLoading] = useState(false);
+  const [buyerError, setBuyerError] = useState('');
+  const [askingPrice, setAskingPrice] = useState<number | null>(null);
+  const [askingPriceInput, setAskingPriceInput] = useState('');
+  const [showAskingPrice, setShowAskingPrice] = useState(false);
   // Comps display/search filters
   const [compRadius, setCompRadius] = useState(5);          // max DRIVING-mile radius (1 / 3 / 5 / 10) — re-fetches
   const [compTypeFilter, setCompTypeFilter] = useState('all'); // property-type display filter
@@ -1291,6 +1376,60 @@ export const FeasibilitySearch: FC = () => {
     ]);
     if (seq !== searchSeqRef.current) return;
     generateInitialChatReport(data, est || costEstimate || undefined);
+  };
+
+  /**
+   * Buyer presentation — runs through the SAME fusion path as the feasibility
+   * report (chatWithGemini), so it inherits Gemini + DeepSeek fusion and the
+   * verified data packet. Called only after the asking price has been captured.
+   */
+  const generateBuyerPresentation = async (price: number | null) => {
+    if (!data || buyerLoading) return;
+    setBuyerError('');
+    setBuyerLoading(true);
+    setReportMode('buyer');
+    const seq = searchSeqRef.current;
+    try {
+      const compsList = (data.comps || []).length
+        ? (data.comps || []).map((comp, idx) =>
+            // Only fields CompProperty actually carries — beds/baths/acres are
+            // not published per-comp, so the table marks them "N/A" rather than
+            // inviting the model to invent them.
+            `- Comp ${idx + 1}: ${comp.address} | Sold $${comp.price.toLocaleString()}${comp.pricePerSqft ? ` ($${comp.pricePerSqft}/sqft)` : ''} | ${comp.sqft ? `${comp.sqft.toLocaleString()} sqft` : 'sqft N/A'} | Sold ${comp.saleDate || 'N/A'} | Built ${comp.yearBuilt || 'N/A'} | Type: ${comp.propertyType || 'N/A'} | ${comp.distanceMiles.toFixed(2)} driving mi`
+          ).join('\n')
+        : 'No verified comps available — say so plainly and omit the comps table.';
+
+      const prompt = buildBuyerPresentationPrompt(data, price, compsList);
+      let streamed = '';
+      const response = await chatWithGemini([{ role: 'user', content: prompt }], data, (chunk) => {
+        streamed += chunk;
+        if (seq === searchSeqRef.current) setBuyerReport(streamed);
+      });
+      if (seq !== searchSeqRef.current) return;
+      setBuyerReport(response.text || streamed);
+    } catch (err: any) {
+      if (seq === searchSeqRef.current) {
+        setBuyerError(err?.message || 'The buyer presentation could not be generated. Try again.');
+      }
+    } finally {
+      if (seq === searchSeqRef.current) setBuyerLoading(false);
+    }
+  };
+
+  /** Switch reports. Going to the buyer view asks for the asking price first. */
+  const switchReportMode = (mode: 'feasibility' | 'buyer') => {
+    if (mode === 'feasibility') { setReportMode('feasibility'); return; }
+    if (buyerReport || buyerLoading) { setReportMode('buyer'); return; }
+    setAskingPriceInput(askingPrice ? String(askingPrice) : '');
+    setShowAskingPrice(true);
+  };
+
+  const confirmAskingPrice = () => {
+    const parsed = Number(String(askingPriceInput).replace(/[^0-9.]/g, ''));
+    const price = Number.isFinite(parsed) && parsed > 0 ? Math.round(parsed) : null;
+    setAskingPrice(price);
+    setShowAskingPrice(false);
+    generateBuyerPresentation(price);
   };
 
   const generateInitialChatReport = async (reportData: SiteFeasibilityData, costEstimate?: ConstructionCostEstimate) => {
@@ -3120,6 +3259,15 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
     setOwnerLookup(null);
     setOwnerLookupError('');
     setOwnerLookupLoading(false);
+    // A new parcel gets a fresh presentation and a fresh asking price — never
+    // carry the previous property's price into this one.
+    setReportMode('feasibility');
+    setBuyerReport('');
+    setBuyerError('');
+    setBuyerLoading(false);
+    setAskingPrice(null);
+    setAskingPriceInput('');
+    setShowAskingPrice(false);
     setReportPending(false);
     setCompRadius(compPrefs.radiusMiles);
     setCompTypeFilter(compPrefs.propertyType);
@@ -5256,11 +5404,75 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
 
               {/* AI Feasibility Report (follow-up Q&A lives in the floating chat bubble) */}
               <div className="card registry-card report-card">
-                <h3 className="registry-card-header" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <h3 className="registry-card-header" style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
                   <FileText size={16} style={{ color: 'var(--primary)' }} />
-                  <span>AI Feasibility Report</span>
+                  <span>{reportMode === 'buyer' ? 'Buyer Presentation' : 'AI Feasibility Report'}</span>
+                  {/* Switch between the internal feasibility report and the
+                      client-facing presentation. Both are kept in state, so
+                      flipping back and forth never regenerates either. */}
+                  <div className="comp-filter-group" style={{ marginLeft: 'auto' }}>
+                    <button
+                      type="button"
+                      className={`comp-filter-pill${reportMode === 'feasibility' ? ' active' : ''}`}
+                      onClick={() => switchReportMode('feasibility')}
+                      title="The full 25-section internal feasibility report"
+                    >
+                      Feasibility
+                    </button>
+                    <button
+                      type="button"
+                      className={`comp-filter-pill${reportMode === 'buyer' ? ' active' : ''}`}
+                      onClick={() => switchReportMode('buyer')}
+                      disabled={buyerLoading}
+                      title="A short client-facing presentation with the asking price and comps"
+                    >
+                      Buyer Presentation
+                    </button>
+                  </div>
                 </h3>
-                {reportPending ? (
+
+                {/* Asking price is captured BEFORE the presentation is generated
+                    so the document can state it and judge it against the comps. */}
+                {showAskingPrice && (
+                  <div className="report-manual" style={{ display: 'block' }}>
+                    <p className="report-manual-text">
+                      What is the asking price for this property? It appears in the presentation and is compared against the value the comps support.
+                    </p>
+                    <div className="field-input-container" style={{ maxWidth: '260px', margin: '8px 0' }}>
+                      <span className="input-icon" style={{ fontWeight: 700 }}>$</span>
+                      <input
+                        type="text"
+                        inputMode="decimal"
+                        autoFocus
+                        placeholder="e.g. 85,000"
+                        value={askingPriceInput}
+                        onChange={(e) => setAskingPriceInput(e.target.value)}
+                        onKeyDown={(e) => { if (e.key === 'Enter') confirmAskingPrice(); }}
+                      />
+                    </div>
+                    <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                      <button type="button" className="report-generate-btn" onClick={confirmAskingPrice}>
+                        <FileText size={16} /> Generate Buyer Presentation
+                      </button>
+                      <button type="button" className="comp-filter-pill" onClick={() => { setShowAskingPrice(false); setReportMode('feasibility'); }}>
+                        Cancel
+                      </button>
+                    </div>
+                    <p className="field-help">Leave it blank to build the presentation without price commentary.</p>
+                  </div>
+                )}
+
+                {reportMode === 'buyer' && !showAskingPrice ? (
+                  <BuyerPresentationView
+                    data={data}
+                    markdown={buyerReport}
+                    loading={buyerLoading}
+                    error={buyerError}
+                    askingPrice={askingPrice}
+                    onRetry={() => generateBuyerPresentation(askingPrice)}
+                    onChangePrice={() => { setAskingPriceInput(askingPrice ? String(askingPrice) : ''); setShowAskingPrice(true); }}
+                  />
+                ) : showAskingPrice ? null : reportPending ? (
                   <>
                     <div className="report-manual">
                       <p className="report-manual-text">The full AI Feasibility Report (25 sections — zoning, rezoning, comps, valuation, risk &amp; more) is ready to generate.</p>
