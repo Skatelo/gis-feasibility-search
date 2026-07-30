@@ -161,6 +161,7 @@ import {
   Navigation,
   Bookmark,
   Download,
+  Save,
   ThumbsUp,
   ThumbsDown,
   Share2,
@@ -442,10 +443,13 @@ const BuyerPresentationView: FC<{
   markdown: string;
   loading: boolean;
   error: string;
-  askingPrice: number | null;
+  wholesalePrice: number | null;
+  saved: boolean;
   onRetry: () => void;
   onChangePrice: () => void;
-}> = ({ data, markdown, loading, error, askingPrice, onRetry, onChangePrice }) => {
+  onSave: () => void;
+  onDownloadPdf: () => void;
+}> = ({ data, markdown, loading, error, wholesalePrice, saved, onRetry, onChangePrice, onSave, onDownloadPdf }) => {
   const images = buyerPresentationImages(data);
   return (
     <div className="buyer-presentation">
@@ -474,14 +478,25 @@ const BuyerPresentationView: FC<{
       )}
 
       <div className="buyer-meta">
-        {askingPrice ? (
-          <span className="buyer-price">Asking price: ${askingPrice.toLocaleString()}</span>
+        {wholesalePrice ? (
+          <span className="buyer-price">Wholesale price: ${wholesalePrice.toLocaleString()}</span>
         ) : (
-          <span className="buyer-price muted">No asking price set</span>
+          <span className="buyer-price muted">No wholesale price set</span>
         )}
         <button type="button" className="comp-filter-pill" onClick={onChangePrice} disabled={loading}>
-          {askingPrice ? 'Change price & regenerate' : 'Add asking price'}
+          {wholesalePrice ? 'Change price & regenerate' : 'Add wholesale price'}
         </button>
+        {/* Save + PDF only once there is a finished document to act on. */}
+        {markdown && !loading && (
+          <>
+            <button type="button" className="comp-filter-pill" onClick={onSave} disabled={saved}>
+              {saved ? <><Check size={13} /> Saved</> : <><Save size={13} /> Save presentation</>}
+            </button>
+            <button type="button" className="comp-filter-pill" onClick={onDownloadPdf}>
+              <Download size={13} /> Download PDF
+            </button>
+          </>
+        )}
       </div>
 
       {loading && !markdown ? (
@@ -914,9 +929,10 @@ export const FeasibilitySearch: FC = () => {
   const [buyerReport, setBuyerReport] = useState('');
   const [buyerLoading, setBuyerLoading] = useState(false);
   const [buyerError, setBuyerError] = useState('');
-  const [askingPrice, setAskingPrice] = useState<number | null>(null);
-  const [askingPriceInput, setAskingPriceInput] = useState('');
-  const [showAskingPrice, setShowAskingPrice] = useState(false);
+  const [wholesalePrice, setWholesalePrice] = useState<number | null>(null);
+  const [wholesalePriceInput, setWholesalePriceInput] = useState('');
+  const [showWholesalePrice, setShowWholesalePrice] = useState(false);
+  const [buyerSaved, setBuyerSaved] = useState(false);
   // Comps display/search filters
   const [compRadius, setCompRadius] = useState(5);          // max DRIVING-mile radius (1 / 3 / 5 / 10) — re-fetches
   const [compTypeFilter, setCompTypeFilter] = useState('all'); // property-type display filter
@@ -1387,6 +1403,7 @@ export const FeasibilitySearch: FC = () => {
     if (!data || buyerLoading) return;
     setBuyerError('');
     setBuyerLoading(true);
+    setBuyerSaved(false); // a regenerated document is a different document
     setReportMode('buyer');
     const seq = searchSeqRef.current;
     try {
@@ -1395,7 +1412,7 @@ export const FeasibilitySearch: FC = () => {
             // Only fields CompProperty actually carries — beds/baths/acres are
             // not published per-comp, so the table marks them "N/A" rather than
             // inviting the model to invent them.
-            `- Comp ${idx + 1}: ${comp.address} | Sold $${comp.price.toLocaleString()}${comp.pricePerSqft ? ` ($${comp.pricePerSqft}/sqft)` : ''} | ${comp.sqft ? `${comp.sqft.toLocaleString()} sqft` : 'sqft N/A'} | Sold ${comp.saleDate || 'N/A'} | Built ${comp.yearBuilt || 'N/A'} | Type: ${comp.propertyType || 'N/A'} | ${comp.distanceMiles.toFixed(2)} driving mi`
+            `- Comp ${idx + 1}: ${comp.address} | Sold $${comp.price.toLocaleString()}${comp.pricePerSqft ? ` ($${comp.pricePerSqft}/sqft)` : ''} | ${comp.sqft ? `${comp.sqft.toLocaleString()} sqft` : 'sqft N/A'} | Sold ${comp.saleDate || 'N/A'} | Built ${comp.yearBuilt || 'N/A'} | Type: ${comp.propertyType || 'N/A'} | Driving Miles: ${Number.isFinite(comp.distanceMiles) ? `${comp.distanceMiles.toFixed(2)} mi` : 'N/A'}`
           ).join('\n')
         : 'No verified comps available — say so plainly and omit the comps table.';
 
@@ -1416,20 +1433,100 @@ export const FeasibilitySearch: FC = () => {
     }
   };
 
-  /** Switch reports. Going to the buyer view asks for the asking price first. */
+  /** Switch reports. Going to the buyer view asks for the wholesale price first. */
   const switchReportMode = (mode: 'feasibility' | 'buyer') => {
     if (mode === 'feasibility') { setReportMode('feasibility'); return; }
     if (buyerReport || buyerLoading) { setReportMode('buyer'); return; }
-    setAskingPriceInput(askingPrice ? String(askingPrice) : '');
-    setShowAskingPrice(true);
+    setWholesalePriceInput(wholesalePrice ? String(wholesalePrice) : '');
+    setShowWholesalePrice(true);
   };
 
-  const confirmAskingPrice = () => {
-    const parsed = Number(String(askingPriceInput).replace(/[^0-9.]/g, ''));
+  const confirmWholesalePrice = () => {
+    const parsed = Number(String(wholesalePriceInput).replace(/[^0-9.]/g, ''));
     const price = Number.isFinite(parsed) && parsed > 0 ? Math.round(parsed) : null;
-    setAskingPrice(price);
-    setShowAskingPrice(false);
+    setWholesalePrice(price);
+    setShowWholesalePrice(false);
     generateBuyerPresentation(price);
+  };
+
+  /** Save the presentation alongside the feasibility reports. */
+  const saveBuyerPresentation = async () => {
+    if (!data || !buyerReport || buyerSaved) return;
+    try {
+      await saveReport({
+        address: data.inputAddress,
+        county: data.countyName,
+        parcelId: data.parcelId,
+        zoningCode: data.zoningCode,
+        acres: data.gisAcres,
+        ownerName: data.ownerName,
+        // Tagged in the title so it is distinguishable from the feasibility
+        // report for the same parcel in the saved-reports drawer.
+        reportMarkdown: `# Buyer Presentation${wholesalePrice ? ` — Wholesale Price $${wholesalePrice.toLocaleString()}` : ''}\n\n${sanitizeReportText(buyerReport)}`,
+      });
+      setBuyerSaved(true);
+    } catch (err: any) {
+      setBuyerError(err?.message || 'The presentation could not be saved.');
+    }
+  };
+
+  /**
+   * Printable buyer presentation — opens a clean document with the property
+   * imagery and the report, then triggers the browser's print dialog where
+   * "Save as PDF" produces the downloadable file.
+   */
+  const downloadBuyerPresentationPdf = () => {
+    if (!data || !buyerReport) return;
+    const win = window.open('', '_blank');
+    if (!win) {
+      setBuyerError('Your browser blocked the popup. Allow popups for this site, then try again.');
+      return;
+    }
+    const images = buyerPresentationImages(data);
+    const priceRow = wholesalePrice
+      ? `<div class="price">Wholesale Price: $${wholesalePrice.toLocaleString()}</div>`
+      : '';
+    win.document.write(`<!DOCTYPE html><html><head><meta charset="utf-8" />
+<title>Buyer Presentation — ${data.inputAddress}</title>
+<style>
+  *{box-sizing:border-box}
+  body{font-family:'Segoe UI',system-ui,-apple-system,sans-serif;color:#0f172a;background:#f8fafc;margin:0;padding:24px}
+  .sheet{max-width:860px;margin:0 auto;background:#fff;padding:40px;border-radius:12px;box-shadow:0 1px 3px rgba(0,0,0,.08)}
+  h1{font-size:1.7rem;margin:0 0 4px}
+  h2{font-size:1.15rem;margin:26px 0 8px;border-bottom:1px solid #e2e8f0;padding-bottom:6px}
+  h3{font-size:1rem;margin:18px 0 6px}
+  .addr{color:#475569;margin-bottom:14px}
+  .price{display:inline-block;font-weight:700;background:#ecfdf5;color:#065f46;border:1px solid #a7f3d0;padding:6px 12px;border-radius:8px;margin-bottom:16px}
+  .imgs{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:16px 0 22px}
+  .imgs figure{margin:0}
+  .imgs img{width:100%;height:auto;border-radius:8px;border:1px solid #e2e8f0;display:block}
+  .imgs figcaption{font-size:.72rem;color:#64748b;margin-top:4px}
+  table{width:100%;border-collapse:collapse;margin:12px 0;font-size:.86rem}
+  th,td{border:1px solid #e2e8f0;padding:7px 9px;text-align:left}
+  th{background:#f1f5f9}
+  ul,ol{padding-left:20px}
+  li{margin:4px 0}
+  .toolbar{max-width:860px;margin:0 auto 14px;display:flex;gap:8px}
+  button{font:inherit;padding:8px 14px;border-radius:8px;border:1px solid #cbd5e1;background:#fff;cursor:pointer}
+  .primary{background:#4f46e5;color:#fff;border-color:#4f46e5}
+  footer{margin-top:30px;padding-top:14px;border-top:1px solid #e2e8f0;font-size:.7rem;color:#94a3b8}
+  @media print{body{background:#fff;padding:0}.sheet{box-shadow:none;padding:0;max-width:100%}.toolbar{display:none}}
+</style></head><body>
+<div class="toolbar"><button class="primary" onclick="window.print()">Download as PDF</button><button onclick="window.close()">Close</button></div>
+<div class="sheet">
+  <h1>Land Investment &amp; Build Opportunity</h1>
+  <div class="addr">${data.inputAddress}</div>
+  ${priceRow}
+  <div class="imgs">
+    ${images.satelliteUrl ? `<figure><img src="${images.satelliteUrl}" alt="Aerial view" /><figcaption>Aerial view — ${data.inputAddress}</figcaption></figure>` : ''}
+    ${images.streetViewUrl ? `<figure><img src="${images.streetViewUrl}" alt="Street view" onerror="this.closest('figure').style.display='none'" /><figcaption>Street view</figcaption></figure>` : ''}
+  </div>
+  <div id="pdf-root"></div>
+  <footer>Prepared for a prospective buyer. Figures come from public GIS, county records and verified closed sales; confirm zoning, setbacks and septic suitability with the county before closing.</footer>
+</div></body></html>`);
+    win.document.close();
+    const rootEl = win.document.getElementById('pdf-root');
+    if (rootEl) createRoot(rootEl).render(parseMarkdown(sanitizeReportText(buyerReport)));
   };
 
   const generateInitialChatReport = async (reportData: SiteFeasibilityData, costEstimate?: ConstructionCostEstimate) => {
@@ -3265,9 +3362,10 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
     setBuyerReport('');
     setBuyerError('');
     setBuyerLoading(false);
-    setAskingPrice(null);
-    setAskingPriceInput('');
-    setShowAskingPrice(false);
+    setBuyerSaved(false);
+    setWholesalePrice(null);
+    setWholesalePriceInput('');
+    setShowWholesalePrice(false);
     setReportPending(false);
     setCompRadius(compPrefs.radiusMiles);
     setCompTypeFilter(compPrefs.propertyType);
@@ -5431,12 +5529,12 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                   </div>
                 </h3>
 
-                {/* Asking price is captured BEFORE the presentation is generated
+                {/* Wholesale price is captured BEFORE the presentation is generated
                     so the document can state it and judge it against the comps. */}
-                {showAskingPrice && (
+                {showWholesalePrice && (
                   <div className="report-manual" style={{ display: 'block' }}>
                     <p className="report-manual-text">
-                      What is the asking price for this property? It appears in the presentation and is compared against the value the comps support.
+                      What is the wholesale price for this property? It appears in the presentation and is compared against the value the comps support.
                     </p>
                     <div className="field-input-container" style={{ maxWidth: '260px', margin: '8px 0' }}>
                       <span className="input-icon" style={{ fontWeight: 700 }}>$</span>
@@ -5445,16 +5543,16 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                         inputMode="decimal"
                         autoFocus
                         placeholder="e.g. 85,000"
-                        value={askingPriceInput}
-                        onChange={(e) => setAskingPriceInput(e.target.value)}
-                        onKeyDown={(e) => { if (e.key === 'Enter') confirmAskingPrice(); }}
+                        value={wholesalePriceInput}
+                        onChange={(e) => setWholesalePriceInput(e.target.value)}
+                        onKeyDown={(e) => { if (e.key === 'Enter') confirmWholesalePrice(); }}
                       />
                     </div>
                     <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
-                      <button type="button" className="report-generate-btn" onClick={confirmAskingPrice}>
+                      <button type="button" className="report-generate-btn" onClick={confirmWholesalePrice}>
                         <FileText size={16} /> Generate Buyer Presentation
                       </button>
-                      <button type="button" className="comp-filter-pill" onClick={() => { setShowAskingPrice(false); setReportMode('feasibility'); }}>
+                      <button type="button" className="comp-filter-pill" onClick={() => { setShowWholesalePrice(false); setReportMode('feasibility'); }}>
                         Cancel
                       </button>
                     </div>
@@ -5462,17 +5560,20 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                   </div>
                 )}
 
-                {reportMode === 'buyer' && !showAskingPrice ? (
+                {reportMode === 'buyer' && !showWholesalePrice ? (
                   <BuyerPresentationView
                     data={data}
                     markdown={buyerReport}
                     loading={buyerLoading}
                     error={buyerError}
-                    askingPrice={askingPrice}
-                    onRetry={() => generateBuyerPresentation(askingPrice)}
-                    onChangePrice={() => { setAskingPriceInput(askingPrice ? String(askingPrice) : ''); setShowAskingPrice(true); }}
+                    wholesalePrice={wholesalePrice}
+                    saved={buyerSaved}
+                    onRetry={() => generateBuyerPresentation(wholesalePrice)}
+                    onChangePrice={() => { setWholesalePriceInput(wholesalePrice ? String(wholesalePrice) : ''); setShowWholesalePrice(true); }}
+                    onSave={saveBuyerPresentation}
+                    onDownloadPdf={downloadBuyerPresentationPdf}
                   />
-                ) : showAskingPrice ? null : reportPending ? (
+                ) : showWholesalePrice ? null : reportPending ? (
                   <>
                     <div className="report-manual">
                       <p className="report-manual-text">The full AI Feasibility Report (25 sections — zoning, rezoning, comps, valuation, risk &amp; more) is ready to generate.</p>
