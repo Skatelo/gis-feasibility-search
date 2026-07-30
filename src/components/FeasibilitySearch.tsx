@@ -8,6 +8,7 @@ import { fetchRealEstatePropertyTransactions, fetchRealEstateOwnerDetails } from
 import type { RealEstatePropertyTransactions, RealEstateOwnerDetails } from '../services/realEstateApiProperty';
 import { resolveFullCarolinaPostalAddress } from '../services/carolinaAddress';
 import { saveReport, getReportEtaMs, recordReportDuration } from '../services/reportStore';
+import { downloadReportPdf, pdfFileName } from '../services/pdfExport';
 import { listConversations, saveConversation, deleteConversation as deleteConvo, newConversationId, deriveTitle } from '../services/chatStore';
 import type { ChatConversation } from '../services/chatStore';
 import { getSearchHistory, addSearchHistory } from '../services/searchHistoryStore';
@@ -445,11 +446,12 @@ const BuyerPresentationView: FC<{
   error: string;
   wholesalePrice: number | null;
   saved: boolean;
+  pdfBusy: boolean;
   onRetry: () => void;
   onChangePrice: () => void;
   onSave: () => void;
   onDownloadPdf: () => void;
-}> = ({ data, markdown, loading, error, wholesalePrice, saved, onRetry, onChangePrice, onSave, onDownloadPdf }) => {
+}> = ({ data, markdown, loading, error, wholesalePrice, saved, pdfBusy, onRetry, onChangePrice, onSave, onDownloadPdf }) => {
   const images = buyerPresentationImages(data);
   return (
     <div className="buyer-presentation">
@@ -492,8 +494,9 @@ const BuyerPresentationView: FC<{
             <button type="button" className="comp-filter-pill" onClick={onSave} disabled={saved}>
               {saved ? <><Check size={13} /> Saved</> : <><Save size={13} /> Save presentation</>}
             </button>
-            <button type="button" className="comp-filter-pill" onClick={onDownloadPdf}>
-              <Download size={13} /> Download PDF
+            <button type="button" className="comp-filter-pill" onClick={onDownloadPdf} disabled={pdfBusy}>
+              {pdfBusy ? <Loader2 size={13} className="spinner" /> : <Download size={13} />}
+              {pdfBusy ? 'Building PDF…' : 'Download PDF'}
             </button>
           </>
         )}
@@ -933,6 +936,8 @@ export const FeasibilitySearch: FC = () => {
   const [wholesalePriceInput, setWholesalePriceInput] = useState('');
   const [showWholesalePrice, setShowWholesalePrice] = useState(false);
   const [buyerSaved, setBuyerSaved] = useState(false);
+  const [buyerPdfBusy, setBuyerPdfBusy] = useState(false);
+  const [feasibilityPdfBusy, setFeasibilityPdfBusy] = useState(false);
   // Comps display/search filters
   const [compRadius, setCompRadius] = useState(5);          // max DRIVING-mile radius (1 / 3 / 5 / 10) — re-fetches
   const [compTypeFilter, setCompTypeFilter] = useState('all'); // property-type display filter
@@ -1471,62 +1476,75 @@ export const FeasibilitySearch: FC = () => {
   };
 
   /**
-   * Printable buyer presentation — opens a clean document with the property
-   * imagery and the report, then triggers the browser's print dialog where
-   * "Save as PDF" produces the downloadable file.
+   * Render markdown to a detached DOM node for PDF capture. React 18 renders
+   * asynchronously, so this waits a frame for the tree to commit before the
+   * node is handed to html2canvas — otherwise the capture is empty.
    */
-  const downloadBuyerPresentationPdf = () => {
-    if (!data || !buyerReport) return;
-    const win = window.open('', '_blank');
-    if (!win) {
-      setBuyerError('Your browser blocked the popup. Allow popups for this site, then try again.');
-      return;
+  const renderMarkdownToNode = async (markdown: string): Promise<Node> => {
+    const holder = document.createElement('div');
+    holder.style.cssText = 'position:fixed;left:-10000px;top:0;';
+    document.body.appendChild(holder);
+    const root = createRoot(holder);
+    root.render(parseMarkdown(sanitizeReportText(markdown)));
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    const fragment = document.createDocumentFragment();
+    while (holder.firstChild) fragment.appendChild(holder.firstChild);
+    // The React root is intentionally NOT unmounted before the nodes are moved:
+    // unmounting first would wipe the very children we need.
+    setTimeout(() => { try { root.unmount(); } catch { /* already gone */ } holder.remove(); }, 0);
+    return fragment;
+  };
+
+  /** One-click PDF of the buyer presentation (jsPDF + html2canvas). */
+  const downloadBuyerPresentationPdf = async () => {
+    if (!data || !buyerReport || buyerPdfBusy) return;
+    setBuyerPdfBusy(true);
+    setBuyerError('');
+    try {
+      const images = buyerPresentationImages(data);
+      await downloadReportPdf({
+        title: 'Land Investment & Build Opportunity',
+        address: data.inputAddress,
+        bodyNode: await renderMarkdownToNode(buyerReport),
+        priceLabel: wholesalePrice ? `Wholesale Price: $${wholesalePrice.toLocaleString()}` : undefined,
+        imageUrls: [
+          { url: images.satelliteUrl, caption: `Aerial view — ${data.inputAddress}` },
+          { url: images.streetViewUrl, caption: 'Street view' },
+        ].filter((image) => !!image.url),
+        footer: 'Prepared for a prospective buyer. Figures come from public GIS, county records and verified closed sales; confirm zoning, setbacks and septic suitability with the county before closing.',
+        fileName: pdfFileName('buyer-presentation', data.inputAddress),
+      });
+    } catch (err: any) {
+      setBuyerError(err?.message ? `PDF export failed: ${err.message}` : 'The PDF could not be generated.');
+    } finally {
+      setBuyerPdfBusy(false);
     }
-    const images = buyerPresentationImages(data);
-    const priceRow = wholesalePrice
-      ? `<div class="price">Wholesale Price: $${wholesalePrice.toLocaleString()}</div>`
-      : '';
-    win.document.write(`<!DOCTYPE html><html><head><meta charset="utf-8" />
-<title>Buyer Presentation — ${data.inputAddress}</title>
-<style>
-  *{box-sizing:border-box}
-  body{font-family:'Segoe UI',system-ui,-apple-system,sans-serif;color:#0f172a;background:#f8fafc;margin:0;padding:24px}
-  .sheet{max-width:860px;margin:0 auto;background:#fff;padding:40px;border-radius:12px;box-shadow:0 1px 3px rgba(0,0,0,.08)}
-  h1{font-size:1.7rem;margin:0 0 4px}
-  h2{font-size:1.15rem;margin:26px 0 8px;border-bottom:1px solid #e2e8f0;padding-bottom:6px}
-  h3{font-size:1rem;margin:18px 0 6px}
-  .addr{color:#475569;margin-bottom:14px}
-  .price{display:inline-block;font-weight:700;background:#ecfdf5;color:#065f46;border:1px solid #a7f3d0;padding:6px 12px;border-radius:8px;margin-bottom:16px}
-  .imgs{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:16px 0 22px}
-  .imgs figure{margin:0}
-  .imgs img{width:100%;height:auto;border-radius:8px;border:1px solid #e2e8f0;display:block}
-  .imgs figcaption{font-size:.72rem;color:#64748b;margin-top:4px}
-  table{width:100%;border-collapse:collapse;margin:12px 0;font-size:.86rem}
-  th,td{border:1px solid #e2e8f0;padding:7px 9px;text-align:left}
-  th{background:#f1f5f9}
-  ul,ol{padding-left:20px}
-  li{margin:4px 0}
-  .toolbar{max-width:860px;margin:0 auto 14px;display:flex;gap:8px}
-  button{font:inherit;padding:8px 14px;border-radius:8px;border:1px solid #cbd5e1;background:#fff;cursor:pointer}
-  .primary{background:#4f46e5;color:#fff;border-color:#4f46e5}
-  footer{margin-top:30px;padding-top:14px;border-top:1px solid #e2e8f0;font-size:.7rem;color:#94a3b8}
-  @media print{body{background:#fff;padding:0}.sheet{box-shadow:none;padding:0;max-width:100%}.toolbar{display:none}}
-</style></head><body>
-<div class="toolbar"><button class="primary" onclick="window.print()">Download as PDF</button><button onclick="window.close()">Close</button></div>
-<div class="sheet">
-  <h1>Land Investment &amp; Build Opportunity</h1>
-  <div class="addr">${data.inputAddress}</div>
-  ${priceRow}
-  <div class="imgs">
-    ${images.satelliteUrl ? `<figure><img src="${images.satelliteUrl}" alt="Aerial view" /><figcaption>Aerial view — ${data.inputAddress}</figcaption></figure>` : ''}
-    ${images.streetViewUrl ? `<figure><img src="${images.streetViewUrl}" alt="Street view" onerror="this.closest('figure').style.display='none'" /><figcaption>Street view</figcaption></figure>` : ''}
-  </div>
-  <div id="pdf-root"></div>
-  <footer>Prepared for a prospective buyer. Figures come from public GIS, county records and verified closed sales; confirm zoning, setbacks and septic suitability with the county before closing.</footer>
-</div></body></html>`);
-    win.document.close();
-    const rootEl = win.document.getElementById('pdf-root');
-    if (rootEl) createRoot(rootEl).render(parseMarkdown(sanitizeReportText(buyerReport)));
+  };
+
+  /** One-click PDF of the AI Feasibility Report. */
+  const downloadFeasibilityPdf = async () => {
+    const markdown = chatHistory[0]?.content || '';
+    if (!data || !markdown || feasibilityPdfBusy) return;
+    setFeasibilityPdfBusy(true);
+    try {
+      const images = buyerPresentationImages(data);
+      await downloadReportPdf({
+        title: 'AI Land Feasibility Report',
+        address: data.inputAddress,
+        bodyNode: await renderMarkdownToNode(markdown),
+        imageUrls: [
+          { url: images.satelliteUrl, caption: `Aerial view — ${data.inputAddress}` },
+          { url: images.streetViewUrl, caption: 'Street view' },
+        ].filter((image) => !!image.url),
+        footer: `Report ID: ANTG-INVESTOR-${data.parcelId}. Compiled from public GIS, municipal databases, USGS 3DEP elevation models and zoning indices. All cost estimates, setbacks and land values must be verified by licensed engineers and contractors prior to closing.`,
+        fileName: pdfFileName('feasibility-report', data.inputAddress),
+      });
+    } catch (err: any) {
+      console.warn('Feasibility PDF export failed:', err);
+      setCompsError(err?.message ? `PDF export failed: ${err.message}` : 'The PDF could not be generated.');
+    } finally {
+      setFeasibilityPdfBusy(false);
+    }
   };
 
   const generateInitialChatReport = async (reportData: SiteFeasibilityData, costEstimate?: ConstructionCostEstimate) => {
@@ -3963,15 +3981,17 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                     <Navigation size={14} className="directions-icon-rotate" />
                     <span>Directions</span>
                   </a>
+                  {/* Real one-click PDF (jsPDF + html2canvas) — no print dialog. */}
                   <button
-                    onClick={generatePrintableReport}
+                    onClick={downloadFeasibilityPdf}
                     className="btn-quick-action"
-                    disabled={chatLoading || chatHistory.length === 0}
+                    disabled={chatLoading || feasibilityPdfBusy || chatHistory.length === 0}
+                    title="Download the feasibility report as a PDF file"
                   >
-                    {chatLoading ? (
+                    {chatLoading || feasibilityPdfBusy ? (
                       <>
                         <Loader2 size={14} className="animate-spin" />
-                        <span>Generating Report...</span>
+                        <span>{feasibilityPdfBusy ? 'Building PDF...' : 'Generating Report...'}</span>
                       </>
                     ) : (
                       <>
@@ -3979,6 +3999,16 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                         <span>Download PDF Report</span>
                       </>
                     )}
+                  </button>
+                  {/* Print view kept as a secondary route (paper / OS print-to-PDF). */}
+                  <button
+                    onClick={generatePrintableReport}
+                    className="btn-quick-action"
+                    disabled={chatLoading || chatHistory.length === 0}
+                    title="Open a printable version"
+                  >
+                    <FileText size={14} />
+                    <span>Print View</span>
                   </button>
                   <button
                     onClick={async () => {
@@ -5568,6 +5598,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                     error={buyerError}
                     wholesalePrice={wholesalePrice}
                     saved={buyerSaved}
+                    pdfBusy={buyerPdfBusy}
                     onRetry={() => generateBuyerPresentation(wholesalePrice)}
                     onChangePrice={() => { setWholesalePriceInput(wholesalePrice ? String(wholesalePrice) : ''); setShowWholesalePrice(true); }}
                     onSave={saveBuyerPresentation}
