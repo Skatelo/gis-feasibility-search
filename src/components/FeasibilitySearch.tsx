@@ -5199,15 +5199,15 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                       extra API calls; radii wider than the run are left blank. */}
                   <div className="land-bands">
                     <div className="land-bands-head">
-                      <span className="land-bands-title">Estimated land price — 8%–15% of ARV</span>
-                      <span className="land-bands-sub">ARV = median sold price of comps inside each radius</span>
+                      <span className="land-bands-title">Estimated land price — 8%–15% of comp average</span>
+                      <span className="land-bands-sub">Average sold price of the comps inside each radius</span>
                     </div>
                     <table className="land-bands-table">
                       <thead>
                         <tr>
                           <th>Radius</th>
                           <th>Comps</th>
-                          <th>ARV (median)</th>
+                          <th>Avg sold price</th>
                           <th>Land price range (8%–15%)</th>
                         </tr>
                       </thead>
@@ -5216,7 +5216,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                           <tr key={band.radiusMiles} className={band.radiusMiles === compRadius ? 'land-band-active' : undefined}>
                             <td>{band.radiusMiles} mi</td>
                             <td>{band.covered ? band.compCount : '—'}</td>
-                            <td>{band.arv ? `$${band.arv.toLocaleString()}` : '—'}</td>
+                            <td>{band.averagePrice ? `$${band.averagePrice.toLocaleString()}` : '—'}</td>
                             <td>
                               {band.lowPrice && band.highPrice
                                 ? <strong>${band.lowPrice.toLocaleString()} – ${band.highPrice.toLocaleString()}</strong>
@@ -5229,7 +5229,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                       </tbody>
                     </table>
                     <p className="land-bands-note">
-                      Builders typically pay 8%–15% of a finished home's value for the lot. Ranges use the median sold price of the comps actually inside each radius, so a wider ring can move the number. Subtract site costs (clearing, grading, well/septic, tap fees) before offering.
+                      Builders typically pay 8%–15% of a finished home's value for the lot. Ranges use the average sold price of the comps actually inside each radius, so a wider ring can move the number. Subtract site costs (clearing, grading, well/septic, tap fees) before offering.
                     </p>
                   </div>
 

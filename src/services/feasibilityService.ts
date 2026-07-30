@@ -7589,10 +7589,10 @@ Use CURRENT LOCAL prices from credible sources; cite them; never invent a price 
 // ---------------------------------------------------------------------------
 // LAND PRICE BANDS
 // The rule of thumb builders use: a finished lot is worth roughly 8%–15% of the
-// After Repair Value of the home that gets built on it. Applying that band to
-// the ARV implied by nearby SOLD comps gives a defensible "what to pay for the
-// land" range, and showing it at several radii reveals how sensitive that number
-// is to how far out you have to reach for comparables.
+// value of the home that gets built on it. Applying that band to the AVERAGE
+// sold price of nearby comps gives a defensible "what to pay for the land"
+// range, and showing it at several radii reveals how sensitive that number is to
+// how far out you have to reach for comparables.
 // ---------------------------------------------------------------------------
 
 export const LAND_ARV_LOW_PCT = 0.08;
@@ -7601,9 +7601,10 @@ export const LAND_ARV_HIGH_PCT = 0.15;
 export interface LandPriceBand {
   radiusMiles: number;
   compCount: number;
-  /** Median sold price of the comps inside this radius — the ARV proxy. */
-  arv: number | null;
-  medianPricePerSqft: number | null;
+  /** AVERAGE sold price of the comps inside this radius — the value the 8%–15%
+   *  band is applied to. */
+  averagePrice: number | null;
+  averagePricePerSqft: number | null;
   lowPrice: number | null;
   highPrice: number | null;
   /** False when the loaded comp set does not reach this far, so the row is
@@ -7611,11 +7612,10 @@ export interface LandPriceBand {
   covered: boolean;
 }
 
-function medianOf(values: number[]): number | null {
-  const sorted = values.filter((v) => Number.isFinite(v) && v > 0).sort((a, b) => a - b);
-  if (!sorted.length) return null;
-  const mid = Math.floor(sorted.length / 2);
-  return sorted.length % 2 ? sorted[mid] : Math.round((sorted[mid - 1] + sorted[mid]) / 2);
+function averageOf(values: number[]): number | null {
+  const usable = values.filter((v) => Number.isFinite(v) && v > 0);
+  if (!usable.length) return null;
+  return Math.round(usable.reduce((sum, v) => sum + v, 0) / usable.length);
 }
 
 /**
@@ -7623,6 +7623,9 @@ function medianOf(values: number[]): number | null {
  * filtering on driving distance — no extra API calls. A radius wider than the
  * comp run is marked uncovered rather than reusing the narrower set, which would
  * overstate what the data supports.
+ *
+ * Uses the AVERAGE sold price so the figure matches the "Average Close Price"
+ * buyers see on the comp summary and in the buyer presentation.
  */
 export function landPriceBandsByRadius(
   comps: CompProperty[] | undefined,
@@ -7635,17 +7638,17 @@ export function landPriceBandsByRadius(
     const within = covered
       ? all.filter((comp) => Number.isFinite(comp.distanceMiles) && comp.distanceMiles <= radiusMiles)
       : [];
-    const arv = medianOf(within.map((comp) => comp.price));
-    const medianPricePerSqft = medianOf(
+    const averagePrice = averageOf(within.map((comp) => comp.price));
+    const averagePricePerSqft = averageOf(
       within.map((comp) => (comp.pricePerSqft ?? (comp.sqft && comp.sqft > 0 ? comp.price / comp.sqft : 0))),
     );
     return {
       radiusMiles,
       compCount: within.length,
-      arv,
-      medianPricePerSqft,
-      lowPrice: arv ? Math.round(arv * LAND_ARV_LOW_PCT) : null,
-      highPrice: arv ? Math.round(arv * LAND_ARV_HIGH_PCT) : null,
+      averagePrice,
+      averagePricePerSqft,
+      lowPrice: averagePrice ? Math.round(averagePrice * LAND_ARV_LOW_PCT) : null,
+      highPrice: averagePrice ? Math.round(averagePrice * LAND_ARV_HIGH_PCT) : null,
       covered,
     };
   });
