@@ -1,5 +1,12 @@
+import { fileURLToPath } from 'node:url'
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
+
+// jsPDF statically imports `canvg` and `dompurify` for its .svg()/.html()
+// helpers, which this app never calls (pages are rasterised with html2canvas
+// and added via .addImage()). Point them at an empty module so the bundler can
+// resolve the specifiers without pulling in packages we don't use.
+const emptyShim = fileURLToPath(new URL('./src/shims/empty.ts', import.meta.url))
 
 function monidProxyPath(path: string): string {
   const request = new URL(path, 'http://localhost');
@@ -20,6 +27,12 @@ function monidProxyPath(path: string): string {
 // https://vite.dev/config/
 export default defineConfig({
   plugins: [react()],
+  resolve: {
+    alias: {
+      canvg: emptyShim,
+      dompurify: emptyShim,
+    },
+  },
   server: {
     proxy: {
       // Dev-only: browsers can't call api.perplexity.ai directly (it sends no
