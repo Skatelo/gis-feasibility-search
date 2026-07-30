@@ -24,17 +24,25 @@
 const MONID_BASE = 'https://api.monid.ai';
 const TERMINAL = new Set(['COMPLETED', 'FAILED', 'BLOCKED', 'STOPPED', 'TIMED_OUT']);
 
+/** Accept both the server name and the VITE_ variant, since the same key is
+ *  often already present for local dev. */
+function monidKey() {
+  return String(process.env.MONID_API_KEY || process.env.VITE_MONID_API_KEY || '').trim();
+}
+
 export function monidConfigured() {
-  return !!String(process.env.MONID_API_KEY || '').trim();
+  return !!monidKey();
 }
 
 function monidHeaders() {
   const headers = {
-    Authorization: `Bearer ${String(process.env.MONID_API_KEY || '').trim()}`,
+    Authorization: `Bearer ${monidKey()}`,
     'Content-Type': 'application/json',
     Accept: 'application/json',
   };
-  const workspace = String(process.env.MONID_WORKSPACE_ID || '').trim();
+  // Verified optional: /v1/run succeeds without it on a single-workspace key.
+  // Sent when configured so multi-workspace keys target the right one.
+  const workspace = String(process.env.MONID_WORKSPACE_ID || process.env.VITE_MONID_WORKSPACE_ID || '').trim();
   if (workspace) headers['x-workspace-id'] = workspace;
   return headers;
 }
@@ -121,25 +129,58 @@ export async function monidRun(provider, endpoint, input = {}, { timeoutMs = 900
 // is stable. Env vars let an operator pin an exact endpoint and skip discovery.
 let cachedEndpoint;
 
-const URL_INPUT_KEYS = ['startUrls', 'start_urls', 'urls', 'url', 'links', 'website', 'websiteUrl', 'pageUrl', 'targetUrl'];
+const URL_INPUT_KEYS = ['url', 'startUrls', 'start_urls', 'urls', 'links', 'website', 'websiteUrl', 'pageUrl', 'targetUrl'];
 
-/** Pick the input property that accepts the URL, and shape it to its type. */
+/** Extra options worth setting when the endpoint's schema exposes them. */
+const PREFERRED_OPTIONS = {
+  // Drop nav/header/footer/sidebar noise so the model sees the substance.
+  useMainContentOnly: true,
+  // Government viewers are JavaScript-heavy; give them a moment to paint.
+  waitForMs: 2500,
+};
+
+/**
+ * Shape the run input from the endpoint's real schema.
+ *
+ * VERIFIED against Monid's /v1/inspect: `input` is keyed by REQUEST SECTION —
+ * e.g. context.dev's /web/scrape/markdown exposes `input.queryParams` with a
+ * JSON Schema inside. A flat `{ url }` is rejected with
+ * "queryParams.url: expected string, received undefined", so the URL must be
+ * nested under its section.
+ */
 export function buildUrlInput(schema, url) {
+  // Section-keyed schema (queryParams / body / pathParams / …).
+  if (schema && typeof schema === 'object' && !schema.properties) {
+    for (const [section, sectionSchema] of Object.entries(schema)) {
+      const properties = sectionSchema?.properties;
+      if (!properties || typeof properties !== 'object') continue;
+      const inner = buildUrlInput(sectionSchema, url);
+      if (inner && Object.keys(inner).length) return { [section]: inner };
+    }
+  }
+
   const properties = schema?.properties && typeof schema.properties === 'object' ? schema.properties : null;
   if (!properties) return { url };
+
+  const input = {};
   for (const key of URL_INPUT_KEYS) {
     const prop = properties[key];
     if (!prop) continue;
     const type = String(prop.type || '');
     if (type === 'array') {
       // Apify actors usually want [{ url }]; some want plain strings.
-      const itemType = String(prop.items?.type || '');
-      return { [key]: itemType === 'string' ? [url] : [{ url }] };
+      input[key] = String(prop.items?.type || '') === 'string' ? [url] : [{ url }];
+    } else {
+      input[key] = url;
     }
-    return { [key]: url };
+    break;
   }
-  // Unknown schema — try the most common single-URL key.
-  return { url };
+  if (!Object.keys(input).length) return { url };
+
+  for (const [option, value] of Object.entries(PREFERRED_OPTIONS)) {
+    if (properties[option]) input[option] = value;
+  }
+  return input;
 }
 
 /** Provider/endpoint (and its input schema) for a general web scrape. */
@@ -147,12 +188,19 @@ export async function resolveScrapeEndpoint() {
   if (cachedEndpoint !== undefined) return cachedEndpoint;
   if (!monidConfigured()) { cachedEndpoint = null; return cachedEndpoint; }
 
-  const pinnedProvider = String(process.env.MONID_SCRAPE_PROVIDER || '').trim();
-  const pinnedEndpoint = String(process.env.MONID_SCRAPE_ENDPOINT || '').trim();
+  // Default to the endpoint verified best for this job: context.dev's
+  // /web/scrape/markdown returns LLM-ready markdown and handles JavaScript
+  // rendering, anti-bot bypass, residential proxies and native PDF parsing
+  // server-side — exactly the pages tier 1 fails on. Env vars override it.
+  const pinnedProvider = String(process.env.MONID_SCRAPE_PROVIDER || 'context.dev').trim();
+  const pinnedEndpoint = String(process.env.MONID_SCRAPE_ENDPOINT || '/web/scrape/markdown').trim();
   if (pinnedProvider && pinnedEndpoint) {
     const detail = await monidInspect(pinnedProvider, pinnedEndpoint);
-    cachedEndpoint = { provider: pinnedProvider, endpoint: pinnedEndpoint, schema: detail?.input ?? detail?.inputSchema ?? null };
-    return cachedEndpoint;
+    if (detail) {
+      cachedEndpoint = { provider: pinnedProvider, endpoint: pinnedEndpoint, schema: detail.input ?? detail.inputSchema ?? null };
+      return cachedEndpoint;
+    }
+    // Pinned endpoint unavailable — fall through to discovery.
   }
 
   const candidates = await monidDiscover('website content scraper extract page text markdown');
