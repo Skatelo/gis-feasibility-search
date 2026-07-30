@@ -42,8 +42,27 @@ function json(statusCode, body) {
 /** Text short enough to be boilerplate/shell is treated as "not extracted". */
 const MIN_USEFUL_CHARS = 200;
 
+// A bot-challenge or error page is long enough to pass the length gate while
+// containing NO real content — verified live: Schneider's qPublic returns a
+// ~386-char "your query looks like an automated request" page. Storing that as
+// source text would feed the model garbage, so it is rejected and the URL falls
+// through to the next tier.
+const BLOCKED_PAGE_RE = /(we'?re sorry|automated request|computer virus|spyware|data mining software|captcha|are you human|unusual traffic|verify you are|access denied|request blocked|forbidden|just a moment|enable javascript|browser check|ddos protection|cloudflare)/i;
+
+export function looksBlocked(text) {
+  const value = String(text || '');
+  // Only judge SHORT pages: a long document that merely mentions "cloudflare"
+  // in passing is legitimate content, not a challenge page.
+  return value.trim().length < 1500 && BLOCKED_PAGE_RE.test(value);
+}
+
+export function isUsefulText(text) {
+  const value = String(text || '').trim();
+  return value.length >= MIN_USEFUL_CHARS && !looksBlocked(value);
+}
+
 export function hasUsableText(result) {
-  return String(result?.content || '').trim().length >= MIN_USEFUL_CHARS;
+  return isUsefulText(result?.content);
 }
 
 /** URLs that were requested but which tier 1 could not turn into usable text. */
@@ -113,7 +132,7 @@ export const handler = async (event) => {
       const recovered = new Set();
       for (const url of pending.slice(0, 4)) {
         const text = await monidScrapeUrl(url).catch(() => '');
-        if (String(text).trim().length >= MIN_USEFUL_CHARS) {
+        if (isUsefulText(text)) {
           data.results.push(toResult(url, text, 'monid'));
           recovered.add(url);
           tiers.monid += 1;
@@ -126,7 +145,7 @@ export const handler = async (event) => {
     if (pending.length && pixelReadConfigured(geminiKey)) {
       for (const url of pending.slice(0, 3)) {
         const text = await pixelReadUrl(url, { queries, geminiKey }).catch(() => '');
-        if (String(text).trim().length >= MIN_USEFUL_CHARS) {
+        if (isUsefulText(text)) {
           data.results.push(toResult(url, text, 'pixel-read'));
           tiers.pixel += 1;
         }

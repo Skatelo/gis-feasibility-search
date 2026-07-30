@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { hasUsableText, unresolvedUrls, toResult, inferKind } from '../crawlee.js';
+import { hasUsableText, unresolvedUrls, toResult, inferKind, looksBlocked, isUsefulText } from '../crawlee.js';
 import { buildUrlInput, textFromMonidOutput, monidConfigured } from './monid-client.js';
 import { pixelReadConfigured } from './pixel-read.js';
 
@@ -11,6 +11,32 @@ test('usable-text gate treats shells and boilerplate as not extracted', () => {
   assert.equal(hasUsableText({ content: '   ' }), false);
   assert.equal(hasUsableText({}), false);
   assert.equal(hasUsableText(null), false);
+});
+
+test('bot-challenge pages are rejected even though they pass the length gate', () => {
+  // VERBATIM from a live Monid run against Schneider's qPublic (386 chars):
+  // long enough to pass MIN_USEFUL_CHARS, but contains no real content.
+  const blockPage = "# We're sorry...\n\nSorry for the Inconvenience, but the query you are trying to make looks very "
+    + 'similar to an automated request made from a computer virus, spyware application or data mining software. '
+    + 'To continue to protect our users, we are unable to process this request at this time. Please try again later.';
+  assert.ok(blockPage.length > 200, 'fixture must be long enough to pass the length gate');
+  assert.equal(looksBlocked(blockPage), true);
+  assert.equal(isUsefulText(blockPage), false);
+  assert.equal(hasUsableText({ content: blockPage }), false);
+});
+
+test('block detection does not reject long documents that merely mention a keyword', () => {
+  const realDoc = `${'Zoning ordinance text. '.repeat(90)} The site is protected by Cloudflare.`;
+  assert.ok(realDoc.length > 1500);
+  assert.equal(looksBlocked(realDoc), false);
+  assert.equal(isUsefulText(realDoc), true);
+});
+
+test('common challenge and shell pages are caught', () => {
+  assert.equal(looksBlocked('Just a moment... enable JavaScript and cookies to continue'), true);
+  assert.equal(looksBlocked('Access denied. Request blocked.'), true);
+  assert.equal(looksBlocked('Please verify you are a human'), true);
+  assert.equal(looksBlocked('Owner: SMITH JOHN, Parcel 123-45, 2.5 acres'), false);
 });
 
 test('only URLs without usable text fall through to the later tiers', () => {
