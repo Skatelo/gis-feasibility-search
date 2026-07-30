@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import type { FormEvent, KeyboardEvent, FC } from 'react';
 import { createRoot } from 'react-dom/client';
-import { executeLandAnalysis, chatWithGemini, chatFollowUp, getUserKeys, getMapboxToken, getRealEstateApiKey, detectNcCounty, lookupParcelById, fetchConstructionCostEstimate, fetchLandClearingEstimate, fetchUtilitiesEstimate, fetchGoogleDistanceMatrixComps, fetchParcelsInBbox, getCompPrefs, getReportAutoGenerate, clearAddressSearchCache, beginPropertyResearchBudget, enformionConfigured, enformionContactEnrich, enformionPersonSearch, enformionBusinessSearch, looksLikeBusiness, enformionDiagMessage, getLastEnformionShape, getLastEnformionDetail, ncAddressSuggestions, buildBuyerPresentationPrompt, buyerPresentationImages } from '../services/feasibilityService';
+import { executeLandAnalysis, chatWithGemini, chatFollowUp, getUserKeys, getMapboxToken, getRealEstateApiKey, detectNcCounty, lookupParcelById, fetchConstructionCostEstimate, fetchLandClearingEstimate, fetchUtilitiesEstimate, fetchGoogleDistanceMatrixComps, fetchParcelsInBbox, getCompPrefs, getReportAutoGenerate, clearAddressSearchCache, beginPropertyResearchBudget, enformionConfigured, enformionContactEnrich, enformionPersonSearch, enformionBusinessSearch, looksLikeBusiness, enformionDiagMessage, getLastEnformionShape, getLastEnformionDetail, ncAddressSuggestions, buildBuyerPresentationPrompt, buyerPresentationImages, landPriceBandsByRadius } from '../services/feasibilityService';
 import type { ParcelIdLookupResult, SkipTraceContact } from '../services/feasibilityService';
 import type { ChatMessage, ChatAttachment } from '../services/feasibilityService';
 import { fetchRealEstatePropertyTransactions, fetchRealEstateOwnerDetails } from '../services/realEstateApiProperty';
@@ -3565,6 +3565,9 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
   );
 
   const allComps = data?.comps || [];
+  // Land-price bands (8%–15% of ARV) at 1/3/5/10 miles, derived from the loaded
+  // comp set by driving distance — recomputed on every render, no extra fetches.
+  const landPriceBands = landPriceBandsByRadius(data?.comps, compRadius);
   const compDateWindow = data?.compDateWindow || getRollingCompDateWindow();
   const compPhotoGoogleKey = getUserKeys().googleMaps || '';
   const compAllowedTypes = (data?.compAllowedTypes || []).filter((t) => COMP_TYPE_LABELS_MAP[t]);
@@ -5191,6 +5194,45 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                     </div>
                   ) : (
                   <>
+                  {/* Land price bands — what to pay for the dirt, at each radius.
+                      Derived from the loaded comps by driving distance, so no
+                      extra API calls; radii wider than the run are left blank. */}
+                  <div className="land-bands">
+                    <div className="land-bands-head">
+                      <span className="land-bands-title">Estimated land price — 8%–15% of ARV</span>
+                      <span className="land-bands-sub">ARV = median sold price of comps inside each radius</span>
+                    </div>
+                    <table className="land-bands-table">
+                      <thead>
+                        <tr>
+                          <th>Radius</th>
+                          <th>Comps</th>
+                          <th>ARV (median)</th>
+                          <th>Land price range (8%–15%)</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {landPriceBands.map((band) => (
+                          <tr key={band.radiusMiles} className={band.radiusMiles === compRadius ? 'land-band-active' : undefined}>
+                            <td>{band.radiusMiles} mi</td>
+                            <td>{band.covered ? band.compCount : '—'}</td>
+                            <td>{band.arv ? `$${band.arv.toLocaleString()}` : '—'}</td>
+                            <td>
+                              {band.lowPrice && band.highPrice
+                                ? <strong>${band.lowPrice.toLocaleString()} – ${band.highPrice.toLocaleString()}</strong>
+                                : band.covered
+                                  ? <span className="land-band-muted">No comps in this radius</span>
+                                  : <span className="land-band-muted">Run the {band.radiusMiles}-mile radius</span>}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                    <p className="land-bands-note">
+                      Builders typically pay 8%–15% of a finished home's value for the lot. Ranges use the median sold price of the comps actually inside each radius, so a wider ring can move the number. Subtract site costs (clearing, grading, well/septic, tap fees) before offering.
+                    </p>
+                  </div>
+
                   <div className="comps-list" style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
                     {(() => {
                       const prettyType = (t?: string) => {

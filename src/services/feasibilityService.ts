@@ -7587,6 +7587,71 @@ Use CURRENT LOCAL prices from credible sources; cite them; never invent a price 
 // Fallback per-tree rates (Southeast US, used only if the live lookup fails).
 /** Static-map zoom that frames a parcel of the given acreage roughly full-bleed. */
 // ---------------------------------------------------------------------------
+// LAND PRICE BANDS
+// The rule of thumb builders use: a finished lot is worth roughly 8%–15% of the
+// After Repair Value of the home that gets built on it. Applying that band to
+// the ARV implied by nearby SOLD comps gives a defensible "what to pay for the
+// land" range, and showing it at several radii reveals how sensitive that number
+// is to how far out you have to reach for comparables.
+// ---------------------------------------------------------------------------
+
+export const LAND_ARV_LOW_PCT = 0.08;
+export const LAND_ARV_HIGH_PCT = 0.15;
+
+export interface LandPriceBand {
+  radiusMiles: number;
+  compCount: number;
+  /** Median sold price of the comps inside this radius — the ARV proxy. */
+  arv: number | null;
+  medianPricePerSqft: number | null;
+  lowPrice: number | null;
+  highPrice: number | null;
+  /** False when the loaded comp set does not reach this far, so the row is
+   *  honestly blank instead of implying data we don't have. */
+  covered: boolean;
+}
+
+function medianOf(values: number[]): number | null {
+  const sorted = values.filter((v) => Number.isFinite(v) && v > 0).sort((a, b) => a - b);
+  if (!sorted.length) return null;
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 ? sorted[mid] : Math.round((sorted[mid - 1] + sorted[mid]) / 2);
+}
+
+/**
+ * Land-price bands for each radius, derived from the ALREADY-LOADED comps by
+ * filtering on driving distance — no extra API calls. A radius wider than the
+ * comp run is marked uncovered rather than reusing the narrower set, which would
+ * overstate what the data supports.
+ */
+export function landPriceBandsByRadius(
+  comps: CompProperty[] | undefined,
+  loadedRadiusMiles: number,
+  radii: number[] = [1, 3, 5, 10],
+): LandPriceBand[] {
+  const all = Array.isArray(comps) ? comps : [];
+  return radii.map((radiusMiles) => {
+    const covered = radiusMiles <= loadedRadiusMiles;
+    const within = covered
+      ? all.filter((comp) => Number.isFinite(comp.distanceMiles) && comp.distanceMiles <= radiusMiles)
+      : [];
+    const arv = medianOf(within.map((comp) => comp.price));
+    const medianPricePerSqft = medianOf(
+      within.map((comp) => (comp.pricePerSqft ?? (comp.sqft && comp.sqft > 0 ? comp.price / comp.sqft : 0))),
+    );
+    return {
+      radiusMiles,
+      compCount: within.length,
+      arv,
+      medianPricePerSqft,
+      lowPrice: arv ? Math.round(arv * LAND_ARV_LOW_PCT) : null,
+      highPrice: arv ? Math.round(arv * LAND_ARV_HIGH_PCT) : null,
+      covered,
+    };
+  });
+}
+
+// ---------------------------------------------------------------------------
 // BUYER PRESENTATION
 // A short, client-facing document built from the SAME verified data as the AI
 // Feasibility Report, but written to be handed to a buyer: property overview,
