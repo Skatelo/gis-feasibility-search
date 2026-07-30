@@ -7625,13 +7625,13 @@ export function buyerPresentationImages(reportData: SiteFeasibilityData): BuyerP
  */
 export function buildBuyerPresentationPrompt(
   reportData: SiteFeasibilityData,
-  askingPrice: number | null,
+  wholesalePrice: number | null,
   compsList: string,
 ): string {
   const acres = Number(reportData.gisAcres) > 0 ? Number(reportData.gisAcres).toFixed(2) : 'Unavailable';
-  const priceLine = askingPrice && askingPrice > 0
-    ? `The seller's ASKING PRICE is $${askingPrice.toLocaleString()}. State it plainly in Property Overview, and in the closing analysis say whether it is reasonable versus the land value the comps support — with the numbers behind that judgement.`
-    : 'No asking price was provided — omit price commentary entirely rather than guessing one.';
+  const priceLine = wholesalePrice && wholesalePrice > 0
+    ? `The WHOLESALE PRICE for this property is $${wholesalePrice.toLocaleString()}. Call it exactly "Wholesale Price" — never "asking price", "list price" or "seller's price". State it plainly in Property Overview, and in the closing analysis say whether it is a strong number versus the land value the comps support, with the arithmetic behind that judgement.`
+    : 'No wholesale price was provided — omit price commentary entirely rather than guessing one.';
 
   return `Produce a BUYER PRESENTATION for "${reportData.inputAddress}". This is a short, client-facing document a land buyer will read — NOT the internal feasibility report. Warm, plain, confident English. No jargon, no hedging filler, no conversational intro or outro.
 
@@ -7643,16 +7643,16 @@ Use EXACTLY these sections, in this order, as markdown headers:
 A single line with the full property address, then two or three sentences on why this lot is worth a look.
 
 ## 1. Property Overview
-A bullet list covering: Location (full address), Lot Size (acres), Parcel ID, Zoning district, Water setup, and Sewer/septic setup.${askingPrice && askingPrice > 0 ? ' Include an "Asking Price" bullet.' : ''}
+A bullet list covering: Location (full address), Lot Size (acres), Parcel ID, Zoning district, Water setup, and Sewer/septic setup.${wholesalePrice && wholesalePrice > 0 ? ' Include a "Wholesale Price" bullet.' : ''}
 
 ## 2. Zoning, Setbacks & Build Potential
 State the jurisdiction and zoning district, then explain in plain English: what may be built (permitted residential forms), the setbacks (front / side / rear) with the numbers, and any lot considerations that shape the build envelope — for example a septic requirement meaning the footprint depends on the soil evaluation (perc test).
 
 ## 3. Market Analysis: Recently Sold New Construction Comps
-A markdown TABLE of the verified sold comps below with these columns: Address, Square Feet, Date Sold, Close Price, Price / SqFt, Type. Use ONLY the comps provided and ONLY the fields given for each — never invent a sale, a bedroom/bathroom count, or a lot size. Write "N/A" where a field is not supplied. Follow the table with "Market Averages from Above Sales:" and bullets for Average Close Price, Average Home Size, and Average Price Per SqFt, computed from the rows you listed.
+A markdown TABLE of the verified sold comps below with these columns: Address, Square Feet, Date Sold, Close Price, Price / SqFt, Driving Miles, Type. Put the driving distance in the "Driving Miles" column exactly as supplied (for example "1.84 mi") so the buyer can see how close each sale is to the subject property. Use ONLY the comps provided and ONLY the fields given for each — never invent a sale, a bedroom/bathroom count, or a lot size. Write "N/A" where a field is not supplied. Follow the table with "Market Averages from Above Sales:" and bullets for Average Close Price, Average Home Size, and Average Price Per SqFt, computed from the rows you listed.
 
 ## 4. What This Means for You
-Three to five sentences: what a buyer can realistically build here, the value the comps support, and the main thing to verify.${askingPrice && askingPrice > 0 ? ' Include your read on the asking price versus that supported value.' : ''}
+Three to five sentences: what a buyer can realistically build here, the value the comps support, and the main thing to verify.${wholesalePrice && wholesalePrice > 0 ? ' Include your read on the wholesale price versus that supported value.' : ''}
 
 ## 5. Clear Next Steps
 A numbered list of four practical actions (for example: review the comps, order a perc test/soil evaluation, bring a builder to match a plan to the site, make an offer).
