@@ -43,8 +43,15 @@ const ZONING_RESPONSE_SCHEMA = {
   type: 'object',
   additionalProperties: false,
   properties: {
-    zoningCode: { type: 'string' },
-    zoningDescription: { type: 'string' },
+    zoningCode: {
+      type: 'string',
+      description:
+        'The adopted district CODE ONLY, exactly as the jurisdiction publishes it — "RA", "R-1", "RS-8", "DX-40-SH". Never the district name and never both: write "RA", not "Residential Agricultural" and not "RA - Residential Agricultural". The full name belongs in zoningDescription.',
+    },
+    zoningDescription: {
+      type: 'string',
+      description: 'The district NAME as published, e.g. "Residential Agricultural". Do not repeat the code here.',
+    },
     jurisdiction: { type: 'string' },
     matchMethod: {
       type: 'string',
@@ -144,6 +151,8 @@ The permittedUses array drives sold-comparable searches. Read the official use t
 First, write a comprehensive, detailed zoning and development report for the property in clear markdown format. Lead with the EXACT adopted zoning CODE (e.g. R-1, RS-8, MF-2) as published by the jurisdiction's official GIS/ordinance — the specific code, not a generic label. Then explain that district, its setbacks (front, rear, side), height limits, building coverage limits, accessory dwelling unit (ADU) rules, and allowed uses. Include clear headings and bold key figures.
 
 Then, at the very end of your response, output a single JSON block wrapped in \`\`\`json and \`\`\` containing the structured fields matching the following schema. Use an empty string, empty array, or omit an optional standards field when grounded sources do not publish it. Set matchMethod to "unresolved" if the district cannot be confirmed.
+
+zoningCode must be the district CODE ALONE — "RA", "R-1", "RS-8" — never the district name and never the two combined. Put the district name in zoningDescription instead. If the jurisdiction publishes only a named district with no code, leave zoningCode empty rather than inventing an abbreviation.
 
 JSON SCHEMA:
 ${JSON.stringify(ZONING_RESPONSE_SCHEMA, null, 2)}

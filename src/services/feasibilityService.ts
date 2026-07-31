@@ -5,7 +5,7 @@ import { fetchOfficialScParcel, mergeOfficialScParcelRecords, officialRecordFrom
 import { scCountySource } from '../data/scCountySources';
 import { normalizeSourcedRange } from '../data/sourcedEstimate';
 import { listingZoningEvidenceTier, zoningListingProvider } from '../data/zoningEvidence';
-import { cleanCode } from './zoning/normalization/zoning-normalizer';
+import { cleanCode, splitZoningLabel } from './zoning/normalization/zoning-normalizer';
 import { fetchGeminiZoningSearchEvidence, normalizeFullAddressForZoning, type OfficialZoningEvidenceHint } from './geminiZoningSearch';
 import { isFullCarolinaPostalAddress, resolveFullCarolinaPostalAddress } from './carolinaAddress';
 import { CensusGeocoder } from './zoning/geocoding/census-geocoder';
@@ -5447,10 +5447,20 @@ function parseZoningResult(text: string, evidenceUrls: string[] = [], countyName
     const code = obj?.zoningCode;
     if (!code || typeof code !== 'string') return fallbackResult();
     const c = /^unzoned$/i.test(code.trim()) ? 'NO ADOPTED DISTRICT' : code.trim();
+
+    // The model sometimes answers with the district NAME ("Residential
+    // Agricultural") or with name and code combined ("RA - Residential
+    // Agricultural"). The card shows Zoning Code and Zoning Description in
+    // separate rows, so the code slot must hold the code alone.
+    const labelled = splitZoningLabel(c);
+    const codeOut = labelled.code ?? c;
+    const modelDesc = typeof obj.zoningDescription === 'string' ? obj.zoningDescription.trim() : '';
+    const descOut = modelDesc || labelled.description || '';
+
     if (!c || /^(null|n\/?a|unknown|see\s*map|varies|tbd)$/i.test(c)) {
       return {
         code: 'UNRESOLVED',
-        description: (typeof obj.zoningDescription === 'string' && obj.zoningDescription.trim()) || 'Zoning details resolved by AI research',
+        description: descOut || 'Zoning details resolved by AI research',
         sourceUrl: evidenceUrls[0] || '',
         sources: evidenceUrls,
         matchMethod: 'unresolved',
@@ -5463,8 +5473,8 @@ function parseZoningResult(text: string, evidenceUrls: string[] = [], countyName
     const listingMethods: ZoningMatchMethod[] = ['corroborated-listings', 'listing-address-result'];
     if (![...officialMethods, ...listingMethods].includes(method)) {
       return {
-        code: c,
-        description: (typeof obj.zoningDescription === 'string' && obj.zoningDescription.trim()) || 'Zoning (web lookup)',
+        code: codeOut,
+        description: descOut || 'Zoning (web lookup)',
         sourceUrl: evidenceUrls[0] || '',
         sources: evidenceUrls,
         matchMethod: 'unresolved',
@@ -5530,8 +5540,8 @@ function parseZoningResult(text: string, evidenceUrls: string[] = [], countyName
       };
     }
     return {
-      code: c,
-      description: (typeof obj.zoningDescription === 'string' && obj.zoningDescription.trim()) || 'Zoning (web lookup)',
+      code: codeOut,
+      description: descOut || 'Zoning (web lookup)',
       sourceUrl: parcelSource,
       sources,
       jurisdiction: typeof obj.jurisdiction === 'string' && obj.jurisdiction.trim() ? obj.jurisdiction.trim().slice(0, 160) : undefined,

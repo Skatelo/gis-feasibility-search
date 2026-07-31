@@ -16,7 +16,13 @@ import type { ChatConversation } from '../services/chatStore';
 import { getSearchHistory, addSearchHistory } from '../services/searchHistoryStore';
 import { ReportsDrawer } from './ReportsDrawer';
 import type { SiteFeasibilityData, CompProperty, ConstructionCostEstimate, CostLineItem, MaterialTakeoff, LandClearingEstimate, UtilitiesEstimate } from '../types/feasibility';
-import { cleanCode } from '../services/zoning/normalization/zoning-normalizer';
+import { cleanCode, extractZoningCode } from '../services/zoning/normalization/zoning-normalizer';
+
+/** The badge shows the CODE only. The pipeline already splits code from district
+ *  name, but reports saved before that landed can still carry a combined label,
+ *  so strip it here too. Falls back to the stored value when it carries no code
+ *  — a district name beats an empty badge, and we never invent a code. */
+const zoningBadgeCode = (value: unknown): string | null => extractZoningCode(value) ?? cleanCode(value);
 import { compCoverageTypesForAllowedTypes, getRollingCompDateWindow } from '../services/comps/comp-types';
 
 /** Group cost line items by category, preserving first-seen order. (Avoids the
@@ -4963,10 +4969,10 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                                         : 'NOT VERIFIED'}
                       </span>
                     </span>
-                    {cleanCode(data.zoningCode) ? (
+                    {zoningBadgeCode(data.zoningCode) ? (
                       <span
                         className={`zoning-badge ${data.zoningSource === 'county-gis' ? 'active-zone' : 'fallback-zone'}`}
-                        style={String(data.zoningCode).length > 14 ? {
+                        style={String(zoningBadgeCode(data.zoningCode)).length > 14 ? {
                           maxWidth: '15rem',
                           fontSize: '0.85rem',
                           lineHeight: 1.25,
@@ -4975,7 +4981,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                           textAlign: 'right',
                         } : undefined}
                       >
-                        {cleanCode(data.zoningCode)}
+                        {zoningBadgeCode(data.zoningCode)}
                       </span>
                     ) : data.zoningVerificationStatus === 'resolving' ? (
                       <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', fontSize: '0.78rem', color: 'var(--text-muted)' }}>
