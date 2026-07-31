@@ -17,14 +17,17 @@ type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Respo
 
 // Zoning search model. Keep this list-shaped contract because the lookup loop
 // handles retries consistently even when only one production model is enabled.
-// Zoning search models in priority order. gemini-3-flash-preview is the PRIMARY
-// because it is the configuration verified to return exact district codes for
-// these addresses; gemini-3.6-flash is kept as the fallback. Running 3.6 as the
-// ONLY model previously caused zoning to stop returning a district — with no
-// second model, any failure or unusable answer left the lookup with nothing.
-// Keep at least two entries here so a single bad response can never blank the
-// zoning card.
-export const GEMINI_ZONING_MODELS = ['gemini-3-flash-preview', 'gemini-3.6-flash'] as const;
+// Zoning runs on gemini-3.6-flash. VERIFIED live against the grounded
+// Interactions endpoint: it returns the exact district with citations
+// (3927 Dr Kerr Rd → RA, 20 citations; 12901 Lanecrest Rd → SFR, 15 citations),
+// matching the previous model and answering faster.
+//
+// An earlier single-model setup DID blank the zoning card, but the cause was the
+// request loop giving up unless the model answered HTTP 404 — any other failure
+// or unusable answer ended the lookup with nothing. That loop now retries
+// transient failures and only surfaces an error after they are exhausted, so one
+// model is safe here.
+export const GEMINI_ZONING_MODELS = ['gemini-3.6-flash'] as const;
 export const GEMINI_ZONING_MODEL = GEMINI_ZONING_MODELS[0];
 
 // Zoning district identification needs the model's full agentic search depth.
