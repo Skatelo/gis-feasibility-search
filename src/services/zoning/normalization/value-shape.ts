@@ -34,6 +34,82 @@ export function isDescriptionShaped(value: string): boolean {
   return /\s/.test(s) && s.length > 4;
 }
 
+/** A BARE published zoning code — "RA", "R-1", "RS-8", "DX-40-SH", "MF-2".
+ *  Deliberately stricter than isCodeShaped: segments must be UPPERCASE/digits,
+ *  which is what separates a real code from a district NAME. "Rural" and
+ *  "Residential" are code-SHAPED (one token, has a letter) but are names, not
+ *  codes, and must never be shown in the code slot. */
+export function isBareZoningCode(value: string): boolean {
+  const s = value.trim();
+  if (!s || BOOLEANISH_RE.test(s)) return false;
+  if (!/[A-Z]/.test(s)) return false;
+  return /^[A-Z0-9]{1,6}(?:[-/.][A-Z0-9]{1,6}){0,3}$/.test(s);
+}
+
+/** A code token safe to pull out of a LONGER label. "R-1"/"RS-8"/"DX-40" carry a
+ *  digit or hyphen; "RA"/"UC"/"PUD" are too short to be a word worth keeping.
+ *  "UPTOWN" and "MIXED" are neither, so they stay part of the district name. */
+function isUnambiguousCodeToken(value: string): boolean {
+  const s = value.trim();
+  if (!isBareZoningCode(s)) return false;
+  return /[\d\-/.]/.test(s) || s.length <= 3;
+}
+
+/**
+ * Split a zoning label into its CODE and the district NAME that often travels
+ * with it. The UI has separate rows for the two, so the code slot must hold the
+ * code alone — "RA", never "Residential Agricultural" and never
+ * "RA - Residential Agricultural".
+ *
+ * Handles the shapes sources actually publish:
+ *   "RA"                              → RA / null
+ *   "RA - Residential Agricultural"   → RA / Residential Agricultural
+ *   "Residential Agricultural (RA)"   → RA / Residential Agricultural
+ *   "R-1 Single Family Residential"   → R-1 / Single Family Residential
+ *   "PUD Planned Unit Development"    → PUD / Planned Unit Development
+ *
+ * When the value carries NO code ("Rural Agricultural"), code is null and the
+ * caller keeps what it had — a name is still better than blanking the field,
+ * and inventing a code is never acceptable.
+ */
+export function splitZoningLabel(value: unknown): { code: string | null; description: string | null } {
+  const none = { code: null, description: null };
+  const cleaned = cleanCode(cleanText(value));
+  if (!cleaned) return none;
+
+  const rest = (removed: string) =>
+    cleanText(cleaned.replace(removed, ' ').replace(/[()]/g, ' ').replace(/^[\s\-–—:|,/]+|[\s\-–—:|,/]+$/g, '')) || null;
+
+  // Already just a code.
+  if (isBareZoningCode(cleaned)) return { code: cleaned, description: null };
+
+  // Parenthesised code: "Residential Agricultural (RA)". Last group wins.
+  const parens = [...cleaned.matchAll(/\(([^)]*)\)/g)].map((m) => m[1].trim()).reverse();
+  for (const p of parens) {
+    if (isBareZoningCode(p)) return { code: p, description: rest(`(${p})`) };
+  }
+
+  // Delimited: "RA - Residential Agricultural", "RA: ...", "RA, ...".
+  // Requires whitespace around a dash so "R-1 Single Family" stays intact.
+  const head = cleaned.split(/\s+[-–—|]\s+|\s*[:;]\s+|,\s+/)[0]?.trim() ?? '';
+  if (head && head !== cleaned && isBareZoningCode(head)) return { code: head, description: rest(head) };
+
+  // Leading code token: "R-1 Single Family Residential", "PUD Planned Unit
+  // Development". Only an UNAMBIGUOUS token qualifies — pulling any all-caps
+  // word would turn the name "UPTOWN MIXED USE" into the code "UPTOWN".
+  const words = cleaned.split(/\s+/);
+  if (words.length > 1 && isUnambiguousCodeToken(words[0])) {
+    return { code: words[0], description: rest(words[0]) };
+  }
+
+  return none;
+}
+
+/** The code alone, or null when the value carries no published code. */
+export function extractZoningCode(value: unknown): string | null {
+  return splitZoningLabel(value).code;
+}
+
 export function codeScore(code: string): number {
   return (/-/.test(code) ? 1 : 0) + (/\d/.test(code) ? 1 : 0) + (code === code.toUpperCase() ? 1 : 0) - (/[-_/]$/.test(code) ? 2 : 0);
 }

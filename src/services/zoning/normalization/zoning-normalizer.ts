@@ -11,10 +11,11 @@ import {
   isDescriptionShaped,
   scanForCode,
   scanForDescription,
+  splitZoningLabel,
   codeScore,
 } from './value-shape';
 
-export { cleanCode } from './value-shape';
+export { cleanCode, splitZoningLabel, extractZoningCode, isBareZoningCode } from './value-shape';
 
 export interface NormalizedZoning {
   found: boolean;
@@ -51,19 +52,31 @@ export function normalizeZoningAttributes(
   // back to value-shape scanning to recover the real code. Never fabricated.
   const mappedCode = codeField ? cleanCode(attrs[codeField]) : null;
   const scannedCode = scanForCode(attrs, undefined);
-  const code = mappedCode && isCodeShaped(mappedCode)
+  const rawCode = mappedCode && isCodeShaped(mappedCode)
     ? scannedCode && scannedCode !== mappedCode && codeScore(scannedCode) > codeScore(mappedCode)
       ? scannedCode
       : mappedCode
     : scannedCode ?? mappedCode;
 
+  // The code slot must hold the CODE, never the district name. Sources routinely
+  // publish "RA - Residential Agricultural" or "Residential Agricultural (RA)"
+  // in the code column; split those so the name moves to the description.
+  const split = splitZoningLabel(rawCode);
+  const code = split.code ?? rawCode;
+
   // Description: the mapped field when it reads like prose, otherwise the best
   // description-shaped zoning value that isn't the code.
   const mappedDesc = descField ? cleanText(attrs[descField]) : null;
-  const description =
+  const rawDescription =
     mappedDesc && isDescriptionShaped(mappedDesc) && mappedDesc !== code
       ? mappedDesc
-      : scanForDescription(attrs, code) ?? (mappedDesc !== code ? mappedDesc : null);
+      // When the code column held a combined label, the name we split out of it
+      // beats a scan — the scan would just hand back the same combined string.
+      : split.description ?? scanForDescription(attrs, code) ?? (mappedDesc !== code ? mappedDesc : null);
+
+  // A description column often repeats the code ("RA - Residential
+  // Agricultural"); keep the name alone so the two rows don't duplicate it.
+  const description = rawDescription ? splitZoningLabel(rawDescription).description ?? rawDescription : null;
 
   return { code, description };
 }

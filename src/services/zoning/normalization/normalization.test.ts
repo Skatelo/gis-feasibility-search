@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { normalizeZoning, cleanCode } from './zoning-normalizer';
+import { normalizeZoning, cleanCode, splitZoningLabel, extractZoningCode, normalizeZoningAttributes } from './zoning-normalizer';
 import type { InspectedLayer, RawZoningMatch } from '../types';
 
 function layer(id: number, over: Partial<InspectedLayer> = {}): InspectedLayer {
@@ -40,6 +40,47 @@ test('cleanCode rejects placeholders and blanks', () => {
   assert.equal(cleanCode('Unavailable'), null);
   assert.equal(cleanCode(''), null);
   assert.equal(cleanCode(null), null);
+});
+
+test('splitZoningLabel returns the CODE, never the district name', () => {
+  // Already bare.
+  assert.deepEqual(splitZoningLabel('RA'), { code: 'RA', description: null });
+  assert.deepEqual(splitZoningLabel('R-1'), { code: 'R-1', description: null });
+  assert.deepEqual(splitZoningLabel('DX-40-SH'), { code: 'DX-40-SH', description: null });
+
+  // Combined shapes county GIS and the model actually publish.
+  assert.deepEqual(splitZoningLabel('RA - Residential Agricultural'), { code: 'RA', description: 'Residential Agricultural' });
+  assert.deepEqual(splitZoningLabel('RA: Residential Agricultural'), { code: 'RA', description: 'Residential Agricultural' });
+  assert.deepEqual(splitZoningLabel('Residential Agricultural (RA)'), { code: 'RA', description: 'Residential Agricultural' });
+  assert.deepEqual(splitZoningLabel('R-1 Single Family Residential'), { code: 'R-1', description: 'Single Family Residential' });
+  assert.deepEqual(splitZoningLabel('PUD Planned Unit Development'), { code: 'PUD', description: 'Planned Unit Development' });
+
+  // A name with no code stays null — the caller keeps the name rather than
+  // showing a word chopped out of the middle of it.
+  assert.equal(extractZoningCode('Rural Agricultural'), null);
+  assert.equal(extractZoningCode('Residential'), null);
+  assert.equal(extractZoningCode('Single Family Residential'), null);
+
+  // All-caps district NAMES must survive intact — no word may be mistaken for
+  // a code just because it is short and capitalised.
+  assert.equal(extractZoningCode('UPTOWN MIXED USE'), null);
+  assert.equal(extractZoningCode('NEIGHBORHOOD 1'), null);
+  assert.equal(extractZoningCode('MIXED USE DISTRICT'), null);
+
+  // Placeholders never become a code.
+  assert.equal(extractZoningCode('NO ADOPTED DISTRICT'), null);
+  assert.equal(extractZoningCode('N/A'), null);
+  assert.equal(extractZoningCode(''), null);
+  assert.equal(extractZoningCode(null), null);
+});
+
+test('a code column holding the district name still yields the code', () => {
+  const out = normalizeZoningAttributes(
+    { ZONING: 'RA - Residential Agricultural', ZONE_DESC: '' },
+    { zoningCodeField: 'ZONING', zoningDescriptionField: 'ZONE_DESC', jurisdictionField: null, overlayField: null, detectionConfidence: 0.9, reasons: [] },
+  );
+  assert.equal(out.code, 'RA', 'code slot holds the code alone');
+  assert.equal(out.description, 'Residential Agricultural', 'the name moves to the description');
 });
 
 test('normalizeZoning picks the primary district and reads the mapped fields', () => {
