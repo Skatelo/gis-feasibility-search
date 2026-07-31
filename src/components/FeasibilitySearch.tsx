@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import type { FormEvent, KeyboardEvent, FC } from 'react';
 import { createRoot } from 'react-dom/client';
-import { executeLandAnalysis, chatWithGemini, chatFollowUp, getUserKeys, getMapboxToken, getRealEstateApiKey, detectNcCounty, lookupParcelById, fetchConstructionCostEstimate, fetchLandClearingEstimate, fetchUtilitiesEstimate, fetchGoogleDistanceMatrixComps, fetchParcelsInBbox, getCompPrefs, getReportAutoGenerate, clearAddressSearchCache, beginPropertyResearchBudget, enformionConfigured, enformionContactEnrich, enformionPersonSearch, enformionBusinessSearch, looksLikeBusiness, enformionDiagMessage, getLastEnformionShape, getLastEnformionDetail, ncAddressSuggestions, buildBuyerPresentationPrompt, buyerPresentationImages, landPriceBandsByRadius } from '../services/feasibilityService';
+import { executeLandAnalysis, chatWithGemini, chatFollowUp, getUserKeys, getMapboxToken, getRealEstateApiKey, detectNcCounty, lookupParcelById, fetchConstructionCostEstimate, fetchLandClearingEstimate, fetchUtilitiesEstimate, fetchGoogleDistanceMatrixComps, fetchParcelsInBbox, getCompPrefs, getReportAutoGenerate, clearAddressSearchCache, beginPropertyResearchBudget, enformionConfigured, enformionContactEnrich, enformionPersonSearch, enformionBusinessSearch, looksLikeBusiness, enformionDiagMessage, getLastEnformionShape, getLastEnformionDetail, ncAddressSuggestions, buildBuyerPresentationPrompt, buyerPresentationImages, landPriceBandsByRadius, subdivisionYield } from '../services/feasibilityService';
 import type { ParcelIdLookupResult, SkipTraceContact } from '../services/feasibilityService';
 import type { ChatMessage, ChatAttachment } from '../services/feasibilityService';
 import { fetchRealEstatePropertyTransactions, fetchRealEstateOwnerDetails } from '../services/realEstateApiProperty';
@@ -3779,9 +3779,14 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
   );
 
   const allComps = data?.comps || [];
+  // Can this tract be split? Null when the zoning minimum lot size is unknown or
+  // the acreage only supports one lot — either way the ordinary whole-parcel
+  // band is shown instead, never both tables.
+  const lotYield = subdivisionYield(data?.gisAcres, data?.zoningMinimumLotAreaSqft);
   // Land-price bands (8%–15% of ARV) at 1/3/5/10 miles, derived from the loaded
   // comp set by driving distance — recomputed on every render, no extra fetches.
-  const landPriceBands = landPriceBandsByRadius(data?.comps, compRadius);
+  // The band is per lot; with a yield it also carries whole-parcel totals.
+  const landPriceBands = landPriceBandsByRadius(data?.comps, compRadius, undefined, lotYield);
   const compDateWindow = data?.compDateWindow || getRollingCompDateWindow();
   const compPhotoGoogleKey = getUserKeys().googleMaps || '';
   const compAllowedTypes = (data?.compAllowedTypes || []).filter((t) => COMP_TYPE_LABELS_MAP[t]);
@@ -5413,16 +5418,26 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                       extra API calls; radii wider than the run are left blank. */}
                   <div className="land-bands">
                     <div className="land-bands-head">
-                      <span className="land-bands-title">Estimated land price — 8%–15% of comp average</span>
-                      <span className="land-bands-sub">Average sold price of the comps inside each radius</span>
+                      <span className="land-bands-title">
+                        {lotYield
+                          ? `Subdivision estimated land price — 8%–15% per lot`
+                          : 'Estimated land price — 8%–15% of comp average'}
+                      </span>
+                      <span className="land-bands-sub">
+                        {lotYield
+                          ? `~${lotYield.lots} buildable lots · ${lotYield.minimumLotAreaSqft.toLocaleString()} SF minimum on ${lotYield.acres.toFixed(2)} acres`
+                          : 'Average sold price of the comps inside each radius'}
+                      </span>
                     </div>
-                    <table className="land-bands-table">
+                    <div className={lotYield ? 'land-bands-scroll' : undefined}>
+                    <table className={`land-bands-table${lotYield ? ' land-bands-subdivision' : ''}`}>
                       <thead>
                         <tr>
                           <th>Radius</th>
                           <th>Comps</th>
                           <th>Avg sold price</th>
-                          <th>Land price range (8%–15%)</th>
+                          <th>{lotYield ? 'Price per lot (8%–15%)' : 'Land price range (8%–15%)'}</th>
+                          {lotYield && <th>Total — {lotYield.lots} lots</th>}
                         </tr>
                       </thead>
                       <tbody>
@@ -5438,12 +5453,28 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                                   ? <span className="land-band-muted">No comps in this radius</span>
                                   : <span className="land-band-muted">Run the {band.radiusMiles}-mile radius</span>}
                             </td>
+                            {lotYield && (
+                              <td>
+                                {band.totalLowPrice && band.totalHighPrice
+                                  ? <strong>${band.totalLowPrice.toLocaleString()} – ${band.totalHighPrice.toLocaleString()}</strong>
+                                  : <span className="land-band-muted">—</span>}
+                              </td>
+                            )}
                           </tr>
                         ))}
                       </tbody>
                     </table>
+                    </div>
                     <p className="land-bands-note">
-                      Builders typically pay 8%–15% of a finished home's value for the lot. Ranges use the average sold price of the comps actually inside each radius, so a wider ring can move the number. Subtract site costs (clearing, grading, well/septic, tap fees) before offering.
+                      {lotYield ? (
+                        <>
+                          Builders typically pay 8%–15% of a finished home's value per lot, so a splittable tract is worth that band times its lot count. The ~{lotYield.lots} lots here are {lotYield.grossLots} by raw acreage ÷ minimum lot size, discounted {Math.round((1 - lotYield.efficiency) * 100)}% for road, stormwater and open space — a screening estimate, not an engineered yield. Confirm frontage, utilities and the subdivision process (§7 of the report), and subtract site and infrastructure costs before offering.
+                        </>
+                      ) : (
+                        <>
+                          Builders typically pay 8%–15% of a finished home's value for the lot. Ranges use the average sold price of the comps actually inside each radius, so a wider ring can move the number. Subtract site costs (clearing, grading, well/septic, tap fees) before offering.
+                        </>
+                      )}
                     </p>
                   </div>
 

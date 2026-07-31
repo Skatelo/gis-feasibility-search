@@ -7604,72 +7604,18 @@ Use CURRENT LOCAL prices from credible sources; cite them; never invent a price 
 // Fallback per-tree rates (Southeast US, used only if the live lookup fails).
 /** Static-map zoom that frames a parcel of the given acreage roughly full-bleed. */
 // ---------------------------------------------------------------------------
-// LAND PRICE BANDS
-// The rule of thumb builders use: a finished lot is worth roughly 8%–15% of the
-// value of the home that gets built on it. Applying that band to the AVERAGE
-// sold price of nearby comps gives a defensible "what to pay for the land"
-// range, and showing it at several radii reveals how sensitive that number is to
-// how far out you have to reach for comparables.
+// LAND PRICE BANDS + SUBDIVISION LOT YIELD
+// The arithmetic lives in ./comps/land-bands so it can be unit-tested without
+// dragging in this module's network and config dependencies. Re-exported here
+// because callers have long imported it from feasibilityService.
 // ---------------------------------------------------------------------------
-
-export const LAND_ARV_LOW_PCT = 0.08;
-export const LAND_ARV_HIGH_PCT = 0.15;
-
-export interface LandPriceBand {
-  radiusMiles: number;
-  compCount: number;
-  /** AVERAGE sold price of the comps inside this radius — the value the 8%–15%
-   *  band is applied to. */
-  averagePrice: number | null;
-  averagePricePerSqft: number | null;
-  lowPrice: number | null;
-  highPrice: number | null;
-  /** False when the loaded comp set does not reach this far, so the row is
-   *  honestly blank instead of implying data we don't have. */
-  covered: boolean;
-}
-
-function averageOf(values: number[]): number | null {
-  const usable = values.filter((v) => Number.isFinite(v) && v > 0);
-  if (!usable.length) return null;
-  return Math.round(usable.reduce((sum, v) => sum + v, 0) / usable.length);
-}
-
-/**
- * Land-price bands for each radius, derived from the ALREADY-LOADED comps by
- * filtering on driving distance — no extra API calls. A radius wider than the
- * comp run is marked uncovered rather than reusing the narrower set, which would
- * overstate what the data supports.
- *
- * Uses the AVERAGE sold price so the figure matches the "Average Close Price"
- * buyers see on the comp summary and in the buyer presentation.
- */
-export function landPriceBandsByRadius(
-  comps: CompProperty[] | undefined,
-  loadedRadiusMiles: number,
-  radii: number[] = [1, 3, 5, 10],
-): LandPriceBand[] {
-  const all = Array.isArray(comps) ? comps : [];
-  return radii.map((radiusMiles) => {
-    const covered = radiusMiles <= loadedRadiusMiles;
-    const within = covered
-      ? all.filter((comp) => Number.isFinite(comp.distanceMiles) && comp.distanceMiles <= radiusMiles)
-      : [];
-    const averagePrice = averageOf(within.map((comp) => comp.price));
-    const averagePricePerSqft = averageOf(
-      within.map((comp) => (comp.pricePerSqft ?? (comp.sqft && comp.sqft > 0 ? comp.price / comp.sqft : 0))),
-    );
-    return {
-      radiusMiles,
-      compCount: within.length,
-      averagePrice,
-      averagePricePerSqft,
-      lowPrice: averagePrice ? Math.round(averagePrice * LAND_ARV_LOW_PCT) : null,
-      highPrice: averagePrice ? Math.round(averagePrice * LAND_ARV_HIGH_PCT) : null,
-      covered,
-    };
-  });
-}
+export {
+  LAND_ARV_LOW_PCT,
+  LAND_ARV_HIGH_PCT,
+  subdivisionYield,
+  landPriceBandsByRadius,
+} from './comps/land-bands';
+export type { LandPriceBand, SubdivisionYield } from './comps/land-bands';
 
 // ---------------------------------------------------------------------------
 // BUYER PRESENTATION
