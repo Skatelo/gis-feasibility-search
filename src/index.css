@@ -3811,6 +3811,10 @@ img, svg, video, canvas, table, pre { max-width: 100%; }
 .land-bands-table tr.land-band-active td { background: var(--bg-card-hover, #f1f5f9); }
 .land-band-muted { color: var(--text-muted); font-size: 0.74rem; }
 .land-bands-note { margin: 0.55rem 0 0; font-size: 0.7rem; color: var(--text-muted); line-height: 1.45; }
+/* The subdivision variant carries a fifth column (whole-parcel total). Let it
+   scroll sideways on narrow screens instead of crushing the price ranges. */
+.land-bands-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+.land-bands-table.land-bands-subdivision { min-width: 32rem; }
 
 @media (max-width: 640px) {
   .land-bands-table { font-size: 0.72rem; }
