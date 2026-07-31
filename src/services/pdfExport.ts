@@ -75,7 +75,19 @@ const SHEET_CSS = `
   .pdf-sheet .pdf-imgs figcaption { font-size: 10px; color: #64748b; margin-top: 3px; }
   .pdf-sheet .pdf-foot { margin-top: 26px; padding-top: 12px; border-top: 1px solid #e2e8f0;
     font-size: 10px; color: #94a3b8; }
+  .pdf-sheet .pdf-attach { margin: 0 0 16px; }
+  .pdf-sheet .pdf-attach img { width: 100%; height: auto; display: block; margin-bottom: 6px;
+    border: 1px solid #e2e8f0; border-radius: 4px; }
+  .pdf-sheet .pdf-attach figcaption { font-size: 10px; color: #64748b; }
 `;
+
+export interface PdfExportAttachment {
+  name: string;
+  caption: string;
+  kind: 'image' | 'pdf';
+  /** One entry for an image; one per page for a rasterised PDF. */
+  pages: string[];
+}
 
 export interface PdfExportOptions {
   title: string;
@@ -83,6 +95,8 @@ export interface PdfExportOptions {
   /** Rendered report body (already-parsed DOM node). */
   bodyNode: Node;
   imageUrls?: { url: string; caption: string }[];
+  /** User-added images and PDF pages, appended after the report body. */
+  attachments?: PdfExportAttachment[];
   priceLabel?: string;
   footer?: string;
   fileName: string;
@@ -146,6 +160,30 @@ export async function downloadReportPdf(options: PdfExportOptions): Promise<void
   const body = document.createElement('div');
   body.appendChild(options.bodyNode);
   sheet.appendChild(body);
+
+  // Attachments follow the report. They are already data URLs (PDF pages were
+  // rasterised on upload), so no extra fetching is needed and the capture cannot
+  // be tainted by them.
+  if (options.attachments?.length) {
+    const heading = document.createElement('h2');
+    heading.textContent = 'Attachments';
+    sheet.appendChild(heading);
+    for (const attachment of options.attachments) {
+      const figure = document.createElement('figure');
+      figure.className = 'pdf-attach';
+      for (const page of attachment.pages) {
+        const img = document.createElement('img');
+        img.src = page;
+        figure.appendChild(img);
+      }
+      const caption = document.createElement('figcaption');
+      caption.textContent = attachment.kind === 'pdf' && attachment.pages.length > 1
+        ? `${attachment.caption} (${attachment.pages.length} pages)`
+        : attachment.caption;
+      figure.appendChild(caption);
+      sheet.appendChild(figure);
+    }
+  }
 
   if (options.footer) {
     const foot = document.createElement('div');

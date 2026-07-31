@@ -9,6 +9,8 @@ import type { RealEstatePropertyTransactions, RealEstateOwnerDetails } from '../
 import { resolveFullCarolinaPostalAddress } from '../services/carolinaAddress';
 import { saveReport, getReportEtaMs, recordReportDuration } from '../services/reportStore';
 import { downloadReportPdf, pdfFileName } from '../services/pdfExport';
+import { fileToReportAttachment, attachmentsAppendix } from '../services/reportAttachments';
+import type { ReportAttachment } from '../services/reportAttachments';
 import { listConversations, saveConversation, deleteConversation as deleteConvo, newConversationId, deriveTitle } from '../services/chatStore';
 import type { ChatConversation } from '../services/chatStore';
 import { getSearchHistory, addSearchHistory } from '../services/searchHistoryStore';
@@ -163,6 +165,9 @@ import {
   Bookmark,
   Download,
   Save,
+  Pencil,
+  // `Image` would shadow the global Image constructor used elsewhere.
+  Image as ImageIcon,
   ThumbsUp,
   ThumbsDown,
   Share2,
@@ -435,6 +440,133 @@ export const extractValueAdd = (md: string): { rezoning?: string; subdivision?: 
  * never shows code or stray "*".
  */
 /**
+ * Editing toolbar + attachment manager shared by BOTH reports.
+ *
+ * Editing works on the report's MARKDOWN so the same text drives the on-screen
+ * view, the saved copy and the PDF export — there is no second source of truth
+ * that could drift. Attachments are normalised to images upstream, so PDFs and
+ * photos render through one path.
+ */
+const ReportEditBar: FC<{
+  editing: boolean;
+  draft: string;
+  attachments: ReportAttachment[];
+  attachmentError: string;
+  attachmentBusy: boolean;
+  onToggleEdit: () => void;
+  onCancel: () => void;
+  onDraftChange: (value: string) => void;
+  onAddFiles: (files: FileList | null) => void;
+  onRemoveAttachment: (id: string) => void;
+  onResetToOriginal?: () => void;
+  edited: boolean;
+}> = ({
+  editing, draft, attachments, attachmentError, attachmentBusy,
+  onToggleEdit, onCancel, onDraftChange, onAddFiles, onRemoveAttachment, onResetToOriginal, edited,
+}) => {
+  const fileRef = useRef<HTMLInputElement>(null);
+  return (
+    <div className="report-edit">
+      <div className="report-edit-bar">
+        <button type="button" className="comp-filter-pill" onClick={onToggleEdit}>
+          {editing ? <><Check size={13} /> Done editing</> : <><Pencil size={13} /> Edit report</>}
+        </button>
+        {editing && (
+          <>
+            <button type="button" className="comp-filter-pill" onClick={onCancel}>Cancel</button>
+            <button
+              type="button"
+              className="comp-filter-pill"
+              onClick={() => fileRef.current?.click()}
+              disabled={attachmentBusy}
+            >
+              {attachmentBusy ? <Loader2 size={13} className="spinner" /> : <Paperclip size={13} />}
+              {attachmentBusy ? 'Adding…' : 'Add image / PDF'}
+            </button>
+            <input
+              ref={fileRef}
+              type="file"
+              accept="image/*,application/pdf"
+              multiple
+              style={{ display: 'none' }}
+              onChange={(e) => { onAddFiles(e.target.files); e.currentTarget.value = ''; }}
+            />
+          </>
+        )}
+        {edited && !editing && (
+          <span className="report-edited-flag" title="This report has been edited by hand">Edited</span>
+        )}
+        {edited && !editing && onResetToOriginal && (
+          <button type="button" className="link-btn" onClick={onResetToOriginal}>Restore original</button>
+        )}
+      </div>
+
+      {attachmentError && (
+        <div className="enf-err" style={{ marginTop: '6px' }}><AlertCircle size={12} /> {attachmentError}</div>
+      )}
+
+      {editing && (
+        <>
+          <textarea
+            className="report-edit-area"
+            value={draft}
+            onChange={(e) => onDraftChange(e.target.value)}
+            spellCheck
+            placeholder="Edit the report markdown — headings (#), bullets (-), and tables all render."
+          />
+          <p className="field-help">
+            Markdown: <code>#</code> headings, <code>-</code> bullets, <code>|</code> tables. Attachments appear at the end of the report and in the PDF.
+          </p>
+        </>
+      )}
+
+      {attachments.length > 0 && editing && (
+        <div className="report-attach-list">
+          {attachments.map((attachment) => (
+            <div key={attachment.id} className="report-attach-chip">
+              <span className="report-attach-name">
+                {attachment.kind === 'pdf' ? <FileText size={12} /> : <ImageIcon size={12} />}
+                {attachment.name}
+                {attachment.kind === 'pdf' && <em> · {attachment.pages.length}p</em>}
+              </span>
+              <button type="button" onClick={() => onRemoveAttachment(attachment.id)} title="Remove">
+                <X size={12} />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
+
+/** Attachments rendered into the report body (and captured into the PDF). */
+const ReportAttachmentsView: FC<{ attachments: ReportAttachment[] }> = ({ attachments }) => {
+  if (!attachments.length) return null;
+  return (
+    <div className="report-attachments">
+      <h3 className="report-attach-heading">Attachments</h3>
+      {attachments.map((attachment) => (
+        <figure key={attachment.id} className="report-attach-figure">
+          {attachment.pages.map((page, index) => (
+            <img
+              key={`${attachment.id}-${index}`}
+              src={page}
+              alt={`${attachment.name}${attachment.pages.length > 1 ? ` page ${index + 1}` : ''}`}
+              loading="lazy"
+            />
+          ))}
+          <figcaption>
+            {attachment.caption}
+            {attachment.kind === 'pdf' && attachment.pages.length > 1 ? ` (${attachment.pages.length} pages)` : ''}
+          </figcaption>
+        </figure>
+      ))}
+    </div>
+  );
+};
+
+/**
  * Client-facing presentation view: property imagery on top, then the generated
  * document. The images are rendered as real elements rather than markdown,
  * because the report renderer intentionally does not process image syntax.
@@ -447,11 +579,14 @@ const BuyerPresentationView: FC<{
   wholesalePrice: number | null;
   saved: boolean;
   pdfBusy: boolean;
+  editing: boolean;
+  attachments: ReportAttachment[];
+  editBar: React.ReactNode;
   onRetry: () => void;
   onChangePrice: () => void;
   onSave: () => void;
   onDownloadPdf: () => void;
-}> = ({ data, markdown, loading, error, wholesalePrice, saved, pdfBusy, onRetry, onChangePrice, onSave, onDownloadPdf }) => {
+}> = ({ data, markdown, loading, error, wholesalePrice, saved, pdfBusy, editing, attachments, editBar, onRetry, onChangePrice, onSave, onDownloadPdf }) => {
   const images = buyerPresentationImages(data);
   return (
     <div className="buyer-presentation">
@@ -520,7 +655,10 @@ const BuyerPresentationView: FC<{
         </div>
       )}
 
-      {markdown ? <div className="report-text">{parseMarkdown(sanitizeReportText(markdown))}</div> : null}
+      {editBar}
+
+      {markdown && !editing ? <div className="report-text">{parseMarkdown(sanitizeReportText(markdown))}</div> : null}
+      {!editing && <ReportAttachmentsView attachments={attachments} />}
     </div>
   );
 };
@@ -938,6 +1076,19 @@ export const FeasibilitySearch: FC = () => {
   const [buyerSaved, setBuyerSaved] = useState(false);
   const [buyerPdfBusy, setBuyerPdfBusy] = useState(false);
   const [feasibilityPdfBusy, setFeasibilityPdfBusy] = useState(false);
+  // Hand edits + attachments for BOTH reports. `edited*Text` is null until the
+  // user saves an edit, so the generated text stays the source of truth until
+  // they deliberately override it (and "Restore original" just clears it).
+  const [feasEditing, setFeasEditing] = useState(false);
+  const [feasDraft, setFeasDraft] = useState('');
+  const [feasEditedText, setFeasEditedText] = useState<string | null>(null);
+  const [feasAttachments, setFeasAttachments] = useState<ReportAttachment[]>([]);
+  const [buyerEditing, setBuyerEditing] = useState(false);
+  const [buyerDraft, setBuyerDraft] = useState('');
+  const [buyerEditedText, setBuyerEditedText] = useState<string | null>(null);
+  const [buyerAttachments, setBuyerAttachments] = useState<ReportAttachment[]>([]);
+  const [attachmentBusy, setAttachmentBusy] = useState(false);
+  const [attachmentError, setAttachmentError] = useState('');
   // Comps display/search filters
   const [compRadius, setCompRadius] = useState(5);          // max DRIVING-mile radius (1 / 3 / 5 / 10) — re-fetches
   const [compTypeFilter, setCompTypeFilter] = useState('all'); // property-type display filter
@@ -1467,7 +1618,7 @@ export const FeasibilitySearch: FC = () => {
         ownerName: data.ownerName,
         // Tagged in the title so it is distinguishable from the feasibility
         // report for the same parcel in the saved-reports drawer.
-        reportMarkdown: `# Buyer Presentation${wholesalePrice ? ` — Wholesale Price $${wholesalePrice.toLocaleString()}` : ''}\n\n${sanitizeReportText(buyerReport)}`,
+        reportMarkdown: `# Buyer Presentation${wholesalePrice ? ` — Wholesale Price $${wholesalePrice.toLocaleString()}` : ''}\n\n${sanitizeReportText(effectiveBuyerText)}${attachmentsAppendix(buyerAttachments)}`,
       });
       setBuyerSaved(true);
     } catch (err: any) {
@@ -1495,9 +1646,52 @@ export const FeasibilitySearch: FC = () => {
     return fragment;
   };
 
+  // ---------------------------------------------------------------------
+  // Report editing. The EFFECTIVE text is what every consumer uses — display,
+  // save and PDF — so an edit is reflected everywhere with no divergence.
+  // ---------------------------------------------------------------------
+  const feasibilityOriginal = chatHistory[0]?.role === 'model' ? chatHistory[0].content : '';
+  const effectiveFeasibilityText = feasEditedText ?? feasibilityOriginal;
+  const effectiveBuyerText = buyerEditedText ?? buyerReport;
+
+  /** Add uploaded images/PDFs to a report. PDFs are rasterised to page images. */
+  const addAttachments = async (files: FileList | null, target: 'feasibility' | 'buyer') => {
+    if (!files || !files.length) return;
+    setAttachmentBusy(true);
+    setAttachmentError('');
+    const added: ReportAttachment[] = [];
+    const failures: string[] = [];
+    for (const file of Array.from(files)) {
+      try {
+        added.push(await fileToReportAttachment(file));
+      } catch (err: any) {
+        failures.push(err?.message || `${file.name} could not be added.`);
+      }
+    }
+    if (added.length) {
+      if (target === 'feasibility') setFeasAttachments((prev) => [...prev, ...added]);
+      else setBuyerAttachments((prev) => [...prev, ...added]);
+    }
+    if (failures.length) setAttachmentError(failures.join(' '));
+    setAttachmentBusy(false);
+  };
+
+  const beginFeasibilityEdit = () => {
+    if (feasEditing) { setFeasEditedText(feasDraft); setFeasEditing(false); return; }
+    setFeasDraft(effectiveFeasibilityText);
+    setAttachmentError('');
+    setFeasEditing(true);
+  };
+  const beginBuyerEdit = () => {
+    if (buyerEditing) { setBuyerEditedText(buyerDraft); setBuyerEditing(false); setBuyerSaved(false); return; }
+    setBuyerDraft(effectiveBuyerText);
+    setAttachmentError('');
+    setBuyerEditing(true);
+  };
+
   /** One-click PDF of the buyer presentation (jsPDF + html2canvas). */
   const downloadBuyerPresentationPdf = async () => {
-    if (!data || !buyerReport || buyerPdfBusy) return;
+    if (!data || !effectiveBuyerText || buyerPdfBusy) return;
     setBuyerPdfBusy(true);
     setBuyerError('');
     try {
@@ -1505,7 +1699,8 @@ export const FeasibilitySearch: FC = () => {
       await downloadReportPdf({
         title: 'Land Investment & Build Opportunity',
         address: data.inputAddress,
-        bodyNode: await renderMarkdownToNode(buyerReport),
+        bodyNode: await renderMarkdownToNode(effectiveBuyerText),
+        attachments: buyerAttachments,
         priceLabel: wholesalePrice ? `Wholesale Price: $${wholesalePrice.toLocaleString()}` : undefined,
         imageUrls: [
           { url: images.satelliteUrl, caption: `Aerial view — ${data.inputAddress}` },
@@ -1523,7 +1718,7 @@ export const FeasibilitySearch: FC = () => {
 
   /** One-click PDF of the AI Feasibility Report. */
   const downloadFeasibilityPdf = async () => {
-    const markdown = chatHistory[0]?.content || '';
+    const markdown = effectiveFeasibilityText;
     if (!data || !markdown || feasibilityPdfBusy) return;
     setFeasibilityPdfBusy(true);
     try {
@@ -1532,6 +1727,7 @@ export const FeasibilitySearch: FC = () => {
         title: 'AI Land Feasibility Report',
         address: data.inputAddress,
         bodyNode: await renderMarkdownToNode(markdown),
+        attachments: feasAttachments,
         imageUrls: [
           { url: images.satelliteUrl, caption: `Aerial view — ${data.inputAddress}` },
           { url: images.streetViewUrl, caption: 'Street view' },
@@ -3381,6 +3577,18 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
     setBuyerError('');
     setBuyerLoading(false);
     setBuyerSaved(false);
+    // Edits and attachments belong to the parcel that was on screen — never
+    // carry one property's edited copy or photos onto the next.
+    setFeasEditing(false);
+    setFeasDraft('');
+    setFeasEditedText(null);
+    setFeasAttachments([]);
+    setBuyerEditing(false);
+    setBuyerDraft('');
+    setBuyerEditedText(null);
+    setBuyerAttachments([]);
+    setAttachmentError('');
+    setAttachmentBusy(false);
     setWholesalePrice(null);
     setWholesalePriceInput('');
     setShowWholesalePrice(false);
@@ -4024,7 +4232,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                           acres: data.gisAcres,
                           zoningCode: data.zoningCode,
                           ownerName: data.ownerName,
-                          reportMarkdown: sanitizeReportText(chatHistory[0].content),
+                          reportMarkdown: sanitizeReportText(effectiveFeasibilityText) + attachmentsAppendix(feasAttachments),
                         });
                         setReportSaved(true);
                       } catch (e: any) {
@@ -5635,12 +5843,30 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                 {reportMode === 'buyer' && !showWholesalePrice ? (
                   <BuyerPresentationView
                     data={data}
-                    markdown={buyerReport}
+                    markdown={effectiveBuyerText}
                     loading={buyerLoading}
                     error={buyerError}
                     wholesalePrice={wholesalePrice}
                     saved={buyerSaved}
                     pdfBusy={buyerPdfBusy}
+                    editing={buyerEditing}
+                    attachments={buyerAttachments}
+                    editBar={
+                      <ReportEditBar
+                        editing={buyerEditing}
+                        draft={buyerDraft}
+                        attachments={buyerAttachments}
+                        attachmentError={attachmentError}
+                        attachmentBusy={attachmentBusy}
+                        edited={buyerEditedText !== null}
+                        onToggleEdit={beginBuyerEdit}
+                        onCancel={() => { setBuyerEditing(false); setAttachmentError(''); }}
+                        onDraftChange={setBuyerDraft}
+                        onAddFiles={(files) => addAttachments(files, 'buyer')}
+                        onRemoveAttachment={(id) => setBuyerAttachments((prev) => prev.filter((a) => a.id !== id))}
+                        onResetToOriginal={() => { setBuyerEditedText(null); setBuyerSaved(false); }}
+                      />
+                    }
                     onRetry={() => generateBuyerPresentation(wholesalePrice)}
                     onChangePrice={() => { setWholesalePriceInput(wholesalePrice ? String(wholesalePrice) : ''); setShowWholesalePrice(true); }}
                     onSave={saveBuyerPresentation}
@@ -5673,8 +5899,24 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                   </>
                 ) : chatHistory.length > 0 && chatHistory[0].role === 'model' ? (
                   <>
+                    <ReportEditBar
+                      editing={feasEditing}
+                      draft={feasDraft}
+                      attachments={feasAttachments}
+                      attachmentError={attachmentError}
+                      attachmentBusy={attachmentBusy}
+                      edited={feasEditedText !== null}
+                      onToggleEdit={beginFeasibilityEdit}
+                      onCancel={() => { setFeasEditing(false); setAttachmentError(''); }}
+                      onDraftChange={setFeasDraft}
+                      onAddFiles={(files) => addAttachments(files, 'feasibility')}
+                      onRemoveAttachment={(id) => setFeasAttachments((prev) => prev.filter((a) => a.id !== id))}
+                      onResetToOriginal={() => setFeasEditedText(null)}
+                    />
+                    {feasEditing ? null : (
+                    <>
                     {(() => {
-                      const va = extractValueAdd(sanitizeReportText(chatHistory[0].content));
+                      const va = extractValueAdd(sanitizeReportText(effectiveFeasibilityText));
                       if (!va.rezoning && !va.subdivision) return null;
                       return (
                         <div className="value-add-highlight">
@@ -5694,7 +5936,7 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                       // report's Development Cost section (right under its
                       // heading). If the report has no such heading, the
                       // estimate renders directly after the report body.
-                      const txt = sanitizeReportText(chatHistory[0].content);
+                      const txt = sanitizeReportText(effectiveFeasibilityText);
                       const cut = developmentCostSection ? findDevCostCut(txt) : -1;
                       if (cut < 0) {
                         return (
@@ -5712,10 +5954,13 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                         </>
                       );
                     })()}
+                    <ReportAttachmentsView attachments={feasAttachments} />
                     <div style={{ marginTop: '12px', paddingTop: '10px', borderTop: '1px dashed var(--bg-card-border)', fontSize: '0.78rem', color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: '6px' }}>
                       <MessageCircle size={13} />
                       <span>Questions about this report? Use the chat bubble in the corner.</span>
                     </div>
+                    </>
+                    )}
                   </>
                 ) : (
                   <>

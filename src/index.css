@@ -3721,6 +3721,77 @@ img, svg, video, canvas, table, pre { max-width: 100%; }
   .chat-fab.pulse { animation-duration: 1.2s !important; }
 }
 
+/* Report editing (both reports) */
+.report-edit { margin-bottom: 0.75rem; }
+.report-edit-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.report-edited-flag {
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: var(--warning-bg, rgba(245, 158, 11, 0.14));
+  color: var(--warning, #d97706);
+  border: 1px solid var(--warning-border, rgba(245, 158, 11, 0.35));
+}
+.report-edit-area {
+  width: 100%;
+  min-height: 340px;
+  margin-top: 8px;
+  padding: 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.8rem;
+  line-height: 1.55;
+  color: var(--text-primary);
+  background: var(--bg-main);
+  border: 1px solid var(--bg-card-border);
+  border-radius: var(--radius-md);
+  resize: vertical;
+}
+.report-edit-area:focus {
+  outline: none;
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.12);
+}
+.report-attach-list { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.report-attach-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px 4px 9px;
+  font-size: 0.74rem;
+  border: 1px solid var(--bg-card-border);
+  border-radius: 999px;
+  background: var(--bg-main);
+}
+.report-attach-name { display: inline-flex; align-items: center; gap: 5px; }
+.report-attach-name em { color: var(--text-muted); font-style: normal; }
+.report-attach-chip button {
+  display: inline-flex;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 2px;
+  border-radius: 50%;
+}
+.report-attach-chip button:hover { color: var(--danger, #dc2626); background: var(--bg-card-hover, #f1f5f9); }
+
+.report-attachments { margin-top: 1.1rem; padding-top: 0.9rem; border-top: 1px dashed var(--bg-card-border); }
+.report-attach-heading { font-size: 0.95rem; margin: 0 0 0.6rem; }
+.report-attach-figure { margin: 0 0 1rem; }
+.report-attach-figure img {
+  width: 100%;
+  height: auto;
+  display: block;
+  margin-bottom: 6px;
+  border: 1px solid var(--bg-card-border);
+  border-radius: var(--radius-md);
+  background: #fff;
+}
+.report-attach-figure figcaption { font-size: 0.72rem; color: var(--text-secondary); }
+
 /* Land price bands (8%–15% of ARV) inside the comps card */
 .land-bands {
   margin: 0 0 0.9rem;
