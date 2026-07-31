@@ -950,6 +950,10 @@ test('application wiring uses Octen for non-zoning research and preserves Gemini
   assert.match(settings, /'Test key'/);
   assert.match(vite, /https:\/\/api\.monid\.ai/);
   assert.match(vite, /\/v1\/wallet\/balance/);
-  assert.match(zoning, /GEMINI_ZONING_MODELS = \['gemini-3\.6-flash'\]/);
+  // Zoning stays on Gemini (never Monid/Octen) AND keeps a fallback model — a
+  // single-model list previously left the zoning card blank whenever that one
+  // model returned an unusable answer.
+  assert.match(zoning, /GEMINI_ZONING_MODELS = \[[^\]]*'gemini-3-flash-preview'[^\]]*\]/);
+  assert.match(zoning, /GEMINI_ZONING_MODELS = \[[^\]]*'gemini-3\.6-flash'[^\]]*\]/);
   assert.doesNotMatch(zoning, /monid|octen/i);
 });
