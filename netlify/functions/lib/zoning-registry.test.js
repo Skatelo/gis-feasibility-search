@@ -527,9 +527,9 @@ test('Gemini zoning search uses the complete address and a fresh grounded Intera
   assert.equal(call.init.method, 'POST');
   assert.equal(call.init.cache, 'no-store');
   assert.equal(call.init.headers['x-goog-api-key'], 'test-gemini-key');
-  // The PRIMARY zoning model — the configuration verified to return exact
-  // district codes. gemini-3.6-flash remains the fallback behind it.
-  assert.equal(call.body.model, 'gemini-3-flash-preview');
+  // Zoning runs on gemini-3.6-flash — verified live to return exact district
+  // codes with citations on the grounded Interactions endpoint.
+  assert.equal(call.body.model, 'gemini-3.6-flash');
   assert.equal(call.body.store, false);
   assert.deepEqual(call.body.tools, [{ type: 'google_search' }]);
   assert.equal(call.body.generation_config.thinking_level, 'high');

@@ -15,8 +15,10 @@
 //
 // Every failure path returns '' so the crawl degrades instead of breaking.
 
+// Vision transcription runs on gemini-3.6-flash only. The request below already
+// retries, and a page that still can't be read falls through to the next tier of
+// the extraction chain rather than to a different model.
 const GEMINI_VISION_MODEL = 'gemini-3.6-flash';
-const GEMINI_FALLBACK_MODEL = 'gemini-3-flash-preview';
 
 /** Vision needs a Gemini key; the caller may pass one from the request. */
 export function pixelReadConfigured(geminiKey = '') {
@@ -117,7 +119,7 @@ export async function readScreenshotWithGemini(base64Jpeg, { url = '', queries =
     generationConfig: { temperature: 0, maxOutputTokens: 8192, thinkingConfig: { thinkingBudget: 0 } },
   });
 
-  for (const model of [GEMINI_VISION_MODEL, GEMINI_FALLBACK_MODEL]) {
+  for (const model of [GEMINI_VISION_MODEL]) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
