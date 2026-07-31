@@ -555,6 +555,58 @@ export function extractZoning(results: IdentifyResult[]): ResolvedZoning | null 
   return { code: real[0].code, description: real[0].description };
 }
 
+// ---------------------------------------------------------------------------
+// CORS-TOLERANT ARCGIS FETCH
+// Plenty of county GIS servers publish open data but send no
+// Access-Control-Allow-Origin header. The browser then blocks the read and the
+// fetch rejects with an opaque TypeError, which used to look identical to "the
+// point isn't in any polygon" — so a perfectly good service reported no zoning.
+// (Gaston County is exactly this: identify returns RS-12 server-side, and the
+// browser never sees it.)
+//
+// So: try direct first — nothing that works today changes or slows down — and
+// only on a network-level failure retry through our same-origin proxy.
+// ---------------------------------------------------------------------------
+
+const ARCGIS_PROXY = '/.netlify/functions/arcgis-proxy';
+
+/** Hosts already known to need the proxy, so repeat lookups in one session skip
+ *  the doomed direct attempt. */
+const corsBlockedHosts = new Set<string>();
+
+function hostOf(url: string): string {
+  try { return new URL(url, window.location.origin).hostname.toLowerCase(); } catch { return ''; }
+}
+
+/**
+ * Fetch an ArcGIS REST URL as JSON, falling back to the server-side proxy when
+ * the browser blocks the direct request. Returns null when both routes fail, so
+ * callers keep their existing "no result" handling.
+ */
+async function fetchArcgisJson(url: string): Promise<any | null> {
+  const host = hostOf(url);
+  const viaProxy = async () => {
+    try {
+      const res = await fetch(`${ARCGIS_PROXY}?url=${encodeURIComponent(url)}`, { cache: 'no-store' });
+      if (!res.ok) return null;
+      return await res.json();
+    } catch { return null; }
+  };
+
+  if (host && corsBlockedHosts.has(host)) return viaProxy();
+
+  try {
+    const res = await fetch(url, { cache: 'no-store' });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch {
+    // A CORS rejection is indistinguishable from an offline error here (both are
+    // a bare TypeError), so just retry through the proxy either way.
+    if (host) corsBlockedHosts.add(host);
+    return viaProxy();
+  }
+}
+
 /**
  * Queries a single zoning MapServer at a WGS84 point via the ArcGIS `identify`
  * op and returns the real zoning code/description, or null if nothing usable.
@@ -584,8 +636,7 @@ async function identifyZoning(service: ZoningService, lng: number, lat: number):
       returnGeometry: "false",
       f: "json",
     });
-    return fetch(`${service.url}/identify?${params.toString()}`, { cache: 'no-store' })
-      .then((res) => (res.ok ? res.json() : null))
+    return fetchArcgisJson(`${service.url}/identify?${params.toString()}`)
       .then((data) => (Array.isArray(data?.results) && data.results.length ? extractZoning(data.results) : null))
       .catch((e) => { console.warn(`Zoning identify failed for ${service.url}:`, e); return null; });
   }));
@@ -620,9 +671,8 @@ async function queryZoningAtPoint(service: ZoningService, lng: number, lat: numb
         returnGeometry: 'false',
         f: 'json',
       });
-      const res = await fetch(`${service.url}/${layerId}/query?${params.toString()}`, { cache: 'no-store' });
-      if (!res.ok) continue;
-      const data = await res.json();
+      const data = await fetchArcgisJson(`${service.url}/${layerId}/query?${params.toString()}`);
+      if (!data) continue;
       const values: ResolvedZoning[] = (Array.isArray(data?.features) ? data.features : [])
         .map((f: { attributes?: Record<string, unknown> }) => cleanZoningValue(f?.attributes?.[field]))
         .map((value: string | null) => {

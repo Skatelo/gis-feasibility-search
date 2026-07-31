@@ -4,7 +4,7 @@ import { getSupabase, isSupabaseConfigured } from './supabaseClient';
 import { fetchOfficialScParcel, mergeOfficialScParcelRecords, officialRecordFromCountyGis, scOwnerNamesMatch, shouldHideStatewideGeometry } from './scParcelVerification';
 import { scCountySource } from '../data/scCountySources';
 import { normalizeSourcedRange } from '../data/sourcedEstimate';
-import { listingZoningEvidenceTier, zoningListingProvider } from '../data/zoningEvidence';
+import { listingZoningEvidenceTier, listingUrlMatchesAddress, zoningListingProvider } from '../data/zoningEvidence';
 import { cleanCode, splitZoningLabel } from './zoning/normalization/zoning-normalizer';
 import { fetchGeminiZoningSearchEvidence, normalizeFullAddressForZoning, type OfficialZoningEvidenceHint } from './geminiZoningSearch';
 import { isFullCarolinaPostalAddress, resolveFullCarolinaPostalAddress } from './carolinaAddress';
@@ -5417,7 +5417,7 @@ function boundedStringList(value: unknown, maxItems = 10, maxLength = 260): stri
 /** Parse a parcel-specific zoning response and reject unsupported district codes
  *  or allowance numbers. A zoning ordinance alone can describe a district, but
  *  it cannot prove that the searched parcel is assigned to that district. */
-function parseZoningResult(text: string, evidenceUrls: string[] = [], countyName = ''): ZoningResult | null {
+function parseZoningResult(text: string, evidenceUrls: string[] = [], countyName = '', subjectAddress = ''): ZoningResult | null {
   let textReport = text;
   const jsonIndex = text.indexOf('```json');
   if (jsonIndex !== -1) {
@@ -5493,7 +5493,14 @@ function parseZoningResult(text: string, evidenceUrls: string[] = [], countyName
         ? listingEvidenceUrlDiscovered(url, evidenceUrls)
         : evidenceUrlDiscovered(url, evidenceUrls)
     ));
-    const listingSources = [...new Set(providedSources.filter((url) => !!zoningListingProvider(url)))];
+    // A listing only counts as parcel evidence when it is THIS parcel's listing.
+    // Asked about 1992 Garland Ave the model has returned 1908 Garland Ave and
+    // reported that neighbour's district; without this check it passed as
+    // corroborated. When no subject address is supplied, nothing can be
+    // verified, so no listing qualifies.
+    const listingSources = [...new Set(
+      providedSources.filter((url) => !!zoningListingProvider(url) && listingUrlMatchesAddress(url, subjectAddress)),
+    )];
     let parcelSource: string;
     let evidenceTier: ZoningEvidenceTier;
 
@@ -5596,7 +5603,7 @@ export async function fetchZoningWithGeminiSearch(
     ...evidence.urls,
     ...answerUrls,
   ])];
-  return parseZoningResult(evidence.raw, discoveredUrls, countyName || '');
+  return parseZoningResult(evidence.raw, discoveredUrls, countyName || '', fullAddress);
 }
 
 /**
