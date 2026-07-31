@@ -7044,8 +7044,15 @@ export async function fetchGoogleDistanceMatrixComps(
   const STRAIGHT_PRUNE_MILES = EXPANDED_RADIUS_MILES + Math.max(0.5, EXPANDED_RADIUS_MILES * 0.1);
   const prunedCands: any[] = resolved.filter((c): c is any => c !== null && straightMiles(c) <= STRAIGHT_PRUNE_MILES);
   const enrichedCands = await enrichCompTypesFromDetails(prunedCands, allowedTypes, getRealtyApiKey(), onStageChange);
-  const zoningMatchedCands = enrichedCands.filter((comp) => isFinalCompTypeAllowed(comp.compType ?? 'unknown', allowedTypes));
-  console.log(`Exact zoning-use filter: ${enrichedCands.length} candidates -> ${zoningMatchedCands.length} permitted property forms.`);
+  // Zoning classification RANKS comps, it does not delete them. Hard-filtering
+  // here silently threw away verified sales — including every comp whose type
+  // could not be classified ('unknown') — so the card showed far fewer comps
+  // than the search actually found. Permitted forms sort first, everything else
+  // is still available, and the type filter in the UI does the narrowing.
+  const zoningAllowed = (comp: any) => isFinalCompTypeAllowed(comp.compType ?? 'unknown', allowedTypes);
+  const zoningMatchedCands = [...enrichedCands].sort((a, b) => Number(zoningAllowed(b)) - Number(zoningAllowed(a)));
+  const permittedCount = enrichedCands.filter(zoningAllowed).length;
+  console.log(`Zoning-use ranking: ${enrichedCands.length} candidates (${permittedCount} match a permitted form; all retained).`);
   // Collapse the SAME home listed across Realtor/Redfin/Zillow (different address
   // text but the same property) so the comp set has no duplicates.
   const finalCands: any[] = dedupeComps(zoningMatchedCands);

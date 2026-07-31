@@ -527,7 +527,9 @@ test('Gemini zoning search uses the complete address and a fresh grounded Intera
   assert.equal(call.init.method, 'POST');
   assert.equal(call.init.cache, 'no-store');
   assert.equal(call.init.headers['x-goog-api-key'], 'test-gemini-key');
-  assert.equal(call.body.model, 'gemini-3.6-flash');
+  // The PRIMARY zoning model — the configuration verified to return exact
+  // district codes. gemini-3.6-flash remains the fallback behind it.
+  assert.equal(call.body.model, 'gemini-3-flash-preview');
   assert.equal(call.body.store, false);
   assert.deepEqual(call.body.tools, [{ type: 'google_search' }]);
   assert.equal(call.body.generation_config.thinking_level, 'high');
@@ -548,7 +550,8 @@ test('property zoning keeps official point GIS identity and uses Gemini 3.6 Flas
     serviceSource.indexOf("Uses client-side Google Maps JavaScript SDK's DistanceMatrixService"),
   );
 
-  assert.match(serviceSource, /countyName = `\$\{countyBaseName\(countyName\)\}, \$\{selectedState\}`/);
+  assert.match(serviceSource, /const selectedState = knownParcel\?\.state \|\| addressState \|\| countyState\(countyName\)/);
+  assert.match(serviceSource, /countyName = `\$\{countyBaseName\(knownParcel\?\.county \|\| countyName\)\}, \$\{selectedState\}`/);
   assert.match(serviceSource, /addressString\.match\(\/\(\?:,\|\\s\)/);
   assert.match(stage, /resolveFullCarolinaPostalAddress\(/);
   assert.match(stage, /normalizeFullAddressForZoning\(zoningQueryAddress \|\| addressString\)/);
