@@ -1,0 +1,807 @@
+{
+  "generated": "2026-07-31T21:55:11.299Z",
+  "counties": {
+    "NC": {
+      "Guilford": {
+        "county": {
+          "jurisdiction": "Guilford",
+          "kind": "county",
+          "layerUrl": "https://gcgis.guilfordcountync.gov/arcgis/rest/services/Planning_Zoning/Combined_Zoning/MapServer/0",
+          "layerName": "Combined Zoning",
+          "codeField": "ZONING",
+          "verifiedAt": "2026-07-31",
+          "sample": {
+            "lng": -79.788906,
+            "lat": 36.0794371,
+            "code": "O",
+            "description": "Office"
+          }
+        }
+      },
+      "Gaston": {
+        "county": {
+          "jurisdiction": "Gaston",
+          "kind": "county",
+          "layerUrl": "https://gis.gastoncountync.gov/publicgis/rest/services/PublicGIS/Zoning/MapServer/1",
+          "layerName": "Gaston County UDO",
+          "codeField": "TYPE",
+          "verifiedAt": "2026-07-31",
+          "sample": {
+            "lng": -81.1802077,
+            "lat": 35.2943336,
+            "code": "RS-8",
+            "description": "RESIDENTIAL 8,000 SQ FT"
+          }
+        }
+      },
+      "Davidson": {
+        "county": {
+          "jurisdiction": "Davidson",
+          "kind": "county",
+          "layerUrl": "https://webgis.co.davidson.nc.us/arcgis/rest/services/OpenGov/OpenGov/MapServer/10",
+          "layerName": "Zoning",
+          "codeField": "ZONE_CODE",
+          "verifiedAt": "2026-07-31",
+          "sample": {
+            "lng": -80.2126704,
+            "lat": 35.7931058,
+            "code": "RS",
+            "description": null
+          }
+        }
+      },
+      "Wake": {
+        "county": {
+          "jurisdiction": "Wake",
+          "kind": "county",
+          "layerUrl": "https://maps.wake.gov/arcgis/rest/services/Planning/Zoning/MapServer/23",
+          "layerName": "Raleigh Zoning",
+          "codeField": "ZONING",
+          "verifiedAt": "2026-07-31",
+          "sample": {
+            "lng": -78.6504761,
+            "lat": 35.7902352,
+            "code": "R-10",
+            "description": "Residential-10"
+          }
+        },
+        "countyCheckedAt": "2026-07-31"
+      },
+      "Mecklenburg": {
+        "county": {
+          "jurisdiction": "Mecklenburg",
+          "kind": "county",
+          "layerUrl": "https://meckgis.mecklenburgcountync.gov/server/rest/services/CityofCharlotteZoning/MapServer/0",
+          "layerName": "City of Charlotte Zoning",
+          "codeField": "zonedes",
+          "verifiedAt": "2026-07-31",
+          "sample": {
+            "lng": -80.832715,
+            "lat": 35.2466339,
+            "code": "UMUD-O",
+            "description": null
+          }
+        }
+      },
+      "Union": {
+        "county": null,
+        "countyCheckedAt": "2026-07-31"
+      },
+      "Iredell": {
+        "county": {
+          "jurisdiction": "Iredell",
+          "kind": "county",
+          "layerUrl": "https://maps.iredellcountync.gov/server/rest/services/Data/Zoning/MapServer/0",
+          "layerName": "Iredell Zoning",
+          "codeField": "ZONING",
+          "verifiedAt": "2026-07-31",
+          "sample": {
+            "lng": -80.8734535,
+            "lat": 35.8068002,
+            "code": "STVL",
+            "description": null
+          }
+        }
+      },
+      "Cabarrus": {
+        "county": {
+          "jurisdiction": "Cabarrus",
+          "kind": "county",
+          "layerUrl": "https://location.cabarruscounty.us/arcgisservices/rest/services/Zoning/MapServer/6",
+          "layerName": "Concord Zoning",
+          "codeField": "cabarrusgis.CAB_DBO.Concord_Zoning.ZONINGCODE",
+          "verifiedAt": "2026-07-31",
+          "sample": {
+            "lng": -80.5518809,
+            "lat": 35.386754,
+            "code": "RM-1",
+            "description": "4"
+          }
+        }
+      },
+      "Lincoln": {
+        "county": {
+          "jurisdiction": "Lincoln",
+          "kind": "county",
+          "layerUrl": "https://arcgisserver.lincolncountync.gov/arcgis/rest/services/Server_OperationalSP/MapServer/23",
+          "layerName": "City Zoning Districts",
+          "codeField": "ZONECODE",
+          "verifiedAt": "2026-07-31",
+          "sample": {
+            "lng": -81.2234998,
+            "lat": 35.4856745,
+            "code": "R-25",
+            "description": null
+          }
+        }
+      },
+      "Yancey": {
+        "county": null,
+        "countyCheckedAt": "2026-07-31"
+      },
+      "Yadkin": {
+        "county": null,
+        "countyCheckedAt": "2026-07-31"
+      },
+      "Caswell": {
+        "county": null,
+        "countyCheckedAt": "2026-07-31"
+      },
+      "Currituck": {
+        "county": null,
+        "countyCheckedAt": "2026-07-31"
+      },
+      "McDowell": {
+        "county": null,
+        "countyCheckedAt": "2026-07-31"
+      },
+      "Jones": {
+        "county": null,
+        "countyCheckedAt": "2026-07-31"
+      },
+      "Burke": {
+        "county": null,
+        "countyCheckedAt": "2026-07-31"
+      },
+      "Wayne": {
+        "county": {
+          "jurisdiction": "Wayne",
+          "kind": "county",
+          "layerUrl": "https://services5.arcgis.com/q2nSlChj7QgGTANO/arcgis/rest/services/Goldsboro_Zoning/FeatureServer/43",
+          "layerName": "Goldsboro Zoning",
+          "codeField": "CURRENT_ZONING",
+          "verifiedAt": "2026-07-31",
+          "sample": {
+            "lng": -78.0040716,
+            "lat": 35.3638572,
+            "code": "R-9",
+            "description": null
+          }
+        },
+        "countyCheckedAt": "2026-07-31"
+      },
+      "Ashe": {
+        "county": null,
+        "countyCheckedAt": "2026-07-31"
+      },
+      "Davie": {
+        "county": {
+          "jurisdiction": "Davie",
+          "kind": "county",
+          "layerUrl": "https://gis.daviecountync.gov/server/rest/services/Zoning_and_Development/FeatureServer/0",
+          "layerName": "zoning",
+          "codeField": "ZONING",
+          "verifiedAt": "2026-07-31",
+          "sample": {
+            "lng": -80.5444563,
+            "lat": 35.929067,
+            "code": "R-A",
+            "description": null
+          }
+        }
+      },
+      "Pender": {
+        "county": null,
+        "countyCheckedAt": "2026-07-31"
+      },
+      "Surry": {
+        "county": null,
+        "countyCheckedAt": "2026-07-31"
+      },
+      "Rutherford": {
+        "county": null,
+        "countyCheckedAt": "2026-07-31"
+      },
+      "Jackson": {
+        "county": null,
+        "countyCheckedAt": "2026-07-31"
+      },
+      "Transylvania": {
+        "county": null,
+        "countyCheckedAt": "2026-07-31"
+      },
+      "Person": {
+        "county": null,
+        "countyCheckedAt": "2026-07-31"
+      },
+      "Henderson": {
+        "county": {
+          "jurisdiction": "Henderson",
+          "kind": "county",
+          "layerUrl": "https://gisweb.hendersoncountync.gov/arcgis/rest/services/GISWeb/Primary_GISWeb_Layers/MapServer/83",
+          "layerName": "City of Hendersonville Zoning",
+          "codeField": "Zoning",
+          "verifiedAt": "2026-07-31",
+          "sample": {
+            "lng": -82.4799813,
+            "lat": 35.336193,
+            "code": "R-15",
+            "description": null
+          }
+        }
+      },
+      "Wilkes": {
+        "county": null,
+        "countyCheckedAt": "2026-07-31"
+      },
+      "Warren": {
+        "county": null,
+        "countyCheckedAt": "2026-07-31"
+      },
+      "Bladen": {
+        "county": null,
+        "countyCheckedAt": "2026-07-31"
+      },
+      "Washington": {
+        "county": null,
+        "countyCheckedAt": "2026-07-31"
+      },
+      "Montgomery": {
+        "county": null,
+        "countyCheckedAt": "2026-07-31"
+      },
+      "Graham": {
+        "county": null,
+        "countyCheckedAt": "2026-07-31"
+      },
+      "Madison": {
+        "county": null,
+        "countyCheckedAt": "2026-07-31"
+      },
+      "New Hanover": {
+        "county": null,
+        "countyCheckedAt": "2026-07-31"
+      },
+      "Catawba": {
+        "county": null,
+        "countyCheckedAt": "2026-07-31"
+      },
+      "Halifax": {
+        "county": null,
+        "countyCheckedAt": "2026-07-31"
+      },
+      "Durham": {
+        "county": {
+          "jurisdiction": "Durham",
+          "kind": "county",
+          "layerUrl": "https://webgis2.durhamnc.gov/server/rest/services/PublicServices/Planning/MapServer/12",
+          "layerName": "Zoning",
+          "codeField": "ZONE_CODE",
+          "verifiedAt": "2026-07-31",
+          "sample": {
+            "lng": -78.876598,
+            "lat": 36.0359233,
+            "code": "R-5",
+            "description": "RES_MEDIUM_DENSITY"
+          }
+        }
+      },
+      "Bertie": {
+        "county": null,
+        "countyCheckedAt": "2026-07-31"
+      },
+      "Stanly": {
+        "county": null,
+        "countyCheckedAt": "2026-07-31"
+      },
+      "Anson": {
+        "county": {
+          "jurisdiction": "Anson",
+          "kind": "county",
+          "layerUrl": "https://ansoncountygis.com/arcgis/rest/services/ZoningLayers/MapServer/5",
+          "layerName": "County Zoning",
+          "codeField": "ZONECODE",
+          "verifiedAt": "2026-07-31",
+          "sample": {
+            "lng": -80.1026762,
+            "lat": 34.973737,
+            "code": "R20",
+            "description": null
+          }
+        }
+      },
+      "Columbus": {
+        "county": null,
+        "countyCheckedAt": "2026-07-31"
+      },
+      "Dare": {
+        "county": null,
+        "countyCheckedAt": "2026-07-31"
+      },
+      "Swain": {
+        "county": null,
+        "countyCheckedAt": "2026-07-31"
+      },
+      "Greene": {
+        "county": null,
+        "countyCheckedAt": "2026-07-31"
+      },
+      "Edgecombe": {
+        "county": null,
+        "countyCheckedAt": "2026-07-31"
+      },
+      "Stokes": {
+        "county": null,
+        "countyCheckedAt": "2026-07-31"
+      },
+      "Avery": {
+        "county": null,
+        "countyCheckedAt": "2026-07-31"
+      },
+      "Alamance": {
+        "county": null,
+        "countyCheckedAt": "2026-07-31"
+      },
+      "Mitchell": {
+        "county": null,
+        "countyCheckedAt": "2026-07-31"
+      },
+      "Onslow": {
+        "county": {
+          "jurisdiction": "Onslow",
+          "kind": "county",
+          "layerUrl": "https://gismaps.onslowcountync.gov/arcgis/rest/services/WEB_PUBLICATIONS/Planning_Data/MapServer/0",
+          "layerName": "ZONING_1",
+          "codeField": "ZONECODE",
+          "verifiedAt": "2026-07-31",
+          "sample": {
+            "lng": -77.4156948,
+            "lat": 34.7097042,
+            "code": "MR",
+            "description": null
+          }
+        }
+      },
+      "Hoke": {
+        "county": null,
+        "countyCheckedAt": "2026-07-31"
+      },
+      "Granville": {
+        "county": null,
+        "countyCheckedAt": "2026-07-31"
+      },
+      "Vance": {
+        "county": null,
+        "countyCheckedAt": "2026-07-31"
+      },
+      "Moore": {
+        "county": {
+          "jurisdiction": "Moore",
+          "kind": "county",
+          "layerUrl": "https://gis.moorecountync.gov/server/rest/services/OpenData/zoning/FeatureServer/0",
+          "layerName": "MoCo_zoning",
+          "codeField": "ZCODE",
+          "verifiedAt": "2026-07-31",
+          "sample": {
+            "lng": -79.4812701,
+            "lat": 35.3105709,
+            "code": "RA",
+            "description": null
+          }
+        }
+      },
+      "Alexander": {
+        "county": null,
+        "countyCheckedAt": "2026-07-31"
+      },
+      "Cleveland": {
+        "county": null,
+        "countyCheckedAt": "2026-07-31"
+      },
+      "Hertford": {
+        "county": {
+          "jurisdiction": "Hertford",
+          "kind": "county",
+          "layerUrl": "https://gis.hertfordcounty.org/server/rest/services/Zoning/MapServer/1",
+          "layerName": "Hertford County Zoning",
+          "codeField": "ZONING_COD",
+          "verifiedAt": "2026-07-31",
+          "sample": {
+            "lng": -76.9806486,
+            "lat": 36.3586043,
+            "code": "RA-30",
+            "description": null
+          }
+        }
+      },
+      "Sampson": {
+        "county": null,
+        "countyCheckedAt": "2026-07-31"
+      },
+      "Watauga": {
+        "county": null,
+        "countyCheckedAt": "2026-07-31"
+      },
+      "Randolph": {
+        "county": {
+          "jurisdiction": "Randolph",
+          "kind": "county",
+          "layerUrl": "https://gis.randolphcountync.gov/arcgis/rest/services/PW/PW_ParcelMap/MapServer/31",
+          "layerName": "Zoning Districts",
+          "codeField": "ZONE_CODE",
+          "verifiedAt": "2026-07-31",
+          "sample": {
+            "lng": -79.8060119,
+            "lat": 35.710264,
+            "code": "R7.5",
+            "description": null
+          }
+        }
+      },
+      "Lenoir": {
+        "county": null,
+        "countyCheckedAt": "2026-07-31"
+      },
+      "Wilson": {
+        "county": null,
+        "countyCheckedAt": "2026-07-31"
+      },
+      "Nash": {
+        "county": null,
+        "countyCheckedAt": "2026-07-31"
+      },
+      "Chowan": {
+        "county": null,
+        "countyCheckedAt": "2026-07-31"
+      },
+      "Forsyth": {
+        "county": {
+          "jurisdiction": "Forsyth",
+          "kind": "county",
+          "layerUrl": "https://maps.co.forsyth.nc.us/arcgis/rest/services/Planning_Inspection/Planning_Inspection/MapServer/1",
+          "layerName": "Zoning",
+          "codeField": "ZONING_DISTRICT",
+          "verifiedAt": "2026-07-31",
+          "sample": {
+            "lng": -80.2563901,
+            "lat": 36.1305648,
+            "code": "GB",
+            "description": null
+          }
+        }
+      },
+      "Cherokee": {
+        "county": null,
+        "countyCheckedAt": "2026-07-31"
+      },
+      "Hyde": {
+        "county": null,
+        "countyCheckedAt": "2026-07-31"
+      },
+      "Alleghany": {
+        "county": null,
+        "countyCheckedAt": "2026-07-31"
+      },
+      "Pitt": {
+        "county": null,
+        "countyCheckedAt": "2026-07-31"
+      },
+      "Carteret": {
+        "county": null,
+        "countyCheckedAt": "2026-07-31"
+      },
+      "Buncombe": {
+        "county": {
+          "jurisdiction": "Buncombe",
+          "kind": "county",
+          "layerUrl": "https://gis.buncombecounty.org/arcgis/rest/services/opendata/FeatureServer/5",
+          "layerName": "Buncombe County Zoning",
+          "codeField": "ZoningCode",
+          "verifiedAt": "2026-07-31",
+          "sample": {
+            "lng": -82.5301266,
+            "lat": 35.6111714,
+            "code": "R-1",
+            "description": null
+          }
+        }
+      },
+      "Chatham": {
+        "county": {
+          "jurisdiction": "Chatham",
+          "kind": "county",
+          "layerUrl": "https://gisservices.chathamcountync.gov/opendataagol/rest/services/LandUsePlanning/Chatham_CountyZoning/MapServer/0",
+          "layerName": "County Zoning",
+          "codeField": "ZoningClassification",
+          "verifiedAt": "2026-07-31",
+          "sample": {
+            "lng": -79.2554864,
+            "lat": 35.7026436,
+            "code": "R-1",
+            "description": null
+          }
+        }
+      },
+      "Rockingham": {
+        "county": null,
+        "countyCheckedAt": "2026-07-31"
+      },
+      "Perquimans": {
+        "county": null,
+        "countyCheckedAt": "2026-07-31"
+      },
+      "Brunswick": {
+        "county": {
+          "jurisdiction": "Brunswick",
+          "kind": "county",
+          "layerUrl": "https://bcgis.brunswickcountync.gov/arcgis/rest/services/Layers/Zoning/MapServer/0",
+          "layerName": "Zoning",
+          "codeField": "ZCODE",
+          "verifiedAt": "2026-07-31",
+          "sample": {
+            "lng": -78.2274927,
+            "lat": 34.0388171,
+            "code": "CO-CLD",
+            "description": null
+          }
+        }
+      }
+    },
+    "SC": {
+      "Cherokee": {
+        "county": null,
+        "countyCheckedAt": "2026-07-31"
+      },
+      "Edgefield": {
+        "county": null,
+        "countyCheckedAt": "2026-07-31"
+      },
+      "Newberry": {
+        "county": null,
+        "countyCheckedAt": "2026-07-31"
+      },
+      "Dillon": {
+        "county": null,
+        "countyCheckedAt": "2026-07-31"
+      },
+      "McCormick": {
+        "county": null,
+        "countyCheckedAt": "2026-07-31"
+      },
+      "Georgetown": {
+        "county": null,
+        "countyCheckedAt": "2026-07-31"
+      },
+      "Fairfield": {
+        "county": null,
+        "countyCheckedAt": "2026-07-31"
+      },
+      "Saluda": {
+        "county": null,
+        "countyCheckedAt": "2026-07-31"
+      },
+      "Greenwood": {
+        "county": null,
+        "countyCheckedAt": "2026-07-31"
+      },
+      "Union": {
+        "county": null,
+        "countyCheckedAt": "2026-07-31"
+      },
+      "Greenville": {
+        "county": null,
+        "countyCheckedAt": "2026-07-31"
+      },
+      "Oconee": {
+        "county": null,
+        "countyCheckedAt": "2026-07-31"
+      },
+      "Darlington": {
+        "county": null,
+        "countyCheckedAt": "2026-07-31"
+      },
+      "Aiken": {
+        "county": null,
+        "countyCheckedAt": "2026-07-31"
+      },
+      "Beaufort": {
+        "county": null,
+        "countyCheckedAt": "2026-07-31"
+      },
+      "Laurens": {
+        "county": null,
+        "countyCheckedAt": "2026-07-31"
+      },
+      "Allendale": {
+        "county": null,
+        "countyCheckedAt": "2026-07-31"
+      },
+      "Marlboro": {
+        "county": null,
+        "countyCheckedAt": "2026-07-31"
+      },
+      "Anderson": {
+        "county": null,
+        "countyCheckedAt": "2026-07-31"
+      },
+      "Bamberg": {
+        "county": null,
+        "countyCheckedAt": "2026-07-31"
+      },
+      "Abbeville": {
+        "county": null,
+        "countyCheckedAt": "2026-07-31"
+      },
+      "Jasper": {
+        "county": {
+          "jurisdiction": "Jasper",
+          "kind": "county",
+          "layerUrl": "https://gis.jaspercountysc.gov/server/rest/services/Zoning/MapServer/0",
+          "layerName": "Zoning",
+          "codeField": "FinalZon",
+          "verifiedAt": "2026-07-31",
+          "sample": {
+            "lng": -81.0220258,
+            "lat": 32.4202994,
+            "code": "RP",
+            "description": null
+          }
+        }
+      },
+      "Barnwell": {
+        "county": {
+          "jurisdiction": "Barnwell",
+          "kind": "county",
+          "layerUrl": "https://services8.arcgis.com/qqnlHdXochyJPfSY/arcgis/rest/services/Zoning_2017/FeatureServer/0",
+          "layerName": "Zoning_2017",
+          "codeField": "Zoning_Dis",
+          "verifiedAt": "2026-07-31",
+          "sample": {
+            "lng": -81.4351274,
+            "lat": 33.2660408,
+            "code": "RUD",
+            "description": null
+          }
+        }
+      },
+      "Spartanburg": {
+        "county": null,
+        "countyCheckedAt": "2026-07-31"
+      },
+      "Berkeley": {
+        "county": null,
+        "countyCheckedAt": "2026-07-31"
+      },
+      "Colleton": {
+        "county": null,
+        "countyCheckedAt": "2026-07-31"
+      },
+      "Hampton": {
+        "county": null,
+        "countyCheckedAt": "2026-07-31"
+      },
+      "Pickens": {
+        "county": null,
+        "countyCheckedAt": "2026-07-31"
+      },
+      "Marion": {
+        "county": null,
+        "countyCheckedAt": "2026-07-31"
+      },
+      "Horry": {
+        "county": null,
+        "countyCheckedAt": "2026-07-31"
+      },
+      "Kershaw": {
+        "county": {
+          "jurisdiction": "Kershaw",
+          "kind": "county",
+          "layerUrl": "https://services6.arcgis.com/kyYrMHheB5jkAnFA/arcgis/rest/services/Kershaw_County_Zoning/FeatureServer/15",
+          "layerName": "Zoning_Kershaw",
+          "codeField": "ZONING",
+          "verifiedAt": "2026-07-31",
+          "sample": {
+            "lng": -80.590366,
+            "lat": 34.3386951,
+            "code": "RD-1",
+            "description": null
+          }
+        }
+      },
+      "Lee": {
+        "county": null,
+        "countyCheckedAt": "2026-07-31"
+      },
+      "Dorchester": {
+        "county": null,
+        "countyCheckedAt": "2026-07-31"
+      },
+      "Lancaster": {
+        "county": null,
+        "countyCheckedAt": "2026-07-31"
+      },
+      "Chesterfield": {
+        "county": null,
+        "countyCheckedAt": "2026-07-31"
+      },
+      "Charleston": {
+        "county": null,
+        "countyCheckedAt": "2026-07-31"
+      },
+      "Williamsburg": {
+        "county": null,
+        "countyCheckedAt": "2026-07-31"
+      },
+      "Sumter": {
+        "county": {
+          "jurisdiction": "Sumter",
+          "kind": "county",
+          "layerUrl": "https://gis.sumter-sc.com/server/rest/services/Planning/Zoning/MapServer/0",
+          "layerName": "Zoning",
+          "codeField": "ZONECLASS",
+          "verifiedAt": "2026-07-31",
+          "sample": {
+            "lng": -80.3823818,
+            "lat": 33.9161706,
+            "code": "GC",
+            "description": "General Commercial"
+          }
+        }
+      },
+      "Orangeburg": {
+        "county": null,
+        "countyCheckedAt": "2026-07-31"
+      },
+      "Richland": {
+        "county": null,
+        "countyCheckedAt": "2026-07-31"
+      },
+      "Calhoun": {
+        "county": {
+          "jurisdiction": "Calhoun",
+          "kind": "county",
+          "layerUrl": "https://services5.arcgis.com/B3Zo1xqTw8CidOoF/arcgis/rest/services/Zoning/FeatureServer/0",
+          "layerName": "Zoning",
+          "codeField": "ZONING",
+          "verifiedAt": "2026-07-31",
+          "sample": {
+            "lng": -80.7801067,
+            "lat": 33.6748571,
+            "code": "TOWN",
+            "description": "Consult Municipality"
+          }
+        }
+      },
+      "Clarendon": {
+        "county": null,
+        "countyCheckedAt": "2026-07-31"
+      },
+      "York": {
+        "county": null,
+        "countyCheckedAt": "2026-07-31"
+      },
+      "Florence": {
+        "county": null,
+        "countyCheckedAt": "2026-07-31"
+      },
+      "Chester": {
+        "county": null,
+        "countyCheckedAt": "2026-07-31"
+      },
+      "Lexington": {
+        "county": null,
+        "countyCheckedAt": "2026-07-31"
+      }
+    }
+  }
+}
