@@ -18,6 +18,7 @@ import {
   compClassificationSpecificity,
   compCoverageTypesForAllowedTypes,
   compSearchFamiliesForAllowedTypes,
+  ALL_COMP_SEARCH_FAMILIES,
   getRollingCompDateWindow,
   isFinalCompTypeAllowed,
   isSearchCompatibleCompType,
@@ -6464,7 +6465,19 @@ async function fetchRealtyApiSoldComps(
   const RADIUS_MILES = radiusMiles;
   onStageChange?.("Scanning RealtyAPI sold records (Realtor, Redfin, Zillow)...");
 
-  const searchFamilies = compSearchFamiliesForAllowedTypes(allowedTypes);
+  // Unknown zoning must WIDEN the comp search, not collapse it.
+  //
+  // searchFamilies gates which SEARCHES run, not just which results are kept.
+  // With no allowed types the family list came back empty, leaving a single
+  // Zillow job instead of up to eleven — so the candidates were never fetched,
+  // and no downstream "retain every comp" rule can recover them. That made the
+  // comp count silently depend on zoning resolving, which it must not: comps
+  // are their own evidence.
+  const zoningFamilies = compSearchFamiliesForAllowedTypes(allowedTypes);
+  const searchFamilies = zoningFamilies.length ? zoningFamilies : ALL_COMP_SEARCH_FAMILIES;
+  if (!zoningFamilies.length) {
+    console.log('Comp search: zoning produced no allowed types — searching all families instead of narrowing.');
+  }
   const jobs: { platform: 'realtor' | 'redfin' | 'zillow'; family?: CompSearchFamily }[] = [
     ...searchFamilies.map((family) => ({ platform: 'realtor' as const, family })),
     ...searchFamilies.map((family) => ({ platform: 'redfin' as const, family })),

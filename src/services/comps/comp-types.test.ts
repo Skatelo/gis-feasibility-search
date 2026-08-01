@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  ALL_COMP_SEARCH_FAMILIES,
   classifyCompBuildingType,
   compAddressIdentity,
   compAddressMatchKey,
@@ -127,4 +128,26 @@ test('generic multifamily permission accepts source-backed 2-4 unit subtypes', (
   assert.equal(isFinalCompTypeAllowed('duplex', ['multi-family']), true);
   assert.equal(isFinalCompTypeAllowed('triplex', ['duplex']), false);
   assert.equal(isFinalCompTypeAllowed('unknown', ['single-family']), false);
+});
+
+test('empty allowed types must not be able to narrow the comp search', () => {
+  // searchFamilies gates which SEARCHES run. When zoning resolves to nothing,
+  // this returns [] — and the caller MUST widen to every family rather than
+  // pass an empty list, which left a single Zillow job instead of eleven and
+  // silently made the comp count depend on zoning succeeding.
+  assert.deepEqual(compSearchFamiliesForAllowedTypes([]), [], 'still empty at this layer');
+  assert.deepEqual(ALL_COMP_SEARCH_FAMILIES, ['single-family', 'mobile', 'townhouse', 'condo', 'multi-family']);
+  // The widened set must be a superset of anything zoning can produce.
+  for (const types of [['single-family'], ['multi-family'], ['mobile', 'condo'], ['multi-structure']] as never[]) {
+    for (const family of compSearchFamiliesForAllowedTypes(types)) {
+      assert.ok(ALL_COMP_SEARCH_FAMILIES.includes(family), `${family} missing from the widened set`);
+    }
+  }
+});
+
+test('a known residential district still searches only what it allows', () => {
+  // The widening is a fallback, not a bypass: real zoning must still focus the
+  // search, or every run pays for families the district forbids.
+  assert.deepEqual(compSearchFamiliesForAllowedTypes(['single-family']), ['single-family']);
+  assert.deepEqual(compSearchFamiliesForAllowedTypes(['multi-structure']), ['single-family', 'multi-family']);
 });
