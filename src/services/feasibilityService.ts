@@ -6,6 +6,7 @@ import { scCountySource } from '../data/scCountySources';
 import { normalizeSourcedRange } from '../data/sourcedEstimate';
 import { listingZoningEvidenceTier, listingUrlMatchesAddress, zoningListingProvider } from '../data/zoningEvidence';
 import { fetchRealEstateZoning, type RealEstateZoningResult } from './realEstateApiProperty';
+import { buildDeepSeekTransport } from './deepseekTransport';
 import { cleanCode, splitZoningLabel } from './zoning/normalization/zoning-normalizer';
 import { fetchGeminiZoningSearchEvidence, normalizeFullAddressForZoning, type OfficialZoningEvidenceHint } from './geminiZoningSearch';
 import { isFullCarolinaPostalAddress, resolveFullCarolinaPostalAddress } from './carolinaAddress';
@@ -67,6 +68,9 @@ export interface UserKeys {
   /** RealtyAPI.io key for Realtor, Redfin, and Zillow comp records. */
   realtyApi?: string;
   deepSeek?: string;
+  /** OpenRouter key — reaches DeepSeek V4 Flash 0731 for the fusion model when
+   *  no direct DeepSeek key is configured. */
+  openRouter?: string;
   rentCast?: string;
   /** Enformion Go API credentials — skip tracing (phones, emails, relatives) for
    *  individuals & businesses from the GIS owner data. */
@@ -5855,6 +5859,39 @@ function getDeepSeekKey(): string {
     : (globalThis as any).process?.env?.VITE_DEEPSEEK_API_KEY;
   return getUserKeys().deepSeek || (envVar as string | undefined) || "";
 }
+
+/** OpenRouter key — the second route to DeepSeek for the fusion model.
+ *  Accepts either env spelling, since only VITE_-prefixed vars reach the client
+ *  and it is easy to set the wrong one. */
+export function getOpenRouterKey(): string {
+  const env = (typeof import.meta !== 'undefined' && import.meta.env)
+    ? import.meta.env
+    : ((globalThis as any).process?.env ?? {});
+  const envVar = env.VITE_OPENROUTER_API_KEY || env.OPENROUTER_API_KEY;
+  return (getUserKeys().openRouter || (envVar as string | undefined) || '').trim();
+}
+
+// The routing and body translation live in ./deepseekTransport so they can be
+// unit-tested without this module's dependencies. Re-exported for callers.
+export {
+  OPENROUTER_DEEPSEEK_MODEL,
+  toOpenRouterBody,
+  type DeepSeekTransport,
+} from './deepseekTransport';
+
+/** The active route to DeepSeek, or null when neither key is configured. */
+export function deepSeekTransport() {
+  return buildDeepSeekTransport(
+    getDeepSeekKey(),
+    getOpenRouterKey(),
+    typeof window !== 'undefined' ? window.location.origin : undefined,
+  );
+}
+
+/** True when the fusion model can run — either DeepSeek route is enough. */
+export function fusionModelConfigured(): boolean {
+  return !!deepSeekTransport();
+}
 /** Mapbox public access token for the satellite base map (Account Settings or env). */
 export function getMapboxToken(): string {
   const envVar = (typeof import.meta !== 'undefined' && import.meta.env)
@@ -8557,10 +8594,9 @@ function expandedUtilityQueries(input: {
 }
 
 export async function fetchUtilitiesEstimate(reportData: SiteFeasibilityData): Promise<UtilitiesEstimate | null> {
-  const deepSeekKey = getDeepSeekKey();
   const geminiKey = getBackgroundGeminiKey();
-  if (!deepSeekKey && !geminiKey) {
-    throw new Error('Add your Gemini or DeepSeek API key in Account Settings to run the utilities & fees lookup on this device.');
+  if (!fusionModelConfigured() && !geminiKey) {
+    throw new Error('Add your Gemini, DeepSeek, or OpenRouter API key in Account Settings to run the utilities & fees lookup on this device.');
   }
   const county = reportData.countyName || '';
   const state = countyState(county);
@@ -8651,7 +8687,7 @@ Current source-backed partial result:
 ${JSON.stringify(o).slice(0, 12000)}
 Still missing: ${missing.join(', ')}.
 Preserve supported values and fill the missing fields from this pass's new sources. Return one complete replacement JSON object.`;
-    const text = deepSeekKey
+    const text = fusionModelConfigured()
       ? await groundedDeepSeekText(roundPrompt, utilitiesSystem, queries, diag)
       : await groundedGeminiText(geminiKey, roundPrompt, utilitiesSystem, 90000, queries, diag);
     researchRounds++;
@@ -9016,29 +9052,44 @@ async function streamGeminiSSE(url: string, body: any, onToken?: (chunk: string)
 /** One DeepSeek chat-completions POST with ONE retry on transient errors. Returns
  *  the parsed response message object (so callers can read content OR tool_calls),
  *  or null on missing key / repeated failure / timeout. */
-async function postDeepSeekOnce(body: string, key: string): Promise<any | null> {
+async function postDeepSeekOnce(body: string, key?: string): Promise<any | null> {
+  // `key` is accepted for call sites that already resolved one, but the
+  // transport decides the route: native DeepSeek when its key exists, otherwise
+  // OpenRouter serving the same model family.
+  const transport = deepSeekTransport();
+  if (!transport && !key) return null;
+  const route = transport ?? {
+    provider: 'deepseek' as const,
+    url: 'https://api.deepseek.com/chat/completions',
+    key: key as string,
+    extraHeaders: {} as Record<string, string>,
+    rewriteBody: (b: string) => b,
+  };
+  const requestBody = route.rewriteBody(body);
+  const label = route.provider === 'openrouter' ? 'DeepSeek via OpenRouter' : 'DeepSeek';
+
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
-      const res = await fetchWithTimeout('https://api.deepseek.com/chat/completions', 90000, {
+      const res = await fetchWithTimeout(route.url, 90000, {
         method: 'POST',
         cache: 'no-store',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${key}` },
-        body,
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${route.key}`, ...route.extraHeaders },
+        body: requestBody,
       });
       if (res.ok) {
         const data = await res.json();
         return data?.choices?.[0]?.message ?? null;
       }
       if ((res.status === 429 || res.status >= 500) && attempt === 0) {
-        console.warn(`DeepSeek HTTP ${res.status} — retrying once...`);
+        console.warn(`${label} HTTP ${res.status} — retrying once...`);
         await new Promise((r) => setTimeout(r, 1500));
         continue;
       }
-      console.warn(`DeepSeek HTTP ${res.status} — fusion will use Gemini only.`);
+      console.warn(`${label} HTTP ${res.status} — fusion will use Gemini only.`);
       return null;
     } catch (e) {
-      if (attempt === 0) { console.warn('DeepSeek request error — retrying once:', e); await new Promise((r) => setTimeout(r, 1000)); continue; }
-      console.warn('DeepSeek request failed — fusion will use Gemini only:', e);
+      if (attempt === 0) { console.warn(`${label} request error — retrying once:`, e); await new Promise((r) => setTimeout(r, 1000)); continue; }
+      console.warn(`${label} request failed — fusion will use Gemini only:`, e);
       return null;
     }
   }
@@ -9052,7 +9103,7 @@ async function postDeepSeekOnce(body: string, key: string): Promise<any | null> 
  *  outcome so callers can tell a search miss from a synthesis miss. */
 async function groundedDeepSeekText(prompt: string, systemText: string, searchQueries: string[], diag?: { perplexityAttempted: boolean; perplexitySources: number; perplexityUrls?: string[] }): Promise<string | null> {
   const key = getDeepSeekKey();
-  if (!key) return null;
+  if (!fusionModelConfigured()) return null;
   let effectivePrompt = prompt;
   if (searchQueries && searchQueries.length && liveWebResearchConfigured()) {
     if (diag) diag.perplexityAttempted = true;
@@ -9135,7 +9186,8 @@ async function webSearchViaGemini(query: string, geminiKey: string): Promise<str
  *  facts mid-draft instead of guessing — bounded by hard round/search caps. Returns
  *  null on missing key / repeated failure / timeout (the fusion then uses Gemini only). */
 async function fetchDeepSeekDraft(systemContent: string, userContent: string, key: string, geminiKey?: string, opts?: { maxRounds?: number; maxSearches?: number }): Promise<string | null> {
-  if (!key) return null;
+  // Either DeepSeek route is enough; the transport picks native or OpenRouter.
+  if (!key && !fusionModelConfigured()) return null;
 
   // On phones/tablets, skip DeepSeek's own web searches entirely: they add extra
   // grounded fetches that compete with the report's Gemini calls over a cellular
@@ -9555,7 +9607,7 @@ ${reportData.comps && reportData.comps.length > 0
   // calls (a separate grounded draft + a grounded judge, plus DeepSeek) and the
   // longer total time over a cellular link is the main cause of "Load failed" —
   // so mobile uses ONE grounded Gemini stream with the full fallback chain.
-  if (deepSeekKey && lastUser && !isMobileDevice()) {
+  if (fusionModelConfigured() && lastUser && !isMobileDevice()) {
     const [gDraft, dDraft] = await Promise.all([
       geminiGenerateText(`${GEN_BASE}:generateContent?key=${apiKey}`, baseBody).catch((e) => { console.warn('Gemini draft failed:', e); return ''; }),
       fetchDeepSeekDraft(`${systemPrompt}\n\n# PROVIDED DATA PACKET (verified evidence)\n${reportContext}\n\n# YOUR ROLE\nProvide a substantive but CONCISE expert analytical draft — your key findings, figures, and risks per topic (zoning, REZONING/UPZONING upside, SUBDIVISION/lot-split potential, HOA/restrictions, buildability, flood, utilities, MARKET SATURATION & absorption by product type — single-family/townhome/condo/multifamily inventory, DOM, months-of-supply — the INTEREST-RATE environment and its demand effect, LOCAL itemized construction cost anchored to the Construction Cost Reference Model, and DEVELOPER ECONOMICS: ARV, residual land value = ARV − construction − site adders (trees/slope/well+septic) − 20%-of-ARV developer profit, cross-checked with the ~20%-of-ARV lot rule). A lead analyst synthesizes the final structured report from your input, so you need not format every numbered section.`, lastUser, deepSeekKey, apiKey).catch((e) => { console.warn('DeepSeek draft failed:', e); return null; }),

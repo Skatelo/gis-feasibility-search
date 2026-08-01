@@ -62,6 +62,8 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
   const [showRealtyKey, setShowRealtyKey] = useState(false);
   const [deepSeekKey, setDeepSeekKey] = useState('');
   const [showDeepSeekKey, setShowDeepSeekKey] = useState(false);
+  const [openRouterKey, setOpenRouterKey] = useState('');
+  const [showOpenRouterKey, setShowOpenRouterKey] = useState(false);
   const [rentCastKey, setRentCastKey] = useState('');
   const [showRentCastKey, setShowRentCastKey] = useState(false);
   const [showGoogleKey, setShowGoogleKey] = useState(false);
@@ -97,6 +99,7 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
       setRealEstateApiKey(activeUser.keys?.realEstateApi || '');
       setRealtyApiKey(activeUser.keys?.realtyApi || '');
       setDeepSeekKey(activeUser.keys?.deepSeek || '');
+      setOpenRouterKey(activeUser.keys?.openRouter || '');
       setRentCastKey(activeUser.keys?.rentCast || '');
       const prefs = getCompPrefs();
       setCompRadiusPref(prefs.radiusMiles);
@@ -157,6 +160,7 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
       realEstateApi: realEstateApiKey.trim(),
       realtyApi: realtyApiKey.trim(),
       deepSeek: deepSeekKey.trim(),
+      openRouter: openRouterKey.trim(),
       rentCast: rentCastKey.trim()
     };
 
@@ -621,6 +625,32 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
                 </button>
               </div>
               <p className="field-help">Optional. Enables the Gemini + DeepSeek fusion report; zoning now uses Gemini 3.6 Flash. Get a key at platform.deepseek.com.</p>
+            </div>
+
+            {/* OpenRouter API Key — second route to DeepSeek for the fusion report */}
+            <div className="settings-field-group">
+              <div className="field-label-row">
+                <label htmlFor="openRouterKey">OpenRouter API Key (fusion fallback)</label>
+                <span className="badge optional">Optional</span>
+              </div>
+              <div className="field-input-container">
+                <Key className="input-icon" size={16} />
+                <input
+                  id="openRouterKey"
+                  type={showOpenRouterKey ? "text" : "password"}
+                  placeholder="sk-or-..."
+                  value={openRouterKey}
+                  onChange={(e) => setOpenRouterKey(e.target.value)}
+                />
+                <button
+                  type="button"
+                  className="field-toggle-btn"
+                  onClick={() => setShowOpenRouterKey(!showOpenRouterKey)}
+                >
+                  {showOpenRouterKey ? <EyeOff size={16} /> : <Eye size={16} />}
+                </button>
+              </div>
+              <p className="field-help">Optional. Runs the fusion report on DeepSeek V4 Flash 0731 via OpenRouter when no DeepSeek key is set. A direct DeepSeek key takes priority. Get a key at openrouter.ai/keys.</p>
             </div>
 
             {/* RentCast API Key (enriches buyer/deal sale prices) */}
