@@ -12,10 +12,11 @@ import {
   scanForCode,
   scanForDescription,
   splitZoningLabel,
+  isJurisdictionPlaceholder,
   codeScore,
 } from './value-shape';
 
-export { cleanCode, splitZoningLabel, extractZoningCode, isBareZoningCode } from './value-shape';
+export { cleanCode, splitZoningLabel, extractZoningCode, isBareZoningCode, isJurisdictionPlaceholder } from './value-shape';
 
 export interface NormalizedZoning {
   found: boolean;
@@ -62,7 +63,10 @@ export function normalizeZoningAttributes(
   // publish "RA - Residential Agricultural" or "Residential Agricultural (RA)"
   // in the code column; split those so the name moves to the description.
   const split = splitZoningLabel(rawCode);
-  const code = split.code ?? rawCode;
+  const candidate = split.code ?? rawCode;
+  // A county layer may store the MUNICIPALITY here instead of a district, which
+  // is code-shaped and would otherwise be shown as the zoning code.
+  const code = candidate && isJurisdictionPlaceholder(candidate, attrs) ? null : candidate;
 
   // Description: the mapped field when it reads like prose, otherwise the best
   // description-shaped zoning value that isn't the code.

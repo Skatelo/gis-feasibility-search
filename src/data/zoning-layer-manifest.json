@@ -1,5 +1,5 @@
 {
-  "generated": "2026-07-31T21:55:11.299Z",
+  "generated": "2026-08-01T02:51:49.362Z",
   "counties": {
     "NC": {
       "Guilford": {
@@ -91,17 +91,18 @@
         "county": {
           "jurisdiction": "Iredell",
           "kind": "county",
-          "layerUrl": "https://maps.iredellcountync.gov/server/rest/services/Data/Zoning/MapServer/0",
-          "layerName": "Iredell Zoning",
+          "layerUrl": "https://maps.iredellcountync.gov/server/rest/services/Data/Zoning/MapServer/1",
+          "layerName": "Statesville Zoning",
           "codeField": "ZONING",
-          "verifiedAt": "2026-07-31",
+          "verifiedAt": "2026-08-01",
           "sample": {
             "lng": -80.8734535,
             "lat": 35.8068002,
-            "code": "STVL",
+            "code": "B-4",
             "description": null
           }
-        }
+        },
+        "countyCheckedAt": "2026-08-01"
       },
       "Cabarrus": {
         "county": {

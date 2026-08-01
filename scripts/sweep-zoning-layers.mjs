@@ -115,6 +115,36 @@ function acceptableCode(value) {
   return isBareCode(s);
 }
 
+/** Is `code` an abbreviation of `name`? "STVL" of "STATESVILLE", "TROUTM" of
+ *  "TROUTMAN" — i.e. its letters appear in order within the name. */
+function isAbbreviationOf(code, name) {
+  const c = String(code || '').toUpperCase().replace(/[^A-Z]/g, '');
+  const n = String(name || '').toUpperCase().replace(/[^A-Z]/g, '');
+  if (c.length < 4 || !n) return false; // 2-3 char codes are usually real districts
+  let i = 0;
+  for (const ch of n) if (ch === c[i]) i += 1;
+  return i === c.length;
+}
+
+/**
+ * A county layer often stores the MUNICIPALITY as the zoning value for parcels
+ * inside a town — Iredell's county layer says ZONING "STVL" with JURISDIC
+ * "STATESVILLE", meaning "this parcel is Statesville's, see their layer", where
+ * the real district is CB. That placeholder is bare-code shaped, so it passes
+ * every other check and would be displayed as the zoning code.
+ */
+function isJurisdictionPlaceholder(code, attributes) {
+  for (const [key, raw] of Object.entries(attributes || {})) {
+    // True jurisdiction columns only — not ZDISPLAY, which holds the zoning
+    // code's display form on municipal layers.
+    if (!/jurisdic|jurisdiction|municipal(?:ity)?|^city$|_city$|^town$|_town$|place_?name/i.test(key)) continue;
+    if (isAbbreviationOf(code, raw)) return true;
+    // Also reject when the value simply IS the jurisdiction name.
+    if (String(code).toUpperCase().trim() === String(raw ?? '').toUpperCase().trim()) return true;
+  }
+  return false;
+}
+
 /**
  * Some layers put the district NAME in the column that looks like the code and
  * the code somewhere else — Charlotte's `zoneclass` holds "UPTOWN MIXED USE"
@@ -152,7 +182,7 @@ async function districtAtPoint(layer, lng, lat) {
     const attributes = feature?.attributes;
     const corrected = bestCodeField(attributes, field);
     const hit = zoningFromAttributes(attributes, corrected);
-    if (hit?.code && acceptableCode(hit.code)) {
+    if (hit?.code && acceptableCode(hit.code) && !isJurisdictionPlaceholder(hit.code, attributes)) {
       return { code: hit.code, description: hit.description || null, field: corrected || null };
     }
   }
