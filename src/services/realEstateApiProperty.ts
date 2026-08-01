@@ -527,6 +527,53 @@ export async function fetchRealEstateOwnerDetails(
   return parseRealEstateOwnerDetails(lookup.result.payload, normalizedAddress);
 }
 
+/** Public-record zoning for a parcel, used only when official GIS has none. */
+export interface RealEstateZoningResult {
+  code: string;
+  matchedAddress: string;
+  landUse?: string;
+  /**
+   * Always 'base-district'. Measured against official GIS this source returns
+   * the right base district but drops conditional/frontage suffixes: it gave
+   * DX-40 where Raleigh publishes DX-40-SH, and LI where the layer says LI-C.
+   * Callers must not present it as the full adopted district.
+   */
+  precision: 'base-district';
+  sourceUrl: string;
+  fetchedAt: string;
+}
+
+/**
+ * Zoning from RealEstateAPI public records — the fallback for counties with no
+ * queryable official zoning layer.
+ *
+ * Coverage is county-level and all-or-nothing: measured with PropertySearch
+ * count queries, Cabarrus is 100%, Iredell 99.8%, Wake 94.7% and Union 98.8%
+ * for LAND parcels, while Gaston, Sampson, Robeson and Bladen are 0%. So this
+ * either answers well or not at all — it never half-answers. On the counties
+ * that do carry it, land parcels matched official GIS exactly 16/16 in testing.
+ *
+ * Runs only after official GIS comes back empty, because each call costs a
+ * credit.
+ */
+export async function fetchRealEstateZoning(
+  address: string,
+  apiKey = '',
+  fetcher: FetchLike = fetch,
+): Promise<RealEstateZoningResult | null> {
+  const details = await fetchRealEstateOwnerDetails(address, apiKey, fetcher);
+  const code = textValue(details.zoning);
+  if (!code) return null;
+  return {
+    code,
+    matchedAddress: details.matchedAddress,
+    landUse: details.landUse,
+    precision: 'base-district',
+    sourceUrl: REAL_ESTATE_API_PROPERTY_DETAIL_DOCS,
+    fetchedAt: details.fetchedAt,
+  };
+}
+
 /** Map a PropertyDetail payload onto the owner/land fields the report shows. */
 export function parseRealEstateOwnerDetails(
   payload: unknown,
