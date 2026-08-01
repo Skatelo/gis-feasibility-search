@@ -5860,14 +5860,23 @@ function getDeepSeekKey(): string {
   return getUserKeys().deepSeek || (envVar as string | undefined) || "";
 }
 
-/** OpenRouter key — the second route to DeepSeek for the fusion model.
- *  Accepts either env spelling, since only VITE_-prefixed vars reach the client
- *  and it is easy to set the wrong one. */
+/**
+ * OpenRouter key — the second route to DeepSeek for the fusion model.
+ *
+ * Accepts the several spellings people reasonably reach for. Note that Vite only
+ * exposes VITE_-prefixed vars to browser code, and this call runs client-side,
+ * so an unprefixed name will be missing at runtime no matter which alias we
+ * check — the Settings field is the reliable place to put it.
+ */
 export function getOpenRouterKey(): string {
-  const env = (typeof import.meta !== 'undefined' && import.meta.env)
-    ? import.meta.env
+  const env: Record<string, unknown> = (typeof import.meta !== 'undefined' && import.meta.env)
+    ? import.meta.env as unknown as Record<string, unknown>
     : ((globalThis as any).process?.env ?? {});
-  const envVar = env.VITE_OPENROUTER_API_KEY || env.OPENROUTER_API_KEY;
+  const envVar = env.VITE_OPENROUTER_API_KEY
+    || env.VITE_OPENROUTERAPI_KEY
+    || env.VITE_OPENROUTER_KEY
+    || env.OPENROUTER_API_KEY
+    || env.OPENROUTERAPI_KEY;
   return (getUserKeys().openRouter || (envVar as string | undefined) || '').trim();
 }
 
