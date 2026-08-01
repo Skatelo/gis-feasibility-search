@@ -5,6 +5,7 @@ import { fetchOfficialScParcel, mergeOfficialScParcelRecords, officialRecordFrom
 import { scCountySource } from '../data/scCountySources';
 import { normalizeSourcedRange } from '../data/sourcedEstimate';
 import { listingZoningEvidenceTier, listingUrlMatchesAddress, zoningListingProvider } from '../data/zoningEvidence';
+import { fetchRealEstateZoning, type RealEstateZoningResult } from './realEstateApiProperty';
 import { cleanCode, splitZoningLabel } from './zoning/normalization/zoning-normalizer';
 import { fetchGeminiZoningSearchEvidence, normalizeFullAddressForZoning, type OfficialZoningEvidenceHint } from './geminiZoningSearch';
 import { isFullCarolinaPostalAddress, resolveFullCarolinaPostalAddress } from './carolinaAddress';
@@ -3343,11 +3344,36 @@ export async function executeLandAnalysis(
     let officialZoning = await withZoningTimeout(officialLookup, 8_000, null);
     const officialCodeHint = officialZoning ? cleanCode(officialZoning.code) : null;
     const officialSourceHint = officialZoning?.sourceUrl || getZoningServices(countyName)[0]?.url;
+
+    // PUBLIC-RECORD FALLBACK. Only when official GIS found nothing — the county
+    // layer is the system of record and always wins. Each call costs a credit,
+    // so this never runs when GIS already answered.
+    //
+    // Measured against official GIS on land parcels: 16/16 exact in Wake and
+    // Cabarrus. Coverage is all-or-nothing by county (Cabarrus 100%, Union
+    // 98.8%, Gaston 0%), so it either answers or it doesn't.
+    let publicRecordZoning: RealEstateZoningResult | null = null;
+    if (!officialCodeHint && getRealEstateApiKey()) {
+      publicRecordZoning = await withZoningTimeout(
+        fetchRealEstateZoning(fullZoningAddress, getRealEstateApiKey()).catch(() => null),
+        10_000,
+        null,
+      );
+    }
+
+    // Gemini is grounded on whichever source we have. The public-record value is
+    // labelled as unverified so the model checks it against the ordinance rather
+    // than treating it as settled.
     const officialEvidence: OfficialZoningEvidenceHint | undefined = officialCodeHint ? {
       code: officialCodeHint,
       description: officialZoning?.description,
       sourceUrl: officialSourceHint,
       jurisdiction: officialZoning?.jurisdiction || zoningPlace || undefined,
+    } : publicRecordZoning ? {
+      code: publicRecordZoning.code,
+      description: 'Public-record base district (unverified — confirm against the adopted ordinance)',
+      sourceUrl: publicRecordZoning.sourceUrl,
+      jurisdiction: zoningPlace || undefined,
     } : undefined;
 
     onStageChange?.("Verifying official GIS and researching standards with Gemini 3.6 Flash...");
@@ -3421,6 +3447,19 @@ export async function executeLandAnalysis(
       } else if (!officialResult && !researched.standards) {
         applyResearchStandards(researched);
       }
+    } else if (!officialResult && publicRecordZoning) {
+      // Last resort: neither official GIS nor Gemini resolved the parcel, but
+      // public records carry a district. Shown as the BASE district and flagged
+      // for review — this source drops conditional/frontage suffixes (DX-40 for
+      // DX-40-SH), so it is a starting point, not a verified district.
+      zoningCode = publicRecordZoning.code;
+      zoningDescription = 'Base district from public records — not verified against the adopted ordinance. Conditional or frontage suffixes may be missing.';
+      zoningSource = 'web';
+      zoningSourceUrl = publicRecordZoning.sourceUrl;
+      zoningSources = [publicRecordZoning.sourceUrl];
+      zoningVerificationStatus = 'review-required';
+      zoningStandardsStatus = 'unavailable';
+      zoningSetbacksStatus = 'unavailable';
     } else if (!officialResult) {
       zoningCode = '';
       zoningDescription = researchError

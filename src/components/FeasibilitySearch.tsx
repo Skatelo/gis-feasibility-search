@@ -4968,7 +4968,9 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                                   : data.zoningVerificationStatus === 'planning-designation'
                                     ? 'OFFICIAL PLANNING DESIGNATION'
                                     : data.zoningVerificationStatus === 'review-required'
-                                      ? 'GEMINI RESULT NEEDS REVIEW'
+                                      ? (/realestateapi/i.test(String(data.zoningSourceUrl || ''))
+                                        ? 'PUBLIC RECORD: BASE DISTRICT — VERIFY'
+                                        : 'GEMINI RESULT NEEDS REVIEW')
                                       : data.zoningVerificationStatus === 'conflict'
                                         ? 'CONFLICT: GIS RETAINED'
                                         : 'NOT VERIFIED'}
