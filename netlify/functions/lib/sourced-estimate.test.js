@@ -55,6 +55,17 @@ test('estimate policy requires sources and excludes alternative utility scenario
   assert.match(serviceSource, /input\.round >= UTILITIES_RESEARCH_PASSES - 1 \? 20 : 16/);
   assert.match(serviceSource, /expandedUtilityQueries/);
   assert.match(serviceSource, /utilityResearchMissing/);
+  // Only the cost lines that APPLY are demanded: a city-water/city-sewer parcel
+  // has no well or septic cost, so requiring them made the missing-set
+  // un-emptiable, burned every research pass on fees that do not exist, and
+  // reported "partial" on parcels that were complete.
+  assert.match(serviceSource, /function applicableUtilitySpecs/);
+  assert.match(serviceSource, /if \(spec\.prefix === 'well'\) return water !== 'available'/);
+  assert.match(serviceSource, /if \(spec\.prefix === 'septic'\) return sewer !== 'available'/);
+  // Broad fee-schedule queries pull in neighbouring counties' official
+  // schedules, which carry real dollar figures and pass every other check.
+  assert.match(serviceSource, /function foreignCountySource/);
+  assert.match(serviceSource, /utilityResearchMissing\(o, evidencePool, baseCounty\)/);
   assert.match(serviceSource, /coverageStatus: missing\.length === 0 \? 'complete' : 'partial'/);
   assert.match(serviceSource, /const responseGroups = responses\.map\(flattenPplxResults\)/);
   assert.match(serviceSource, /maxScrapeTargets: Math\.min\(12, Math\.max\(8, searchQueries\.length\)\)/);
