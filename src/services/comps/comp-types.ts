@@ -1,6 +1,14 @@
 import type { CompDateWindow, ResidentialCompType } from '../../types/feasibility';
 
 export type CompSearchFamily = 'single-family' | 'townhouse' | 'condo' | 'multi-family' | 'mobile';
+
+/**
+ * Every search family, in run order. Used when zoning yields no allowed types:
+ * an unknown district must WIDEN the comp search, never narrow it.
+ */
+export const ALL_COMP_SEARCH_FAMILIES: CompSearchFamily[] = [
+  'single-family', 'mobile', 'townhouse', 'condo', 'multi-family',
+];
 export type ClassifiedCompType = ResidentialCompType | 'land' | 'unknown';
 
 export interface CompTypeClassification {
