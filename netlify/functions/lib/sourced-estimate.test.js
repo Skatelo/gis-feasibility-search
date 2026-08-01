@@ -42,7 +42,17 @@ test('estimate policy requires sources and excludes alternative utility scenario
   assert.match(serviceSource, /estimated: true, sourceUrl: sourceUrls\[0\], sourceUrls/);
   assert.match(serviceSource, /filter\(\(line\) => !line\.scenario\)/);
   assert.match(serviceSource, /pricingStatus: rates \? 'estimated' : 'unavailable'/);
-  assert.match(serviceSource, /for \(let round = 0; round < 3; round\+\+\)/);
+  // The research loop is bounded by a named constant rather than a literal, so
+  // the pass ceiling can be tuned in one place. Assert the shape and the value
+  // separately: the loop must be driven by the constant, and the constant must
+  // stay small — each pass costs two searches plus a scrape sweep that can
+  // escalate to paid extraction and Chromium+vision reads.
+  assert.match(serviceSource, /for \(let round = 0; round < UTILITIES_RESEARCH_PASSES; round\+\+\)/);
+  const passes = Number(/UTILITIES_RESEARCH_PASSES = (\d+)/.exec(serviceSource)?.[1]);
+  assert.ok(passes >= 1 && passes <= 3, `UTILITIES_RESEARCH_PASSES should stay between 1 and 3, got ${passes}`);
+  // The final pass widens the query net, and that must key off the constant —
+  // a hardcoded round index becomes dead code whenever the ceiling changes.
+  assert.match(serviceSource, /input\.round >= UTILITIES_RESEARCH_PASSES - 1 \? 20 : 16/);
   assert.match(serviceSource, /expandedUtilityQueries/);
   assert.match(serviceSource, /utilityResearchMissing/);
   assert.match(serviceSource, /coverageStatus: missing\.length === 0 \? 'complete' : 'partial'/);
