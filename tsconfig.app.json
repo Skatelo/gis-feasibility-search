@@ -9,6 +9,8 @@
 
     /* Bundler mode */
     "moduleResolution": "bundler",
+    /* The verified zoning-layer manifest ships as JSON and is imported directly. */
+    "resolveJsonModule": true,
     "allowImportingTsExtensions": true,
     "verbatimModuleSyntax": true,
     "moduleDetection": "force",

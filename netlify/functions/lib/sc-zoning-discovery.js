@@ -10,7 +10,7 @@ const EXCLUDED_KEY_RE = /desc|name|jur|muni|city|county|town|date|case|owner|are
 const DESCRIPTION_KEY_RE = /desc|definition|decode|long.?name|zone_?gen|udo_?legend|^(?:code|giscode|zoning|zone|district)_?name$|^name$/i;
 const PLACEHOLDER_RE = /^(?:city|county|etj|none|n\/?a|mun\.?|muni|municipal|municipality|split|unknown|not applicable)$/i;
 
-const isBaseZoningName = (value) => BASE_ZONING_RE.test(String(value || '').replace(/[_-]+/g, ' '));
+export const isBaseZoningName = (value) => BASE_ZONING_RE.test(String(value || '').replace(/[_-]+/g, ' '));
 const isExcludedLayerName = (value) => EXCLUDED_LAYER_RE.test(String(value || '').replace(/[_-]+/g, ' '));
 
 function dedupe(values) {
@@ -162,7 +162,7 @@ async function incorporatedPlaceAtPoint(lng, lat, fetcher) {
   return String(attributes.BASENAME || attributes.NAME || '').replace(/\s+(city|town|village)$/i, '').trim() || null;
 }
 
-function compactName(value) {
+export function compactName(value) {
   return String(value || '').toLowerCase().replace(/[^a-z0-9]/g, '');
 }
 
@@ -315,7 +315,7 @@ export async function discoverOfficialZoningServices(entry, fetcher = fetch) {
   }).slice(0, 40);
 }
 
-function candidateField(fields) {
+export function candidateField(fields) {
   const available = Array.isArray(fields) ? fields : [];
   const scored = available
     .map((field) => ({ name: String(field?.name || ''), alias: String(field?.alias || '') }))
@@ -346,7 +346,7 @@ function combinedZoningLabel(value) {
   return code ? { code, description: match[2].trim() } : null;
 }
 
-function zoningFromAttributes(attributes, preferredField) {
+export function zoningFromAttributes(attributes, preferredField) {
   if (!attributes || typeof attributes !== 'object') return null;
   const keys = Object.keys(attributes);
   const codeKeys = dedupe([
@@ -375,7 +375,7 @@ function zoningFromAttributes(attributes, preferredField) {
   return { code: resolvedCode, description };
 }
 
-async function serviceLayers(serviceUrl, fetcher) {
+export async function serviceLayers(serviceUrl, fetcher) {
   const metadata = await request(`${serviceUrl}?f=json`, fetcher);
   if (!metadata || metadata.error) return [];
   if (/\/(?:MapServer|FeatureServer)\/\d+$/i.test(serviceUrl)) {
@@ -394,7 +394,7 @@ async function serviceLayers(serviceUrl, fetcher) {
   }))).filter(Boolean);
 }
 
-async function queryLayer(layer, lng, lat, fetcher) {
+export async function queryLayer(layer, lng, lat, fetcher) {
   const field = candidateField(layer.fields);
   if (!field) return null;
   const params = new URLSearchParams({

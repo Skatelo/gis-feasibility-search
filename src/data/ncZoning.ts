@@ -439,6 +439,69 @@ export function hasCountyZoning(name: string): boolean {
   return !!(c && !c.use_state_fallback && c.zoning_mapserver_url);
 }
 
+// ---------------------------------------------------------------------------
+// SWEPT LAYERS
+// Only 16 of 100 NC counties had a hand-written zoning service, so the other 84
+// fell through to web research. `npm run zoning:sweep` discovers each county's
+// official layer and VERIFIES it with a live point query before recording it in
+// zoning-layer-manifest.json; entries that could not be verified are absent, so
+// this only ever adds real, working services.
+// ---------------------------------------------------------------------------
+
+interface SweptLayer {
+  jurisdiction: string;
+  layerUrl: string;
+  layerName: string;
+  codeField: string | null;
+  sample?: { code?: string };
+}
+interface SweptCounty { county?: SweptLayer | null; municipalities?: SweptLayer[] }
+
+// Injected at startup rather than imported, so this module stays dependency-free
+// — the registry verifier evaluates it standalone, and a relative import (JSON
+// or otherwise) cannot resolve in that context.
+let SWEPT: Record<string, Record<string, SweptCounty>> = {};
+
+/** Install the verified sweep results. Called once from the app entry. */
+export function registerSweptZoningLayers(manifest: unknown): void {
+  const counties = (manifest as { counties?: Record<string, Record<string, SweptCounty>> })?.counties;
+  SWEPT = counties && typeof counties === 'object' ? counties : {};
+}
+
+/** "https://host/.../MapServer/2" -> a service + sublayer the query path can use. */
+function sweptLayerToService(layer: SweptLayer): ZoningService | null {
+  const match = /^(.*\/(?:MapServer|FeatureServer))\/(\d+)$/i.exec(layer.layerUrl || '');
+  if (!match) return null;
+  return {
+    url: match[1],
+    layers: `show:${match[2]}`,
+    // The sweep records the field it actually READ a code from, so the runtime
+    // query targets the same one rather than re-guessing from field names.
+    query_field: layer.codeField || null,
+    renderable: /\/MapServer$/i.test(match[1]),
+  };
+}
+
+function sweptZoningServices(name: string): ZoningService[] {
+  const base = countyBaseNameForSweep(name);
+  if (!base) return [];
+  for (const state of Object.keys(SWEPT)) {
+    const entry = SWEPT[state]?.[base];
+    if (!entry) continue;
+    const layers = [entry.county, ...(entry.municipalities ?? [])].filter(Boolean) as SweptLayer[];
+    return layers.map(sweptLayerToService).filter((s): s is ZoningService => !!s);
+  }
+  return [];
+}
+
+/** Manifest keys are the plain county name ("Gaston"), so strip the suffixes
+ *  callers pass in ("Gaston County", "Gaston County, NC"). */
+function countyBaseNameForSweep(name: string): string {
+  const cleaned = String(name || '').split(',')[0].replace(/\s+county$/i, '').trim();
+  if (!cleaned) return '';
+  return cleaned.replace(/\b\w/g, (ch) => ch.toUpperCase()).replace(/\s+/g, ' ');
+}
+
 /**
  * Returns every zoning service for a county (primary + any extras for
  * multi-jurisdiction counties), in stacking order, each with its optional
@@ -446,7 +509,8 @@ export function hasCountyZoning(name: string): boolean {
  */
 export function getZoningServices(name: string): ZoningService[] {
   const c = getZoningConfig(name);
-  if (!c || c.use_state_fallback || !c.zoning_mapserver_url) return [];
+  const swept = sweptZoningServices(name);
+  if (!c || c.use_state_fallback || !c.zoning_mapserver_url) return swept;
   return [
     {
       url: c.zoning_mapserver_url,
@@ -455,6 +519,9 @@ export function getZoningServices(name: string): ZoningService[] {
       renderable: c.zoning_renderable !== false,
     },
     ...(c.extra_zoning ?? []).filter((s) => !!s.url),
+    // Swept layers go LAST: a hand-checked config entry outranks a discovered
+    // one, but a county with no config entry still gets an official service.
+    ...swept,
   ];
 }
 
