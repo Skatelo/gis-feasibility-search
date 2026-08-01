@@ -8542,6 +8542,16 @@ function utilityResearchMissing(record: Record<string, any>, evidenceUrls: strin
   return missing;
 }
 
+/**
+ * How many research passes the utilities lookup may make.
+ *
+ * Each pass costs a Perplexity AND a Monid search, plus a scrape sweep that can
+ * escalate to paid Monid extraction and Chromium+vision pixel reads — by far the
+ * most expensive path in the app. The loop exits early once nothing is missing,
+ * so this is a ceiling for hard addresses, not a fixed cost.
+ */
+export const UTILITIES_RESEARCH_PASSES = 2;
+
 function expandedUtilityQueries(input: {
   missing: string[];
   address: string;
@@ -8599,7 +8609,9 @@ function expandedUtilityQueries(input: {
     `${input.county} County ${input.state} development fees permits utilities`,
     `${input.stateFull} regional well septic permit cost ranges current`,
   );
-  return [...new Set(queries)].slice(0, input.round >= 2 ? 20 : 16);
+  // Widen the net on the FINAL pass — it is the last chance to find the fee.
+  // Previously hardcoded to round >= 2, which becomes dead code at two passes.
+  return [...new Set(queries)].slice(0, input.round >= UTILITIES_RESEARCH_PASSES - 1 ? 20 : 16);
 }
 
 export async function fetchUtilitiesEstimate(reportData: SiteFeasibilityData): Promise<UtilitiesEstimate | null> {
@@ -8672,7 +8684,13 @@ PRICING EVIDENCE RULES:
   const evidencePool: string[] = [];
   let missing = utilityResearchMissing(o, evidencePool);
   let researchRounds = 0;
-  for (let round = 0; round < 3; round++) {
+  // Two passes, not three. This is the most expensive path in the app: every
+  // pass runs Perplexity AND Monid search, then a scrape sweep that can escalate
+  // through paid Monid extraction and Chromium+vision pixel reads. The loop
+  // already breaks as soon as nothing is missing, so the third pass only ever
+  // ran on the hardest addresses — the ones where a further pass was least
+  // likely to find the fee anyway. Raise UTILITIES_RESEARCH_PASSES to restore it.
+  for (let round = 0; round < UTILITIES_RESEARCH_PASSES; round++) {
     const queries = round === 0
       ? baseQueries
       : expandedUtilityQueries({
@@ -8691,7 +8709,7 @@ PRICING EVIDENCE RULES:
       ? prompt
       : `${prompt}
 
-COMPLETION PASS ${round + 1} OF 3
+COMPLETION PASS ${round + 1} OF ${UTILITIES_RESEARCH_PASSES}
 Current source-backed partial result:
 ${JSON.stringify(o).slice(0, 12000)}
 Still missing: ${missing.join(', ')}.
