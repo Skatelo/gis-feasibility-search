@@ -110,6 +110,42 @@ export function extractZoningCode(value: unknown): string | null {
   return splitZoningLabel(value).code;
 }
 
+/** Are `code`'s letters an in-order abbreviation of `name`? "STVL" of
+ *  "STATESVILLE", "TROUTM" of "TROUTMAN". */
+function isAbbreviationOf(code: string, name: unknown): boolean {
+  const c = String(code || '').toUpperCase().replace(/[^A-Z]/g, '');
+  const n = String(name ?? '').toUpperCase().replace(/[^A-Z]/g, '');
+  // 2–3 letter codes ("RA", "UC", "PUD") are usually real districts, so the
+  // abbreviation rule only applies to longer values.
+  if (c.length < 4 || !n) return false;
+  let i = 0;
+  for (const ch of n) if (ch === c[i]) i += 1;
+  return i === c.length;
+}
+
+/**
+ * A COUNTY zoning layer commonly stores the MUNICIPALITY in its zoning column
+ * for parcels inside a town, meaning "this one belongs to the city — see their
+ * layer". Iredell's county layer carries ZONING "STVL" with JURISDIC
+ * "STATESVILLE" where the adopted district is actually CB.
+ *
+ * Such a value is short, uppercase and code-shaped, so every other check passes
+ * and it would render in the zoning-code slot. Detecting it against the
+ * feature's own jurisdiction field keeps this general rather than a list of
+ * town abbreviations.
+ */
+export function isJurisdictionPlaceholder(code: string, attributes: Record<string, unknown>): boolean {
+  for (const [key, raw] of Object.entries(attributes || {})) {
+    // Only true jurisdiction columns. NOT fields like ZDISPLAY, which holds the
+    // zoning code's display form on municipal layers — matching against it
+    // would reject the genuine district.
+    if (!/jurisdic|jurisdiction|municipal(?:ity)?|^city$|_city$|^town$|_town$|place_?name/i.test(key)) continue;
+    if (isAbbreviationOf(code, raw)) return true;
+    if (code.toUpperCase().trim() === String(raw ?? '').toUpperCase().trim()) return true;
+  }
+  return false;
+}
+
 export function codeScore(code: string): number {
   return (/-/.test(code) ? 1 : 0) + (/\d/.test(code) ? 1 : 0) + (code === code.toUpperCase() ? 1 : 0) - (/[-_/]$/.test(code) ? 2 : 0);
 }

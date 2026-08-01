@@ -74,6 +74,35 @@ test('splitZoningLabel returns the CODE, never the district name', () => {
   assert.equal(extractZoningCode(null), null);
 });
 
+test('a municipality placeholder is not treated as a zoning code', () => {
+  // Iredell's COUNTY layer stores ZONING "STVL" with JURISDIC "STATESVILLE" for
+  // parcels inside the city — it means "see Statesville's layer", where the real
+  // district is CB. It is short, uppercase and code-shaped, so nothing else
+  // catches it and it would render as the zoning code.
+  const out = normalizeZoningAttributes(
+    { ZONING: 'STVL', JURISDIC: 'STATESVILLE', ZDISPLAY: 'STATESVILLE' },
+    { zoningCodeField: 'ZONING', zoningDescriptionField: null, jurisdictionField: 'JURISDIC', overlayField: null, detectionConfidence: 0.9, reasons: [] },
+  );
+  assert.equal(out.code, null, 'the town abbreviation must not become the code');
+
+  // The municipal layer's real district still resolves normally.
+  const real = normalizeZoningAttributes(
+    { ZONING: 'CB', JURISDIC: 'STATESVILLE', ZDISPLAY: 'CB' },
+    { zoningCodeField: 'ZONING', zoningDescriptionField: null, jurisdictionField: 'JURISDIC', overlayField: null, detectionConfidence: 0.9, reasons: [] },
+  );
+  assert.equal(real.code, 'CB');
+});
+
+test('short real districts survive the placeholder rule', () => {
+  // "RA" is 2 letters, so the abbreviation rule must not fire even though its
+  // letters happen to appear inside the jurisdiction name.
+  const out = normalizeZoningAttributes(
+    { ZONING: 'RA', JURISDIC: 'HARMONY' },
+    { zoningCodeField: 'ZONING', zoningDescriptionField: null, jurisdictionField: 'JURISDIC', overlayField: null, detectionConfidence: 0.9, reasons: [] },
+  );
+  assert.equal(out.code, 'RA');
+});
+
 test('a code column holding the district name still yields the code', () => {
   const out = normalizeZoningAttributes(
     { ZONING: 'RA - Residential Agricultural', ZONE_DESC: '' },
