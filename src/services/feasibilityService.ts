@@ -8529,15 +8529,71 @@ function groundedUtilitySource(value: unknown, evidenceUrls: string[]): boolean 
   });
 }
 
-function utilityResearchMissing(record: Record<string, any>, evidenceUrls: string[]): string[] {
+/**
+ * Which cost lines actually APPLY to this parcel.
+ *
+ * A parcel on city water and city sewer will never have a well or septic cost,
+ * and a well+septic parcel will never have a tap fee. Demanding all seven
+ * regardless meant the missing-set could never empty: the loop burned every
+ * research pass chasing fees that do not exist, the later passes spent their
+ * query budget on them instead of the real gaps, and the card reported
+ * "partial" on parcels that were in fact complete.
+ *
+ * Applicability is only asserted once availability is KNOWN — while it is still
+ * unknown every line stays in play.
+ */
+function applicableUtilitySpecs(record: Record<string, any>): typeof UTILITY_COST_SPECS[number][] {
+  const status = (value: unknown) => String(value || '').trim().toLowerCase();
+  const water = status(record.publicWater);
+  const sewer = status(record.publicSewer);
+  return UTILITY_COST_SPECS.filter((spec) => {
+    if (spec.prefix === 'waterTap') return water !== 'not-available';
+    if (spec.prefix === 'well') return water !== 'available';
+    if (spec.prefix === 'sewerTap') return sewer !== 'not-available';
+    if (spec.prefix === 'septic') return sewer !== 'available';
+    return true; // permit fees apply either way
+  });
+}
+
+/**
+ * Reject a source that plainly belongs to a DIFFERENT Carolina county.
+ *
+ * Broad fee-schedule queries pull in neighbouring jurisdictions — searching
+ * Cabarrus permit fees surfaced Alamance, Craven and Johnston County schedules.
+ * Every one is an official .gov page carrying real dollar figures, so nothing
+ * else rejects them, and quoting Alamance's permit fee for a Cabarrus parcel is
+ * exactly the kind of confident-but-wrong number this section must not produce.
+ *
+ * Only fires when the host names some OTHER county outright; anything
+ * ambiguous is left alone.
+ */
+function foreignCountySource(url: string, subjectCounty: string): boolean {
+  const subject = countyBaseName(subjectCounty).toLowerCase().replace(/[^a-z]/g, '');
+  if (!subject) return false;
+  let host = '';
+  try { host = new URL(url).hostname.toLowerCase().replace(/[^a-z]/g, ''); } catch { return false; }
+  if (!host || host.includes(subject)) return false;
+  // "<name>county" is the giveaway in a government hostname.
+  const named = /([a-z]+)county/.exec(host)?.[1];
+  return !!named && named !== subject && named.length >= 4;
+}
+
+function utilityResearchMissing(record: Record<string, any>, evidenceUrls: string[], subjectCounty = ''): string[] {
   const missing: string[] = [];
+  const ok = (value: unknown) => {
+    if (!groundedUtilitySource(value, evidenceUrls)) return false;
+    if (!subjectCounty) return true;
+    const list = (Array.isArray(value) ? value : [value]).map((v) => String(v || ''));
+    // At least one cited page must not be another county's schedule.
+    return list.some((u) => /^https?:\/\//i.test(u) && !foreignCountySource(u, subjectCounty));
+  };
   const statusKnown = (value: unknown) => /^(available|not-available)$/i.test(String(value || '').trim());
-  if (!statusKnown(record.publicWater) || !groundedUtilitySource(record.publicWaterSource, evidenceUrls)) missing.push('public water availability');
-  if (!statusKnown(record.publicSewer) || !groundedUtilitySource(record.publicSewerSource, evidenceUrls)) missing.push('public sewer availability');
-  for (const spec of UTILITY_COST_SPECS) {
+  if (!statusKnown(record.publicWater) || !ok(record.publicWaterSource)) missing.push('public water availability');
+  if (!statusKnown(record.publicSewer) || !ok(record.publicSewerSource)) missing.push('public sewer availability');
+  for (const spec of applicableUtilitySpecs(record)) {
     const range = normalizeSourcedRange(record[spec.exact], record[`${spec.prefix}Low`], record[`${spec.prefix}High`]);
     const sources = record[`${spec.prefix}Sources`] || record[`${spec.prefix}Source`];
-    if (!range || !groundedUtilitySource(sources, evidenceUrls)) missing.push(spec.id);
+    if (!range || !ok(sources)) missing.push(spec.id);
   }
   return missing;
 }
@@ -8550,7 +8606,7 @@ function utilityResearchMissing(record: Record<string, any>, evidenceUrls: strin
  * most expensive path in the app. The loop exits early once nothing is missing,
  * so this is a ceiling for hard addresses, not a fixed cost.
  */
-export const UTILITIES_RESEARCH_PASSES = 2;
+export const UTILITIES_RESEARCH_PASSES = 3;
 
 function expandedUtilityQueries(input: {
   missing: string[];
@@ -8589,18 +8645,39 @@ function expandedUtilityQueries(input: {
       queries.push(
         `septic installation perc test price ${input.county} County ${input.state}`,
         `conventional septic system cost ${input.stateFull} current contractor pricing`,
+        // Septic permits are issued by the county Environmental Health office,
+        // which publishes the improvement-permit and soil-evaluation fees.
+        `${input.county} County ${input.state} environmental health septic improvement permit fee`,
       );
     } else if (field === 'zoning permit fee') {
-      queries.push(`${input.jurisdiction} zoning permit fee schedule residential filetype:pdf`);
+      // Measured: zoning and driveway permits are the fields that most often
+      // stay empty. Jurisdictions rarely publish a document literally called a
+      // "zoning permit fee schedule" — the number lives in a planning,
+      // development-services, or UDO fee schedule, so name those too.
+      queries.push(
+        `${input.jurisdiction} zoning permit fee schedule residential filetype:pdf`,
+        `${input.jurisdiction} planning department development services fee schedule filetype:pdf`,
+        `${input.jurisdiction} unified development ordinance adopted fee schedule zoning compliance permit`,
+        `${input.county} County ${input.state} planning zoning permit fee schedule`,
+      );
     } else if (field === 'driveway permit fee') {
+      // Whether it is a state encroachment permit or a local one depends on who
+      // maintains the road, and the parcel's road is usually unknown here — so
+      // ask for both rather than betting on one.
       queries.push(
         `${input.jurisdiction} residential driveway permit fee`,
         `${input.state === 'SC' ? 'SCDOT' : 'NCDOT'} driveway encroachment permit fee residential`,
+        `${input.county} County ${input.state} driveway access permit fee residential`,
       );
     } else if (field === 'building and trade permit cost') {
+      // In both Carolinas the COUNTY inspections department commonly issues
+      // building and trade permits even inside municipal limits, so a
+      // city-only query misses the schedule that actually applies.
       queries.push(
         `${input.jurisdiction} building inspections fee schedule new single family filetype:pdf`,
         `${input.county} County ${input.state} electrical plumbing mechanical permit fee schedule`,
+        `${input.county} County ${input.state} inspections department building permit fee schedule filetype:pdf`,
+        `${input.jurisdiction} building permit fee calculation per square foot valuation new residential`,
       );
     }
   }
@@ -8682,7 +8759,7 @@ PRICING EVIDENCE RULES:
 
   let o: Record<string, any> = {};
   const evidencePool: string[] = [];
-  let missing = utilityResearchMissing(o, evidencePool);
+  let missing = utilityResearchMissing(o, evidencePool, baseCounty);
   let researchRounds = 0;
   // Two passes, not three. This is the most expensive path in the app: every
   // pass runs Perplexity AND Monid search, then a scrape sweep that can escalate
@@ -8720,7 +8797,7 @@ Preserve supported values and fill the missing fields from this pass's new sourc
     researchRounds++;
     for (const url of diag.perplexityUrls || []) if (!evidencePool.includes(url)) evidencePool.push(url);
     o = mergeResearchJson(o, parseResearchJson(text));
-    missing = utilityResearchMissing(o, evidencePool);
+    missing = utilityResearchMissing(o, evidencePool, baseCounty);
     if (missing.length === 0) break;
   }
   const norm = (v: any): 'available' | 'not-available' | 'unknown' => {
