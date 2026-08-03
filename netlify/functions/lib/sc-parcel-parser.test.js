@@ -14,8 +14,10 @@ import { __testables as parcelDiscoveryTestables } from './sc-parcel-discovery.j
 import {
   parseBerkeleyDeedHtml,
   parseBerkeleyPropertyHtml,
+  parseCharlestonPropertyHtml,
   parseGreenvillePropertyHtml,
   parseGreenwoodPropertyHtml,
+  parseSpatialestPropertyText,
   queryOfficialCountyProperty,
 } from './sc-county-property.js';
 import { scOwnerPortalFor, scOwnerVerificationUrl } from './sc-owner-portals.js';
@@ -88,6 +90,53 @@ test('qPublic parcel reports retain an explicitly published zoning code', () => 
   assert.equal(record.zoning, 'RC');
 });
 
+test('current qPublic Owner Information reports retain the assessor owner and do not invent zero values', () => {
+  const record = parseQpublicParcelText(`
+    Parcel ID
+    104-12-19-001
+    Location Address
+    1930 UNIVERSITY PKWY
+    Owner Information
+    AIKEN COUNTY
+    1930 UNIVERSITY PKWY
+    AIKEN, SC 29801
+    General Information
+    Property Valuation History
+    2026
+    Market Land Value $126,000
+    Market Improvement Value $5,356,120
+    Total Market/Exemption Value $5,482,120
+  `, 'https://qpublic.schneidercorp.com/report');
+
+  assert.equal(record.status, 'verified');
+  assert.equal(record.ownerName, 'AIKEN COUNTY');
+  assert.equal(record.parcelId, '104-12-19-001');
+  assert.equal(record.situsAddress, '1930 UNIVERSITY PKWY');
+  assert.equal(record.mailingAddress, '1930 UNIVERSITY PKWY, AIKEN, SC 29801');
+  assert.equal(record.assessedYear, 2026);
+  assert.equal(record.landValue, 126000);
+  assert.equal(record.improvementValue, 5356120);
+  assert.equal(record.marketValue, 5482120);
+  assert.equal(record.taxAmount, undefined);
+  assert.equal(record.building.livingSqft, undefined);
+});
+
+test('current qPublic singular Owner heading is parsed', () => {
+  const record = parseQpublicParcelText(`
+    Parcel Number
+    4191-07-58-2437
+    Location Address
+    222 MCDANIEL AVE
+    Owner
+    PICKENS COUNTY OF
+    222 MCDANIEL AVE
+    PICKENS SC 29671
+    Property Information
+  `, 'https://qpublic.schneidercorp.com/report');
+  assert.equal(record.ownerName, 'PICKENS COUNTY OF');
+  assert.equal(record.ownerRecordType, 'assessor');
+});
+
 test('blocked assessor pages are not treated as verified data', () => {
   assert.deepEqual(
     parseQpublicParcelText('Attention Required! Sorry, you have been blocked', 'https://qpublic.example'),
@@ -100,6 +149,13 @@ test('Union report URL pads the county suffix without caching a result', () => {
   assert.match(url, /KeyValue=049-00-00-112%20000$/);
   assert.equal(normalizeParcelId('049-00-00-112 000'), '0490000112000');
   assert.notEqual(normalizeParcelId('049-00-00-112'), normalizeParcelId('049-00-00-112 000'));
+});
+
+test('qPublic map shell labels are never mistaken for a parcel report', () => {
+  assert.deepEqual(
+    parseQpublicParcelText('Layers\nParcel Numbers\nOwner Names\nLocation Address Search', 'https://qpublic.example/map'),
+    { status: 'unavailable', sourceUrl: 'https://qpublic.example/map' },
+  );
 });
 
 test('SC assessor identity helpers match address abbreviations and parcel suffixes', () => {
@@ -290,6 +346,127 @@ test('Greenwood property report uses assessor owner, or the latest transfer gran
   const deed = parseGreenwoodPropertyHtml(report(''), 'https://www.greenwoodsc.gov/report');
   assert.equal(deed.ownerName, 'M & RE ASSOCIATES LLC');
   assert.equal(deed.ownerRecordType, 'deed');
+});
+
+const CHARLESTON_PROPERTY_CARD = `<body>
+  <h2>Property Information</h2>
+  <table><tbody>
+    <tr><td rowspan="8"><div><b>Current Owner:</b><br>COUNTY OF CHARLESTON<br>4045 BRIDGE VIEW DR # B217<br>NORTH CHARLESTON SC 29405<br></div></td></tr>
+    <tr><th>Property ID</th><td>4120000020</td></tr>
+    <tr><th>Physical Address</th><td>4045 BRIDGE VIEW DR</td></tr>
+    <tr><th>Property Class</th><td>671 - GOVT-BLDG</td></tr>
+    <tr><th>Plat Acres</th><td>15.9400</td></tr>
+  </tbody></table>
+</body>`;
+
+test('Charleston direct official property card resolves the current owner', async () => {
+  const parsed = parseCharlestonPropertyHtml(
+    CHARLESTON_PROPERTY_CARD,
+    'https://sc-charleston.publicaccessnow.com/RealPropertyRecordSearch/RealPropertyInfo.aspx?p=4120000020&m=',
+  );
+  assert.equal(parsed.ownerName, 'COUNTY OF CHARLESTON');
+  assert.equal(parsed.parcelId, '4120000020');
+  assert.equal(parsed.situsAddress, '4045 BRIDGE VIEW DR');
+  assert.equal(parsed.mailingAddress, '4045 BRIDGE VIEW DR # B217, NORTH CHARLESTON SC 29405');
+  assert.equal(parsed.acres, 15.94);
+
+  const calls = [];
+  const record = await queryOfficialCountyProperty({
+    county: 'Charleston',
+    address: '4045 Bridge View Drive, North Charleston, SC 29405',
+    parcelId: '412-00-00-020',
+    fetcher: async (url) => {
+      calls.push(String(url));
+      return new Response(CHARLESTON_PROPERTY_CARD);
+    },
+  });
+  assert.equal(record.ownerName, 'COUNTY OF CHARLESTON');
+  assert.equal(calls.length, 1);
+  assert.match(calls[0], /RealPropertyInfo\.aspx\?p=4120000020&m=$/);
+});
+
+const RICHLAND_PROPERTY_CARD = `
+Tax Map Number: R18913-01-02
+Owner
+SANDERS MARGARET ETAL
+Mailing Address
+1761 PINCUSHION RD COLUMBIA SC 29209
+Situs Address
+1761 PINCUSHION RD
+Zoning
+RT
+Tax District
+R1
+Assessment Year
+2026
+Market Land Value
+$34,000
+Market Improvement Value
+$98,500
+Total Market Value
+$132,500
+Taxable Value
+$75,000
+Acreage
+0.57
+Heated Square Feet
+1,481
+`;
+
+test('Richland Spatialest report resolves exact owner, parcel, and situs', async () => {
+  const parsed = parseSpatialestPropertyText(RICHLAND_PROPERTY_CARD, 'https://property.spatialest.com/sc/richland#/property/R18913-01-02');
+  assert.equal(parsed.ownerName, 'SANDERS MARGARET ETAL');
+  assert.equal(parsed.parcelId, 'R18913-01-02');
+  assert.equal(parsed.situsAddress, '1761 PINCUSHION RD');
+  assert.equal(parsed.zoning, 'RT');
+  assert.equal(parsed.marketValue, 132500);
+  assert.equal(parsed.building.livingSqft, 1481);
+
+  const browserCalls = [];
+  const record = await queryOfficialCountyProperty({
+    county: 'Richland',
+    address: '1761 Pincushion Road, Columbia, SC 29209',
+    parcelId: 'R18913-01-02',
+    browserFetcher: async (url, options) => {
+      browserCalls.push({ url: String(url), options });
+      return { blocked: false, text: RICHLAND_PROPERTY_CARD, loadedUrl: String(url) };
+    },
+  });
+  assert.equal(record.ownerName, 'SANDERS MARGARET ETAL');
+  assert.equal(browserCalls.length, 1);
+  assert.match(browserCalls[0].url, /#\/property\/R18913-01-02$/);
+  assert.equal(browserCalls[0].options.portalType, 'spatialest');
+});
+
+test('county property adapters reject a report for the wrong address', async () => {
+  const record = await queryOfficialCountyProperty({
+    county: 'Charleston',
+    address: '4100 Bridge View Drive, North Charleston, SC 29405',
+    parcelId: '4120000020',
+    fetcher: async () => new Response(CHARLESTON_PROPERTY_CARD),
+  });
+  assert.equal(record, null);
+});
+
+test('address verification corrects a stale candidate parcel but explicit parcel lookup stays strict', async () => {
+  const fetcher = async () => new Response(CHARLESTON_PROPERTY_CARD);
+  const corrected = await queryOfficialCountyProperty({
+    county: 'Charleston',
+    address: '4045 Bridge View Drive, North Charleston, SC 29405',
+    parcelId: '999-99-99-999',
+    fetcher,
+  });
+  assert.equal(corrected.ownerName, 'COUNTY OF CHARLESTON');
+  assert.equal(corrected.parcelId, '4120000020');
+
+  const strict = await queryOfficialCountyProperty({
+    county: 'Charleston',
+    address: '4045 Bridge View Drive, North Charleston, SC 29405',
+    parcelId: '999-99-99-999',
+    strictParcelId: true,
+    fetcher,
+  });
+  assert.equal(strict, null);
 });
 
 test('SC owner portal registry keeps protected sites manual and exposes free county searches', () => {
@@ -552,6 +729,8 @@ test('SC manifest contains every county and normal searches do not invoke Enform
   assert.match(component, /Skip Trace Owner \(Paid\)/);
 
   const service = await readFile(new URL('../../../src/services/feasibilityService.ts', import.meta.url), 'utf8');
+  const verification = await readFile(new URL('../../../src/services/scParcelVerification.ts', import.meta.url), 'utf8');
+  const ownerFunction = await readFile(new URL('../sc-parcel.js', import.meta.url), 'utf8');
   const analysisStart = service.indexOf('export async function executeLandAnalysis');
   const discoveryCall = service.indexOf('const discovered = await discoverScParcelFeature', analysisStart);
   const statewideLoop = service.indexOf('for (const parcelHost of parcelHosts', analysisStart);
@@ -563,6 +742,9 @@ test('SC manifest contains every county and normal searches do not invoke Enform
   assert.ok(discoveryCall > analysisStart && discoveryCall < statewideLoop);
   assert.match(bboxBlock, /countyParcelLayerFor\(countyName, 'SC'\)/);
   assert.doesNotMatch(bboxBlock, /SCDOT statewide snapshot owner/);
+  assert.match(verification, /strictParcelId: options\.strictParcelId === true/);
+  assert.match(ownerFunction, /preferAddress: !strictParcelId && !!address/);
+  assert.match(ownerFunction, /strictParcelId && usableParcelId/);
 });
 
 test('SC map, zoning, utilities, and clearing estimates require visible provenance', async () => {

@@ -20,11 +20,13 @@ function compact(value) {
 
 function cleanValue(value) {
   const text = compact(value);
-  return text && !/^(?:n\/?a|none|null|not available|unavailable)$/i.test(text) ? text : undefined;
+  return text && !/^(?:-|n\/?a|none|null|not available|unavailable)$/i.test(text) ? text : undefined;
 }
 
 function numberValue(value) {
-  const parsed = Number(String(value ?? '').replace(/[^0-9.-]/g, ''));
+  const raw = String(value ?? '').trim();
+  if (!raw || !/[0-9]/.test(raw)) return undefined;
+  const parsed = Number(raw.replace(/[^0-9.-]/g, ''));
   return Number.isFinite(parsed) ? parsed : undefined;
 }
 
@@ -70,18 +72,37 @@ function rowValue(rows, labels) {
   return undefined;
 }
 
-function recordWithIdentity(record, { address, parcelId }) {
+function valueAfterLabel(text, patterns) {
+  const lines = String(text || '').split(/\r?\n/).map(compact).filter(Boolean);
+  for (let index = 0; index < lines.length; index += 1) {
+    for (const pattern of patterns) {
+      const match = lines[index].match(pattern);
+      if (!match) continue;
+      const inlineValue = cleanValue(match[1]);
+      if (inlineValue) return inlineValue;
+      for (let next = index + 1; next < Math.min(lines.length, index + 4); next += 1) {
+        const nextValue = cleanValue(lines[next]);
+        if (nextValue) return nextValue;
+      }
+    }
+  }
+  return undefined;
+}
+
+function recordWithIdentity(record, { address, parcelId, strictParcelId = false }) {
   if (!record?.ownerName || !record?.parcelId) return null;
   const expectedParcel = cleanValue(parcelId);
   const expectedAddress = cleanValue(address);
-  if (expectedParcel && !scParcelIdsMatch(record.parcelId, expectedParcel)) return null;
+  const parcelMatches = expectedParcel && scParcelIdsMatch(record.parcelId, expectedParcel);
+  if (strictParcelId && expectedParcel && !parcelMatches) return null;
 
   const publishedAddresses = (record._situsAddresses || [record.situsAddress]).filter(Boolean);
   const matchingAddress = expectedAddress
     ? publishedAddresses.find((candidate) => situsAddressesMatch(candidate, expectedAddress))
     : undefined;
   if (expectedAddress && publishedAddresses.length && !matchingAddress) return null;
-  if (!expectedParcel && expectedAddress && !matchingAddress) return null;
+  if (expectedAddress && !publishedAddresses.length && !parcelMatches) return null;
+  if (!expectedAddress && expectedParcel && !parcelMatches) return null;
 
   const { _deedUrl, _situsAddresses, ...publicRecord } = record;
   return {
@@ -276,9 +297,109 @@ export function parseGreenwoodPropertyHtml(html, sourceUrl) {
   };
 }
 
-async function defaultBrowserFetcher(url) {
+export function parseCharlestonPropertyHtml(html, sourceUrl) {
+  const $ = load(String(html || ''));
+  const flat = compact($.root().text());
+  if (!/\b(?:Real Property|Property Information|Property ID)\b/i.test(flat)) return null;
+
+  const rows = directRows($);
+  const parcelId = rowValue(rows, ['Property ID', 'Parcel ID', 'TMS Number']);
+  const situsAddress = rowValue(rows, ['Physical Address', 'Property Address', 'Situs Address']);
+  const ownerCell = $('th,td').toArray().find((cell) => /^Current Owner\s*:/i.test(compact($(cell).text())));
+  const ownerLines = ownerCell
+    ? htmlLines($(ownerCell).html()).map((line) => compact(line.replace(/^Current Owner\s*:\s*/i, ''))).filter(Boolean)
+    : [];
+  const ownerName = cleanValue(ownerLines[0]) || rowValue(rows, ['Current Owner', 'Owner']);
+  const mailingAddress = ownerLines.length > 1
+    ? cleanValue(ownerLines.slice(1).join(', '))
+    : rowValue(rows, ['Mailing Address', 'Owner Address']);
+  const taxYear = numberValue(rowValue(rows, ['Tax Year']));
+
+  return {
+    status: ownerName ? 'verified' : 'unavailable',
+    sourceUrl,
+    sourceName: 'Charleston County assessor property card',
+    asOf: taxYear ? String(taxYear) : undefined,
+    parcelId,
+    normalizedParcelId: normalizeParcelId(parcelId),
+    situsAddress,
+    _situsAddresses: situsAddress ? [situsAddress] : [],
+    ownerName,
+    ownerRecordType: ownerName ? 'assessor' : undefined,
+    mailingAddress,
+    acres: numberValue(rowValue(rows, ['Plat Acres', 'Acreage', 'Acres'])),
+    landValue: numberValue(rowValue(rows, ['Land Value', 'Market Land Value'])),
+    improvementValue: numberValue(rowValue(rows, ['Improvement Value', 'Building Value'])),
+    marketValue: numberValue(rowValue(rows, ['Market Value', 'Total Market Value'])),
+    taxableValue: numberValue(rowValue(rows, ['Taxable Value'])),
+    taxCodeArea: rowValue(rows, ['Tax District', 'District']),
+    taxYear,
+    building: {
+      livingSqft: numberValue(rowValue(rows, ['Heated Square Feet', 'Living Area'])),
+      buildingSqft: numberValue(rowValue(rows, ['Building Square Feet', 'Gross Building Area'])),
+      buildingCount: numberValue(rowValue(rows, ['Building Count', 'Number of Buildings'])),
+    },
+  };
+}
+
+export function parseSpatialestPropertyText(content, sourceUrl) {
+  const text = String(content || '').replace(/\r/g, '');
+  if (!/Tax Map Number|TMS\s*#|Parcel (?:ID|Number)/i.test(text)) return null;
+
+  const parcelId = valueAfterLabel(text, [
+    /^Tax Map Number\s*:?\s*(.*)$/i,
+    /^TMS\s*#\s*:?\s*(.*)$/i,
+    /^Parcel (?:ID|Number)\s*:?\s*(.*)$/i,
+  ]);
+  const ownerName = valueAfterLabel(text, [/^Owner(?: Name)?\s*:?\s*(.*)$/i]);
+  const situsAddress = valueAfterLabel(text, [
+    /^Situs Address\s*:?\s*(.*)$/i,
+    /^Property Address\s*:?\s*(.*)$/i,
+    /^Location Address\s*:?\s*(.*)$/i,
+  ]);
+  const mailingAddress = valueAfterLabel(text, [/^Mailing Address\s*:?\s*(.*)$/i]);
+  const assessmentYear = numberValue(valueAfterLabel(text, [
+    /^Assessment Year\s*:?\s*(.*)$/i,
+    /^Tax Year\s*:?\s*(.*)$/i,
+  ]));
+
+  return {
+    status: ownerName ? 'verified' : 'unavailable',
+    sourceUrl,
+    sourceName: 'Richland County assessor property card',
+    asOf: valueAfterLabel(text, [/^Last (?:Updated|Update|Data Upload)\s*:?\s*(.*)$/i]) || (assessmentYear ? String(assessmentYear) : undefined),
+    parcelId,
+    normalizedParcelId: normalizeParcelId(parcelId),
+    situsAddress,
+    _situsAddresses: situsAddress ? [situsAddress] : [],
+    ownerName,
+    ownerRecordType: ownerName ? 'assessor' : undefined,
+    mailingAddress,
+    acres: numberValue(valueAfterLabel(text, [/^(?:Acreage|Acres)\s*:?\s*(.*)$/i])),
+    assessedYear: assessmentYear,
+    assessedPropertyValue: numberValue(valueAfterLabel(text, [/^(?:Taxable|Assessed Property) Value\s*:?\s*(.*)$/i])),
+    totalAssessedValue: numberValue(valueAfterLabel(text, [/^(?:Total )?Assessed Value\s*:?\s*(.*)$/i])),
+    landValue: numberValue(valueAfterLabel(text, [/^(?:Market )?Land Value\s*:?\s*(.*)$/i])),
+    improvementValue: numberValue(valueAfterLabel(text, [/^(?:Market )?Improvement Value\s*:?\s*(.*)$/i])),
+    marketValue: numberValue(valueAfterLabel(text, [/^(?:Total )?Market Value\s*:?\s*(.*)$/i])),
+    taxableValue: numberValue(valueAfterLabel(text, [/^Taxable Value\s*:?\s*(.*)$/i])),
+    taxCodeArea: valueAfterLabel(text, [/^(?:Tax District|District)\s*:?\s*(.*)$/i]),
+    taxAmount: numberValue(valueAfterLabel(text, [/^(?:Total )?Tax Amount\s*:?\s*(.*)$/i])),
+    taxYear: assessmentYear,
+    zoning: valueAfterLabel(text, [/^Zoning(?: District| Code)?\s*:?\s*(.*)$/i]),
+    building: {
+      livingSqft: numberValue(valueAfterLabel(text, [/^(?:Heated|Living) (?:Area|Square Feet|Sq\.?\s*Ft\.?)\s*:?\s*(.*)$/i])),
+      buildingSqft: numberValue(valueAfterLabel(text, [/^(?:Building|Gross) (?:Area|Square Feet|Sq\.?\s*Ft\.?)\s*:?\s*(.*)$/i])),
+      buildingCount: numberValue(valueAfterLabel(text, [/^(?:Building Count|Number of Buildings)\s*:?\s*(.*)$/i])),
+      stories: numberValue(valueAfterLabel(text, [/^(?:Stories|Number of Stories)\s*:?\s*(.*)$/i])),
+      baths: numberValue(valueAfterLabel(text, [/^(?:Bathrooms|Baths)\s*:?\s*(.*)$/i])),
+    },
+  };
+}
+
+async function defaultBrowserFetcher(url, options = {}) {
   const { crawlOfficialParcelPage } = await import('./sc-official-browser.js');
-  return crawlOfficialParcelPage(String(url), { searchPortal: false });
+  return crawlOfficialParcelPage(String(url), { searchPortal: false, ...options });
 }
 
 async function requestHtml(url, fetcher, { browserFallback = false, browserFetcher = defaultBrowserFetcher } = {}) {
@@ -306,7 +427,7 @@ function greenwoodParcelId(parcelId) {
     : raw;
 }
 
-async function queryBerkeley({ address, parcelId, fetcher, browserFetcher, allowBrowser, portal }) {
+async function queryBerkeley({ address, parcelId, strictParcelId, fetcher, browserFetcher, allowBrowser, portal }) {
   let reportUrl;
   if (parcelId) {
     const url = new URL('https://assessor.berkeleycountysc.gov/property_card.php');
@@ -339,7 +460,7 @@ async function queryBerkeley({ address, parcelId, fetcher, browserFetcher, allow
   if (!html) return null;
   const parsed = parseBerkeleyPropertyHtml(html, reportUrl);
   if (!parsed) return null;
-  let record = recordWithIdentity(parsed, { address, parcelId });
+  let record = recordWithIdentity(parsed, { address, parcelId, strictParcelId });
   if (record || !parsed._deedUrl) return record;
 
   const deedHtml = await requestHtml(parsed._deedUrl, fetcher, {
@@ -356,11 +477,11 @@ async function queryBerkeley({ address, parcelId, fetcher, browserFetcher, allow
     asOf: deed.recordedDate,
     ownerName: deed.granteeName,
     ownerRecordType: 'deed',
-  }, { address, parcelId });
+  }, { address, parcelId, strictParcelId });
   return record;
 }
 
-async function queryGreenville({ address, parcelId, fetcher }) {
+async function queryGreenville({ address, parcelId, strictParcelId, fetcher }) {
   if (!parcelId) return null;
   const mapNumber = normalizeParcelId(parcelId);
   for (const taxYear of [new Date().getFullYear(), new Date().getFullYear() - 1]) {
@@ -369,20 +490,72 @@ async function queryGreenville({ address, parcelId, fetcher }) {
     url.searchParams.set('TaxYear', String(taxYear));
     const html = await requestHtml(url, fetcher);
     if (!html) continue;
-    const record = recordWithIdentity(parseGreenvillePropertyHtml(html, url.toString()), { address, parcelId });
+    const record = recordWithIdentity(
+      parseGreenvillePropertyHtml(html, url.toString()),
+      { address, parcelId, strictParcelId },
+    );
     if (record) return record;
   }
   return null;
 }
 
-async function queryGreenwood({ address, parcelId, fetcher }) {
+async function queryGreenwood({ address, parcelId, strictParcelId, fetcher }) {
   if (!parcelId) return null;
   const url = new URL('https://www.greenwoodsc.gov/Property_Report_TS/Default.aspx');
   url.searchParams.set('isTinyScreen', 'false');
   url.searchParams.set('pin', greenwoodParcelId(parcelId));
   const html = await requestHtml(url, fetcher);
   if (!html) return null;
-  return recordWithIdentity(parseGreenwoodPropertyHtml(html, url.toString()), { address, parcelId });
+  return recordWithIdentity(
+    parseGreenwoodPropertyHtml(html, url.toString()),
+    { address, parcelId, strictParcelId },
+  );
+}
+
+async function queryCharleston({ address, parcelId, strictParcelId, fetcher }) {
+  if (!parcelId) return null;
+  const url = new URL('https://sc-charleston.publicaccessnow.com/RealPropertyRecordSearch/RealPropertyInfo.aspx');
+  url.searchParams.set('p', normalizeParcelId(parcelId));
+  url.searchParams.set('m', '');
+  const html = await requestHtml(url, fetcher);
+  if (!html) return null;
+  return recordWithIdentity(
+    parseCharlestonPropertyHtml(html, url.toString()),
+    { address, parcelId, strictParcelId },
+  );
+}
+
+async function querySpatialest({ address, parcelId, strictParcelId, browserFetcher, allowBrowser, portal }) {
+  if (!allowBrowser) return null;
+  const baseUrl = String(portal.propertyUrl || '').replace(/#\/?$/, '');
+  const reportUrl = parcelId
+    ? `${baseUrl}#/property/${encodeURIComponent(String(parcelId).trim())}`
+    : portal.propertyUrl;
+  const browserResult = await browserFetcher(reportUrl, {
+    address,
+    parcelId,
+    portalType: 'spatialest',
+    searchPortal: !parcelId,
+  });
+  if (browserResult?.blocked || !browserResult?.text) return null;
+  let record = recordWithIdentity(
+    parseSpatialestPropertyText(browserResult.text, browserResult.loadedUrl || reportUrl),
+    { address, parcelId, strictParcelId },
+  );
+  if (record || strictParcelId || !parcelId || !address) return record;
+
+  const addressResult = await browserFetcher(portal.propertyUrl, {
+    address,
+    parcelId: '',
+    portalType: 'spatialest',
+    searchPortal: true,
+  });
+  if (addressResult?.blocked || !addressResult?.text) return null;
+  record = recordWithIdentity(
+    parseSpatialestPropertyText(addressResult.text, addressResult.loadedUrl || portal.propertyUrl),
+    { address, parcelId: '', strictParcelId: false },
+  );
+  return record;
 }
 
 export async function queryOfficialCountyProperty({
@@ -392,20 +565,27 @@ export async function queryOfficialCountyProperty({
   fetcher = fetch,
   browserFetcher = defaultBrowserFetcher,
   allowBrowser = true,
+  strictParcelId = false,
 }) {
   const portal = scOwnerPortalFor(county);
   if (!portal?.propertyProvider || portal.propertyProvider === 'restricted') return null;
   if (portal.propertyProvider === 'berkeley') {
-    return queryBerkeley({ address, parcelId, fetcher, browserFetcher, allowBrowser, portal });
+    return queryBerkeley({ address, parcelId, strictParcelId, fetcher, browserFetcher, allowBrowser, portal });
   }
-  if (portal.propertyProvider === 'greenville') return queryGreenville({ address, parcelId, fetcher });
-  if (portal.propertyProvider === 'greenwood') return queryGreenwood({ address, parcelId, fetcher });
+  if (portal.propertyProvider === 'aumentum') return queryCharleston({ address, parcelId, strictParcelId, fetcher });
+  if (portal.propertyProvider === 'greenville') return queryGreenville({ address, parcelId, strictParcelId, fetcher });
+  if (portal.propertyProvider === 'greenwood') return queryGreenwood({ address, parcelId, strictParcelId, fetcher });
+  if (portal.propertyProvider === 'spatialest') {
+    return querySpatialest({ address, parcelId, strictParcelId, browserFetcher, allowBrowser, portal });
+  }
   return null;
 }
 
 export const __testables = {
   berkeleyStreetSearch,
   greenwoodParcelId,
+  parseCharlestonPropertyHtml,
+  parseSpatialestPropertyText,
   parseBerkeleySearchResult,
   recordWithIdentity,
 };

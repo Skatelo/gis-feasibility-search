@@ -2469,7 +2469,11 @@ export async function executeLandAnalysis(
         earlyOfficialParcelId,
         { lat, lng },
         fetch,
-        { candidateOwner: String(knownParcel?.ownerName || ''), skipBrowser: false },
+        {
+          candidateOwner: String(knownParcel?.ownerName || ''),
+          skipBrowser: false,
+          strictParcelId: expectedParcelIds.length > 0,
+        },
       ).catch(() => null)
     : null;
 
@@ -2758,6 +2762,7 @@ export async function executeLandAnalysis(
           {
             candidateOwner: String(info.ownname || ''),
             skipBrowser: !!countyGisScRecord?.ownerName,
+            strictParcelId: expectedParcelIds.length > 0,
           },
         );
       })()
