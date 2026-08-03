@@ -99,21 +99,29 @@ export const handler = async (event) => {
   const treasurerUrl = String(body.treasurerUrl || '').trim();
   const candidateOwner = String(body.candidateOwner || '').trim();
   const skipBrowser = body.skipBrowser === true;
+  const strictParcelId = body.strictParcelId === true;
   if (!county || !portalUrl) return response(400, { error: 'county and portalUrl are required' });
   try { new URL(portalUrl); } catch { return response(400, { error: 'Invalid portalUrl' }); }
   const ownerVerificationUrl = scOwnerVerificationUrl(county, portalUrl);
 
   const qpayPromise = treasurerUrl && address && isAllowedHost(treasurerUrl, 'qpaybill.com')
-    ? queryQpayTreasurer(treasurerUrl, address, county, parcelId).catch(() => null)
+    ? queryQpayTreasurer(treasurerUrl, address, county, strictParcelId ? parcelId : '').catch(() => null)
     : Promise.resolve(null);
   const wthPromise = isAllowedHost(portalUrl, 'wthgis.com')
-    ? queryWthgisParcel({ portalUrl, address, parcelId, candidateOwner, county }).catch(() => null)
+    ? queryWthgisParcel({
+        portalUrl,
+        address,
+        parcelId: strictParcelId ? parcelId : '',
+        candidateOwner,
+        county,
+      }).catch(() => null)
     : Promise.resolve(null);
   const countyPropertyPromise = queryOfficialCountyProperty({
     county,
     address,
     parcelId,
     allowBrowser: !skipBrowser,
+    strictParcelId,
   }).catch(() => null);
   const [qpayRecord, wthRecord, countyPropertyRecord] = await Promise.all([
     qpayPromise,
@@ -136,9 +144,9 @@ export const handler = async (event) => {
   }
 
   const usableParcelId = parcelId && parcelId.toUpperCase() !== 'N/A' ? parcelId : '';
-  const reportUrl = county.toLowerCase() === 'union' && usableParcelId
+  const reportUrl = strictParcelId && county.toLowerCase() === 'union' && usableParcelId
     ? unionReportUrl(usableParcelId)
-    : usableParcelId
+    : strictParcelId && usableParcelId
       ? schneiderReportUrl(schneiderUrl, usableParcelId)
       : schneiderUrl;
   try {
@@ -146,14 +154,25 @@ export const handler = async (event) => {
     // clients outright — go straight to the real-browser Crawlee path.
     // (Browser dependencies load lazily to keep the treasurer path light.)
     const { crawlOfficialParcelPage } = await import('./lib/sc-official-browser.js');
-    const browserResult = await crawlOfficialParcelPage(reportUrl, { parcelId: usableParcelId, address });
+    const browserResult = await crawlOfficialParcelPage(reportUrl, {
+      parcelId: usableParcelId,
+      address,
+      strictParcelId,
+      preferAddress: !strictParcelId && !!address,
+    });
     if (browserResult.blocked || !browserResult.text) {
       return response(200, { success: true, data: { status: 'blocked', sourceUrl: reportUrl } });
     }
     const parsed = parseQpublicParcelText(browserResult.text, browserResult.loadedUrl || reportUrl);
-    const identityMatches = usableParcelId
-      ? parsed?.parcelId && scParcelIdsMatch(parsed.parcelId, usableParcelId)
-      : parsed?.situsAddress && situsAddressesMatch(parsed.situsAddress, address);
+    const matchesRequestedIdentity = (record) => {
+      if (strictParcelId && usableParcelId) {
+        return record?.parcelId && scParcelIdsMatch(record.parcelId, usableParcelId);
+      }
+      if (address) return record?.situsAddress && situsAddressesMatch(record.situsAddress, address);
+      return usableParcelId && record?.parcelId && scParcelIdsMatch(record.parcelId, usableParcelId);
+    };
+    const identityMatches = matchesRequestedIdentity(parsed);
+
     return response(200, {
       success: true,
       data: parsed?.status === 'verified' && !identityMatches
