@@ -30,10 +30,12 @@ import {
 import {
   ParcelIdentityAmbiguityError,
   chooseUniqueTopParcelCandidate,
+  formatScTaxRollOwnerName,
   normalizeParcelIdentity,
   parseParcelLookupInput,
   parcelIdentitiesMatch,
   selectExactParcelFeature,
+  selectUniqueAddressFeature,
   type RankedParcelCandidate,
 } from './parcels/parcel-identity';
 import {
@@ -1589,6 +1591,11 @@ function parcelIdsFromFeature(feature: any): unknown[] {
   return parcelIdsFromAttributes(feature?.properties || feature?.attributes || {});
 }
 
+function parcelAddressesFromFeature(feature: any): unknown[] {
+  const normalized = normalizeCountyParcelAttrs(feature?.properties || feature?.attributes || {});
+  return [normalized.siteadd].filter((value) => value != null && String(value).trim());
+}
+
 function selectExpectedParcelFeature<T>(
   features: readonly T[],
   expectedParcelIds: readonly string[],
@@ -1662,6 +1669,7 @@ async function queryCountyParcel(
   joinConfig?: ScAttributeJoin,
   expectedParcelIds: readonly string[] = [],
   state: SupportedState = 'NC',
+  expectedAddress = '',
 ) {
   const runQuery = async (geometryParams: string) => {
     const common = `${geometryParams}&inSR=4326&spatialRel=esriSpatialRelIntersects&where=1%3D1&outFields=*&returnGeometry=true`;
@@ -1685,14 +1693,43 @@ async function queryCountyParcel(
     const pointExact = expectedParcelIds.length
       ? selectExpectedParcelFeature(pointFeatures, expectedParcelIds, state)
       : pointFeatures[0] || null;
-    if (!pointFeatures.length || (expectedParcelIds.length && !pointExact)) {
+    const pointAddressMatch = state === 'SC' && expectedAddress
+      ? selectUniqueAddressFeature(pointFeatures, expectedAddress, parcelAddressesFromFeature)
+      : null;
+    const pointWgsJson = wgsJson;
+    const pointSpJson = spJson;
+    const needsAddressExpansion = state === 'SC' && !!expectedAddress && !pointAddressMatch;
+    let usedEnvelope = false;
+    if (!pointFeatures.length || (expectedParcelIds.length && !pointExact) || needsAddressExpansion) {
       // Some county servers (e.g. Horry's HARN State Plane 10.6) return nothing
-      // for a reprojected point-in-polygon query. Parcel-ID mode also retries
-      // when the point returns only an adjacent parcel.
-      const d = 0.00012;
+      // for a reprojected point-in-polygon query. SC street geocoders also land
+      // on the road centerline, so use a bounded wider envelope and then require
+      // the parcel's published situs address to match before taking its owner.
+      const d = state === 'SC' ? 0.00055 : 0.00012;
       ({ wgsJson, spJson } = await runQuery(
         `geometry=${lng - d},${lat - d},${lng + d},${lat + d}&geometryType=esriGeometryEnvelope`,
       ));
+      usedEnvelope = true;
+    }
+
+    if (usedEnvelope && state === 'SC' && expectedAddress && !expectedParcelIds.length) {
+      const envelopeFeatures: any[] = Array.isArray(wgsJson?.features) ? wgsJson.features : [];
+      const envelopeAddressMatch = selectUniqueAddressFeature(
+        envelopeFeatures,
+        expectedAddress,
+        parcelAddressesFromFeature,
+      );
+      if (!envelopeAddressMatch) {
+        // A point intersection is still strong evidence when the county layer
+        // publishes no situs field. A road-side envelope with only neighboring
+        // addresses is not; fail closed so no adjacent owner's name is shown.
+        const pointPublishesSitus = pointFeatures.some((feature) =>
+          parcelAddressesFromFeature(feature).length > 0,
+        );
+        if (!pointFeatures.length || pointPublishesSitus) return null;
+        wgsJson = pointWgsJson;
+        spJson = pointSpJson;
+      }
     }
     const feats: any[] = wgsJson?.features || [];
     // Parcel-ID searches are identity-bound: an adjacent feature returned by a
@@ -1706,9 +1743,20 @@ async function queryCountyParcel(
       : null;
     let pickedIdx = exactFeature ? feats.indexOf(exactFeature) : -1;
     if (!expectedParcelIds.length) {
-      // The envelope can clip the adjacent roadway/right-of-way parcel; prefer
-      // the first feature whose owner is not a road segment.
-      pickedIdx = feats.findIndex((f) => f?.geometry && !isRoadwayOwner(normalizeCountyParcelAttrs(f?.properties || {}).ownname));
+      const exactAddressFeature = state === 'SC' && expectedAddress
+        ? selectUniqueAddressFeature(
+            feats.filter((feature) => feature?.geometry),
+            expectedAddress,
+            parcelAddressesFromFeature,
+          )
+        : null;
+      pickedIdx = exactAddressFeature ? feats.indexOf(exactAddressFeature) : -1;
+      // A true point intersection can still be used when the layer has no situs
+      // address. The wide SC road-side envelope may not choose an arbitrary
+      // neighbor when no exact address was published.
+      if (pickedIdx < 0 && (!usedEnvelope || pointFeatures.length)) {
+        pickedIdx = feats.findIndex((f) => f?.geometry && !isRoadwayOwner(normalizeCountyParcelAttrs(f?.properties || {}).ownname));
+      }
       if (pickedIdx < 0) pickedIdx = feats.findIndex((f) => f?.geometry);
     }
     const wgsFeat = pickedIdx >= 0 ? feats[pickedIdx] : null;
@@ -2254,13 +2302,13 @@ async function lookupScParcelById(
  * yields nothing rather than wrong data. Attributes flow through
  * normalizeCountyParcelAttrs(), which already maps arbitrary county field names.
  */
-async function discoverScParcelFeature(countyName: string, lng: number, lat: number): Promise<any | null> {
+async function discoverScParcelFeature(countyName: string, lng: number, lat: number, address: string): Promise<any | null> {
   try {
     const res = await fetchWithTimeout('/.netlify/functions/sc-parcel-discover', 28000, {
       method: 'POST',
       cache: 'no-store',
       headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-      body: JSON.stringify({ county: countyBaseName(countyName), lng, lat }),
+      body: JSON.stringify({ county: countyBaseName(countyName), lng, lat, address }),
     });
     if (!res.ok) return null;
     const payload = await res.json();
@@ -2453,9 +2501,14 @@ export async function executeLandAnalysis(
         SC_COUNTY_ATTRIBUTE_JOINS[countyKeyLower],
         expectedParcelIds,
         'SC',
+        addressString,
       );
       if (localRes) {
-        const statewideAttrs = await queryScStatewideParcelAttributes(lng, lat, parcelWhere, expectedParcelIds);
+        const localParcelIds = parcelIdsFromFeature(localRes.wgs84Feature).map((value) => String(value));
+        const statewideExpectedIds = expectedParcelIds.length ? expectedParcelIds : localParcelIds;
+        const statewideAttrs = statewideExpectedIds.length
+          ? await queryScStatewideParcelAttributes(lng, lat, parcelWhere, statewideExpectedIds)
+          : null;
         if (statewideAttrs) {
           const localAttrs = localRes.wgs84Feature.properties || {};
           // County-local data is authoritative (it is the live source of record and is
@@ -2651,7 +2704,7 @@ export async function executeLandAnalysis(
       // rest. It returns null unless a verified county layer actually answers
       // with a parcel AT this point, so it can never substitute another county's
       // (or another state's) record.
-      const discovered = await discoverScParcelFeature(countyName, lng, lat);
+      const discovered = await discoverScParcelFeature(countyName, lng, lat, addressString);
       if (discovered) {
         parcelFeature = discovered;
         statePlaneFeature = null;
@@ -2991,10 +3044,15 @@ export async function executeLandAnalysis(
     ownerFirst = gisFirst;
     ownerLast = gisLast;
   } else if (info.ownname && String(info.ownname).trim().toUpperCase() !== 'N/A') {
-    ownerName = formatOwnerName(info.ownname); // surname-first parse fallback
+    ownerName = selectedState === 'SC'
+      ? formatScTaxRollOwnerName(info.ownname)
+      : formatOwnerName(info.ownname); // surname-first parse fallback
   }
   if (ownerName && info.ownname2 && String(info.ownname2).trim()) {
-    ownerName += " & " + formatOwnerName(info.ownname2);
+    const secondOwner = selectedState === 'SC'
+      ? formatScTaxRollOwnerName(info.ownname2)
+      : formatOwnerName(info.ownname2);
+    if (secondOwner) ownerName += ` & ${secondOwner}`;
   }
 
   // Format mailing address

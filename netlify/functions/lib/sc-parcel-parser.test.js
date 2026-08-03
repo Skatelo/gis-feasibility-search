@@ -2,7 +2,15 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 
-import { normalizeParcelId, parseQpublicParcelText, unionReportUrl } from './sc-parcel-parser.js';
+import {
+  normalizeParcelId,
+  normalizeSitusAddress,
+  parseQpublicParcelText,
+  scParcelIdsMatch,
+  situsAddressesMatch,
+  unionReportUrl,
+} from './sc-parcel-parser.js';
+import { __testables as parcelDiscoveryTestables } from './sc-parcel-discovery.js';
 import { parseUnionTreasurerDetail, queryQpayTreasurer } from './sc-union-treasurer.js';
 import { parseWthgisParcelDetail, queryWthgisParcel } from './sc-wthgis.js';
 
@@ -84,6 +92,38 @@ test('Union report URL pads the county suffix without caching a result', () => {
   assert.match(url, /KeyValue=049-00-00-112%20000$/);
   assert.equal(normalizeParcelId('049-00-00-112 000'), '0490000112000');
   assert.notEqual(normalizeParcelId('049-00-00-112'), normalizeParcelId('049-00-00-112 000'));
+});
+
+test('SC assessor identity helpers match address abbreviations and parcel suffixes', () => {
+  assert.equal(normalizeSitusAddress('21 Magnolia Street, York, SC 29745'), '21 MAGNOLIA ST');
+  assert.equal(situsAddressesMatch('21 MAGNOLIA ST', '21 Magnolia Street York SC 29745'), true);
+  assert.equal(situsAddressesMatch('17 MAGNOLIA ST', '21 Magnolia Street, York, SC'), false);
+  assert.equal(scParcelIdsMatch('049-00-00-112', '049-00-00-112 000'), true);
+  assert.equal(scParcelIdsMatch('049-00-00-113', '049-00-00-112 000'), false);
+});
+
+test('SC discovery selects the searched situs parcel instead of the first road-side neighbor', () => {
+  const features = [
+    { attributes: { ParcelID: '0700202027', PropertyAddress: '17 MAGNOLIA ST', Owner1: 'THOMASSON HELEN L ETAL' } },
+    { attributes: { ParcelID: '0700202025', PropertyAddress: '21 MAGNOLIA ST', Owner1: 'LOWRY NAOMI LIFE ESTATE' } },
+    { attributes: { ParcelID: '0700207007', PropertyAddress: '16 MAGNOLIA ST', Owner1: 'MCELHANEY BESSIE L' } },
+  ];
+  const selected = parcelDiscoveryTestables.selectUniqueAddressFeature(
+    features,
+    '21 Magnolia Street, York, South Carolina 29745',
+  );
+  assert.equal(selected?.attributes?.ParcelID, '0700202025');
+  assert.equal(selected?.attributes?.Owner1, 'LOWRY NAOMI LIFE ESTATE');
+  assert.equal(
+    parcelDiscoveryTestables.parcelAttributeScore({ ParcelID: '0700202025', PreviousOwner: 'OLD OWNER' }),
+    2,
+  );
+});
+
+test('SC assessor browser keeps the Lambda Chromium package as a native ESM import', async () => {
+  const browserSource = await readFile(new URL('./sc-official-browser.js', import.meta.url), 'utf8');
+  assert.doesNotMatch(browserSource, /^import\s+chromiumBinary\s+from\s+['"]@sparticuz\/chromium['"]/m);
+  assert.match(browserSource, /await import\(['"]@sparticuz\/chromium['"]\)/);
 });
 
 test('Union treasurer detail resolves current owner, parcel, assessment, and tax', () => {

@@ -3,10 +3,14 @@ import test from 'node:test';
 import {
   ParcelIdentityAmbiguityError,
   chooseUniqueTopParcelCandidate,
+  formatScTaxRollOwnerName,
   normalizeParcelIdentity,
+  normalizeParcelStreetAddress,
   parseParcelLookupInput,
   parcelIdentitiesMatch,
+  parcelStreetAddressesMatch,
   selectExactParcelFeature,
+  selectUniqueAddressFeature,
 } from './parcel-identity';
 
 test('normalizes county parcel punctuation without changing identity', () => {
@@ -40,6 +44,41 @@ test('selects the exact parcel instead of the first adjacent point result', () =
     true,
   );
   assert.equal(selected?.properties.ownname, 'PARKER REGINA G');
+});
+
+test('selects the unique SC situs address instead of a neighboring road-side parcel', () => {
+  const features = [
+    { properties: { siteadd: '17 MAGNOLIA ST', ownname: 'THOMASSON HELEN L ETAL' } },
+    { properties: { siteadd: '21 MAGNOLIA ST', ownname: 'LOWRY NAOMI LIFE ESTATE' } },
+    { properties: { siteadd: '16 MAGNOLIA ST', ownname: 'MCELHANEY BESSIE L' } },
+  ];
+  const selected = selectUniqueAddressFeature(
+    features,
+    '21 Magnolia Street, York, South Carolina 29745',
+    (feature) => [feature.properties.siteadd],
+  );
+  assert.equal(selected?.properties.ownname, 'LOWRY NAOMI LIFE ESTATE');
+  assert.equal(normalizeParcelStreetAddress('21 Magnolia Street, York, SC'), '21 MAGNOLIA ST');
+  assert.equal(parcelStreetAddressesMatch('21 MAGNOLIA ST', '21 Magnolia Street York SC 29745'), true);
+});
+
+test('rejects an ambiguous address shared by multiple parcel records', () => {
+  const features = [
+    { properties: { siteadd: '16 MAGNOLIA ST', parno: 'A' } },
+    { properties: { siteadd: '16 MAGNOLIA STREET', parno: 'B' } },
+  ];
+  assert.equal(
+    selectUniqueAddressFeature(features, '16 Magnolia Street, York, SC', (feature) => [feature.properties.siteadd]),
+    null,
+  );
+});
+
+test('formats SC assessor people without scrambling entities or legal suffixes', () => {
+  assert.equal(formatScTaxRollOwnerName('PARKER REGINA G'), 'Regina G Parker');
+  assert.equal(formatScTaxRollOwnerName('LOWRY NAOMI LIFE ESTATE'), 'Naomi Lowry Life Estate');
+  assert.equal(formatScTaxRollOwnerName('SMITH JOHN A & MARY B'), 'John A Smith & Mary B Smith');
+  assert.equal(formatScTaxRollOwnerName('REAL ESTATE BUSTERS LLC'), 'Real Estate Busters Llc');
+  assert.equal(formatScTaxRollOwnerName('THOMASSON HELEN L ETAL'), 'Helen L Thomasson');
 });
 
 test('rejects point results when none match the requested parcel ID', () => {

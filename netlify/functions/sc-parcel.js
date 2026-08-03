@@ -1,4 +1,4 @@
-import { parseQpublicParcelText, unionReportUrl } from './lib/sc-parcel-parser.js';
+import { parseQpublicParcelText, scParcelIdsMatch, situsAddressesMatch, unionReportUrl } from './lib/sc-parcel-parser.js';
 import { queryQpayTreasurer } from './lib/sc-union-treasurer.js';
 import { queryWthgisParcel } from './lib/sc-wthgis.js';
 
@@ -137,9 +137,15 @@ export const handler = async (event) => {
     if (browserResult.blocked || !browserResult.text) {
       return response(200, { success: true, data: { status: 'blocked', sourceUrl: reportUrl } });
     }
+    const parsed = parseQpublicParcelText(browserResult.text, browserResult.loadedUrl || reportUrl);
+    const identityMatches = usableParcelId
+      ? parsed?.parcelId && scParcelIdsMatch(parsed.parcelId, usableParcelId)
+      : parsed?.situsAddress && situsAddressesMatch(parsed.situsAddress, address);
     return response(200, {
       success: true,
-      data: parseQpublicParcelText(browserResult.text, browserResult.loadedUrl || reportUrl),
+      data: parsed?.status === 'verified' && !identityMatches
+        ? { status: 'unavailable', sourceUrl: parsed.sourceUrl }
+        : parsed,
     });
   } catch (error) {
     return response(200, {

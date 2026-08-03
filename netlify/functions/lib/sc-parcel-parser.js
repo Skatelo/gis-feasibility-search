@@ -30,6 +30,46 @@ export function normalizeParcelId(value) {
   return String(value || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
 }
 
+const STREET_ALIASES = {
+  STREET: 'ST', ROAD: 'RD', AVENUE: 'AVE', HIGHWAY: 'HWY', LANE: 'LN', DRIVE: 'DR',
+  BOULEVARD: 'BLVD', COURT: 'CT', CIRCLE: 'CIR', PLACE: 'PL', TERRACE: 'TER',
+  PARKWAY: 'PKWY', TRAIL: 'TRL', TURNPIKE: 'TPKE', ROUTE: 'RTE', CROSSING: 'XING',
+  COVE: 'CV', NORTH: 'N', SOUTH: 'S', EAST: 'E', WEST: 'W',
+};
+
+export function normalizeSitusAddress(value) {
+  let text = String(value || '').trim().toUpperCase();
+  if (!text) return '';
+  const firstLine = text.split(',')[0]?.trim();
+  if (/^\d+[A-Z]?(?:[-/]\d+[A-Z]?)?\s/.test(firstLine || '')) text = firstLine;
+  text = text
+    .replace(/\b(?:APT|APARTMENT|UNIT|SUITE|STE|BUILDING|BLDG)\b.*$/i, '')
+    .replace(/[^A-Z0-9]+/g, ' ')
+    .trim();
+  return text.split(/\s+/).filter(Boolean).map((token) => STREET_ALIASES[token] || token).join(' ');
+}
+
+export function situsAddressesMatch(left, right) {
+  const a = normalizeSitusAddress(left);
+  const b = normalizeSitusAddress(right);
+  if (!a || !b) return false;
+  const aTokens = a.split(' ');
+  const bTokens = b.split(' ');
+  if (aTokens[0] !== bTokens[0]) return false;
+  if (a === b) return true;
+  const [shorter, longer] = a.length < b.length ? [a, b] : [b, a];
+  return shorter.split(' ').length >= 3 && longer.startsWith(`${shorter} `);
+}
+
+export function scParcelIdsMatch(left, right) {
+  const a = normalizeParcelId(left);
+  const b = normalizeParcelId(right);
+  if (!a || !b) return false;
+  if (a === b) return true;
+  const [shorter, longer] = a.length < b.length ? [a, b] : [b, a];
+  return longer.startsWith(shorter) && /^0+$/.test(longer.slice(shorter.length));
+}
+
 export function parseQpublicParcelText(content, sourceUrl) {
   const text = String(content || '').replace(/\r/g, '');
   if (!text || /attention required|sorry, you have been blocked|just a moment|captcha/i.test(text)) {

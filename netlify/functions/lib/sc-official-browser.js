@@ -2,7 +2,6 @@ import { existsSync } from 'node:fs';
 
 import { PlaywrightCrawler } from '@crawlee/playwright';
 import { Configuration } from '@crawlee/core';
-import chromiumBinary from '@sparticuz/chromium';
 import { chromium as playwrightChromium } from 'playwright-core';
 
 const MAX_TEXT = 60_000;
@@ -27,6 +26,11 @@ export async function crawlOfficialParcelPage(url, { parcelId = '', address = ''
   let loadedUrl = url;
   let blocked = false;
   const localChrome = localChromePath();
+  // Netlify bundles this function as CommonJS while @sparticuz/chromium is ESM.
+  // Keep the import native and lazy so the deployed fallback does not crash with
+  // ERR_REQUIRE_ESM before the assessor page is opened.
+  const chromiumModule = await import('@sparticuz/chromium');
+  const chromiumBinary = chromiumModule.default || chromiumModule;
   const executablePath = localChrome || await chromiumBinary.executablePath();
   const config = new Configuration({ persistStorage: false, purgeOnStart: true });
 
@@ -116,7 +120,11 @@ export async function crawlOfficialParcelPage(url, { parcelId = '', address = ''
           usedInput = parcelInput;
           searchButton = page.getByRole('button', { name: 'Search by Parcel Number Search', exact: true });
         } else if (address && await addressInput.count()) {
-          await addressInput.fill(address);
+          // Schneider's location search expects the situs street line, not a
+          // full postal address with city/state/country. Supplying the full line
+          // returns no result in several SC county apps.
+          const streetLine = String(address).split(',')[0].trim() || address;
+          await addressInput.fill(streetLine);
           usedInput = addressInput;
           searchButton = page.getByRole('button', { name: 'Search by Location Address Search', exact: true });
         }
