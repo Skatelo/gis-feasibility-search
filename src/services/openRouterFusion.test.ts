@@ -77,3 +77,21 @@ test('whitespace-only keys do not count as configured', () => {
   // A blank DeepSeek key must fall through to OpenRouter, not disable fusion.
   assert.equal(buildDeepSeekTransport('  ', 'sk-or-key')?.provider, 'openrouter');
 });
+
+test('provider routing defaults to throughput so latency is not a lottery', () => {
+  // Eleven hosts serve this model. Measured on identical work, default routing
+  // ranged 0.16s (DeepInfra) to 12.47s (DeepSeek's own endpoint) — the slow
+  // draw stalls the whole section. Sorting by throughput removes that tail and
+  // cannot affect correctness: same model and weights, different host only.
+  const out = JSON.parse(toOpenRouterBody(nativeBody));
+  assert.deepEqual(out.provider, { sort: 'throughput', allow_fallbacks: true });
+});
+
+test('fallbacks stay enabled so a busy host degrades instead of failing', () => {
+  assert.equal(JSON.parse(toOpenRouterBody(nativeBody)).provider.allow_fallbacks, true);
+});
+
+test('an explicit provider block from the caller is not overridden', () => {
+  const pinned = JSON.stringify({ model: 'deepseek-v4-pro', messages: [], provider: { order: ['DeepInfra'] } });
+  assert.deepEqual(JSON.parse(toOpenRouterBody(pinned)).provider, { order: ['DeepInfra'] });
+});
