@@ -1,4 +1,5 @@
 import { load } from 'cheerio';
+import { situsAddressesMatch } from './sc-parcel-parser.js';
 
 const UNION_SEARCH_URL = 'https://uniontreasurer.qpaybill.com/Taxes/TaxesDefaultType4.aspx';
 const REQUEST_TIMEOUT_MS = 6_000;
@@ -185,7 +186,7 @@ export async function queryQpayTreasurer(searchUrl, address, county, expectedPar
       const cells = $(row).find('td').toArray().map((cell) => compactText($(cell).text()));
       const href = $(row).find('a[href*="TaxesDetailsType4.aspx"]').attr('href');
       return { cells, href };
-    }).filter((row) => row.href && row.cells.includes('RealEstate'));
+    }).filter((row) => row.href && row.cells.some((cell) => cell.replace(/\s+/g, '').toLowerCase() === 'realestate'));
     const year = (row) => Number(row.cells.find((cell) => /^20\d{2}$/.test(cell))) || 0;
     rows.sort((left, right) => {
       const leftMatches = expectedParcelId && left.cells.some((cell) => parcelIdsCompatible(cell, expectedParcelId));
@@ -200,7 +201,11 @@ export async function queryQpayTreasurer(searchUrl, address, county, expectedPar
       const detail = await request(detailUrl, { headers: { cookie, referer: SEARCH_URL } });
       if (!detail.ok) continue;
       const record = parseQpayTreasurerDetail(await detail.text(), detailUrl, `${county} County`);
-      if (record && (!expectedParcelId || parcelIdsCompatible(record.parcelId, expectedParcelId))) return record;
+      if (!record) continue;
+      const parcelMatches = expectedParcelId && parcelIdsCompatible(record.parcelId, expectedParcelId);
+      const addressMatches = record.situsAddress && situsAddressesMatch(record.situsAddress, streetAddress);
+      const rowAddressMatches = row.cells.some((cell) => situsAddressesMatch(cell, streetAddress));
+      if (expectedParcelId ? parcelMatches : (addressMatches || rowAddressMatches)) return record;
     }
   }
   return null;
