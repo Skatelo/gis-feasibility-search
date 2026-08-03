@@ -80,6 +80,77 @@ function hostCandidates(countyName) {
   return hosts.flatMap((h) => paths.map((p) => `https://${h}${p}`));
 }
 
+// ---------------------------------------------------------------------------
+// HOST SEEDING FROM SEARCH
+// Guessing hostnames from the county name only finds the counties that happen
+// to follow a common pattern; it found none of the smaller ones. Searching for
+// each county's actual GIS site supplies the real hosts to crawl.
+// ---------------------------------------------------------------------------
+
+const PERPLEXITY_KEY = (() => {
+  try {
+    const env = readFileSync(join(root, '.env.local'), 'utf8');
+    return (env.match(/^VITE_PERPLEXITY_API_KEY=(.+)$/m) || [])[1]?.trim() || '';
+  } catch { return ''; }
+})();
+
+/** Parcel aggregators and listing sites are never an authoritative county source. */
+const AGGREGATOR_RE = /zillow|realtor|redfin|trulia|netronline|publicrecords|propertyshark|landwatch|land\.com|loopnet|county-?taxes\.net|usgs|wikipedia|facebook|linkedin|youtube/i;
+
+function officialCountyHost(hostname, countyName) {
+  const host = hostname.toLowerCase();
+  if (AGGREGATOR_RE.test(host)) return false;
+  const token = countyName.toLowerCase().replace(/[^a-z]/g, '');
+  const compactHost = host.replace(/[^a-z0-9]/g, '');
+  // Either the host names the county, or it is a public-sector domain.
+  return compactHost.includes(token) || /\.(gov|us)$/.test(host);
+}
+
+async function searchHosts(countyName) {
+  if (!PERPLEXITY_KEY) return { roots: [], services: [] };
+  const queries = [
+    `${countyName} County SC GIS parcel map`,
+    `${countyName} County South Carolina property viewer assessor GIS`,
+    `${countyName} County SC ArcGIS REST services parcels`,
+    `${countyName} County South Carolina open data parcels download`,
+  ];
+  const res = await fetch('https://api.perplexity.ai/search', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${PERPLEXITY_KEY}` },
+    body: JSON.stringify({ query: queries, max_results: 10, max_tokens_per_page: 800, country: 'US' }),
+    signal: AbortSignal.timeout(60000),
+  }).catch(() => null);
+  if (!res?.ok) return { roots: [], services: [] };
+  const j = await res.json();
+  const groups = Array.isArray(j.results) && j.results[0]?.results ? j.results.map((g) => g.results) : [j.results || []];
+  const rows = [];
+  for (const g of groups) for (const r of g || []) rows.push(r);
+
+  const roots = new Set();
+  const services = new Set();
+  for (const r of rows) {
+    const text = `${r.url || ''} ${r.snippet || r.content || ''}`;
+    // A REST endpoint quoted anywhere in the page text is the strongest signal.
+    for (const m of text.matchAll(/https?:\/\/[^\s"'<>)]+?\/(?:MapServer|FeatureServer)\b/gi)) {
+      const u = m[0];
+      try { if (officialCountyHost(new URL(u).hostname, countyName)) services.add(u); } catch { /* skip */ }
+    }
+    for (const m of text.matchAll(/https?:\/\/[^\s"'<>)]+?\/(?:arcgis|server|hosting|agstserver|gisweb|portal)\/rest\/services/gi)) {
+      const u = m[0];
+      try { if (officialCountyHost(new URL(u).hostname, countyName)) roots.add(u); } catch { /* skip */ }
+    }
+    // Derive REST roots from any official county host the search surfaced.
+    try {
+      const host = new URL(r.url).hostname;
+      if (!officialCountyHost(host, countyName)) continue;
+      for (const path of ['/arcgis/rest/services', '/server/rest/services', '/hosting/rest/services', '/agstserver/rest/services', '/gisweb/rest/services', '/portal/rest/services']) {
+        roots.add(`https://${host}${path}`);
+      }
+    } catch { /* not a url */ }
+  }
+  return { roots: [...roots], services: [...services] };
+}
+
 /** ArcGIS Online catalog, publisher-checked, for counties hosting on Esri. */
 const AGOL = 'https://www.arcgis.com/sharing/rest';
 const compact = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
@@ -233,11 +304,15 @@ async function pooled(items, worker, concurrency) {
 const PARCELISH = /parcel|cadastr|tax|property|assessor|landrecord/i;
 
 async function discoverCounty(name, point) {
-  // Known-good hosts first, then the catalog. Cheap probes before expensive.
-  const roots = hostCandidates(name);
+  // Real hosts from search first — pattern-guessed hostnames only find counties
+  // that happen to follow a common naming convention and found none of the
+  // smaller ones. Then the guessed patterns, then the Esri catalog.
+  const seeded = await searchHosts(name);
+  const roots = [...new Set([...seeded.roots, ...hostCandidates(name)])];
   const crawled = (await pooled(roots, async (r) => crawlArcGisDirectory(r), 6)).flat();
   const fromAgol = await agolServices(name);
-  const services = [...new Set([...crawled, ...fromAgol])].filter((u) => PARCELISH.test(u));
+  const direct = seeded.services.map((u) => u.replace(/\/\d+$/, ''));
+  const services = [...new Set([...direct, ...crawled, ...fromAgol])].filter((u) => PARCELISH.test(u));
 
   const ranked = services
     .map((u) => ({ u, s: scoreParcelCandidate({ serviceName: u }) }))

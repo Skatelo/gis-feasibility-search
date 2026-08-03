@@ -1,5 +1,5 @@
 {
-  "generated": "2026-08-03T21:44:39.027Z",
+  "generated": "2026-08-03T21:49:11.038Z",
   "counties": {
     "Allendale": {
       "status": "not-found",
@@ -30,6 +30,10 @@
       "checkedAt": "2026-08-03"
     },
     "Anderson": {
+      "status": "not-found",
+      "checkedAt": "2026-08-03"
+    },
+    "Kershaw": {
       "status": "not-found",
       "checkedAt": "2026-08-03"
     }
