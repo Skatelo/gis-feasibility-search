@@ -1,0 +1,58 @@
+{
+  "generated": "2026-08-03T22:04:18.851Z",
+  "counties": {
+    "Allendale": {
+      "status": "not-found",
+      "checkedAt": "2026-08-03"
+    },
+    "Aiken": {
+      "status": "not-found",
+      "checkedAt": "2026-08-03"
+    },
+    "Abbeville": {
+      "status": "not-found",
+      "checkedAt": "2026-08-03"
+    },
+    "Bamberg": {
+      "status": "not-found",
+      "checkedAt": "2026-08-03"
+    },
+    "Barnwell": {
+      "status": "not-found",
+      "checkedAt": "2026-08-03"
+    },
+    "Cherokee": {
+      "status": "not-found",
+      "checkedAt": "2026-08-03"
+    },
+    "Chester": {
+      "status": "not-found",
+      "checkedAt": "2026-08-03"
+    },
+    "Anderson": {
+      "scope": "municipal-subset",
+      "scopeNote": "Municipal service found via viewer mining — covers a city, not the whole county. Countywide layer still needed.",
+      "parcel": {
+        "serviceUrl": "https://gis.cityofandersonsc.com/arcgis/rest/services/Local_Government/City_Parcels/MapServer",
+        "layerId": 0,
+        "serviceType": "MapServer"
+      },
+      "layerName": "LocalGovernment.DBO.Parcels_City",
+      "idField": "TMS",
+      "ownerField": "OWNER",
+      "featureCount": 14121,
+      "sample": {
+        "lng": -82.6378281,
+        "lat": 34.5191865,
+        "parcelId": "1490804035",
+        "owner": "WHITAKER JOANNA LYN + GRACE LYN"
+      },
+      "status": "partially-verified",
+      "verifiedAt": "2026-08-03"
+    },
+    "Kershaw": {
+      "status": "not-found",
+      "checkedAt": "2026-08-03"
+    }
+  }
+}

@@ -522,22 +522,44 @@ export async function resolveOfficialScZoning({ county, lng, lat, address = '', 
     };
   }
   const municipalServices = await discoverOfficialMunicipalServices(municipality, entry.county, fetcher);
-  const services = dedupe([...municipalServices, ...countyServices]);
-  const priority = services.filter((url) => isBaseZoningName(decodeURIComponent(url))).slice(0, 10);
-  const secondary = services.filter((url) => !priority.includes(url)).slice(0, 10);
-  for (const group of [priority, secondary]) {
+  // MUNICIPAL PRECEDENCE (spec section 11).
+  //
+  // Inside incorporated limits the CITY sets zoning, not the county. Merging the
+  // two service lists and then re-sorting by name destroyed that: a county
+  // service whose name happens to read like zoning outranked a municipal
+  // service whose name does not, so a city parcel could be answered with the
+  // county's district. Keep the tiers separate and exhaust the municipality
+  // first — the county is only consulted once the city has nothing at the point.
+  const tierOf = (urls) => {
+    const list = dedupe(urls);
+    const named = list.filter((url) => isBaseZoningName(decodeURIComponent(url))).slice(0, 10);
+    return [named, list.filter((url) => !named.includes(url)).slice(0, 10)];
+  };
+  const groups = municipality
+    ? [...tierOf(municipalServices), ...tierOf(countyServices)]
+    : tierOf(countyServices);
+  const municipalGroupCount = municipality ? 2 : 0;
+
+  for (const [index, group] of groups.entries()) {
     if (!group.length) continue;
     const layerGroups = await Promise.all(group.map((url) => serviceLayers(url, fetcher)));
     const layers = layerGroups.flat().slice(0, 24);
     const results = await Promise.all(layers.map((layer) => queryLayer(layer, Number(lng), Number(lat), fetcher)));
     const hit = results.find(Boolean);
     if (hit) {
+      const fromMunicipality = index < municipalGroupCount;
       return {
         code: hit.code,
         description: hit.description,
         sourceUrl: hit.sourceUrl,
         officialMapUrl: entry.officialMapUrl,
-        jurisdiction: municipality || `${entry.county} County`,
+        jurisdiction: fromMunicipality ? municipality : `${entry.county} County`,
+        // The controlling authority, so callers can say WHO set this district
+        // rather than implying the county did.
+        jurisdictionType: fromMunicipality ? 'municipality' : 'county',
+        // A county answer for a parcel inside a city is reportable but weaker:
+        // the city may simply not publish its layer.
+        municipalLayerMissing: !!municipality && !fromMunicipality,
         discovery: 'official-arcgis-portal',
       };
     }
@@ -578,6 +600,9 @@ export async function resolveOfficialNcZoning({ county, lng, lat, fetcher = fetc
   ];
   const discovered = await Promise.all(jurisdictions.map(async ({ jurisdiction, kind }) => ({
     jurisdiction,
+    // Carried through so the answer can name the authority that actually
+    // produced the district rather than assuming the municipality.
+    kind,
     services: await discoverOfficialMunicipalServices(
       jurisdiction,
       county,
@@ -602,7 +627,13 @@ export async function resolveOfficialNcZoning({ county, lng, lat, fetcher = fetc
           description: hit.description,
           sourceUrl: hit.sourceUrl,
           officialMapUrl: hit.sourceUrl,
-          jurisdiction: municipality || (group.jurisdiction === county ? `${county} County` : group.jurisdiction),
+          // Label the authority that ACTUALLY answered. Preferring the
+          // municipality name whenever one existed meant a district found on
+          // the COUNTY layer was reported as the city's, which is the wrong
+          // planning department to send someone to.
+          jurisdiction: group.kind === 'county' ? `${county} County` : group.jurisdiction,
+          jurisdictionType: group.kind,
+          municipalLayerMissing: !!municipality && group.kind === 'county',
           discovery: 'official-arcgis-catalog',
         };
       }

@@ -24,12 +24,13 @@ export const handler = async (event) => {
   try {
     const body = event.body ? JSON.parse(event.body) : {};
     const county = String(body.county || '').slice(0, 80);
+    const address = String(body.address || '').slice(0, 240);
     const lng = Number(body.lng);
     const lat = Number(body.lat);
     if (!county || !Number.isFinite(lng) || !Number.isFinite(lat)) {
       return json(400, { success: false, error: 'county, lng and lat are required' });
     }
-    const found = await discoverScParcelAtPoint(county, lng, lat);
+    const found = await discoverScParcelAtPoint(county, lng, lat, fetch, address);
     return json(200, { success: true, data: found });
   } catch (error) {
     return json(502, { success: false, error: String(error?.message || error || 'Parcel discovery failed').slice(0, 300) });

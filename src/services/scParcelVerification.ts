@@ -165,7 +165,7 @@ export async function fetchOfficialScParcel(
   parcelId: string,
   coordinates: { lat: number; lng: number },
   fetcher: typeof fetch = fetch,
-  options: { candidateOwner?: string; skipBrowser?: boolean } = {},
+  options: { candidateOwner?: string; skipBrowser?: boolean; strictParcelId?: boolean } = {},
 ): Promise<OfficialScParcelRecord | null> {
   const source = scCountySource(countyName);
   if (!source) return null;
@@ -185,6 +185,7 @@ export async function fetchOfficialScParcel(
         treasurerUrl: source.treasurerUrl,
         candidateOwner: options.candidateOwner,
         skipBrowser: options.skipBrowser === true,
+        strictParcelId: options.strictParcelId === true,
       }),
     });
     if (!result.ok) return { status: 'unavailable', sourceUrl: source.portalUrl };
