@@ -63,6 +63,12 @@ const SERVICE_AREA_RE = new RegExp(`service${S}area|district|boundary|franchise|
 // and must not be allowed to produce an "inside-service-area" claim.
 const MAIN_RE = /main|line|pipe|gravity|force|distribution|collection|lateral|valve|manhole|structure|network|pump|hydrant/i;
 
+// Boundaries that exist for OPERATIONS, not for service delivery: maintenance
+// crews, meter-reading routes, billing zones, inspection areas, pressure zones.
+// Every one of these is a polygon with "district"/"zone"/"area" in the name and
+// none of them means a parcel can get service.
+const OPERATIONAL_AREA_RE = /maintenance|maint\b|operation|crew|billing|meter[\s_-]*read|route|inspection|asset|pressure[\s_-]*zone|basin[\s_-]*(area|district)/i;
+
 // Not a potable/sanitary utility. Road-closure layers are the trap found live:
 // Dorchester publishes "Road Blocks from water" and "Roads Closed from Water",
 // which matched \bwater\b and were being read as a water service area — a
@@ -87,6 +93,12 @@ export function classifyUtilityLayer(name: string): UtilityLayerRole | null {
   if (!isSewer && !isWater) {
     return SERVICE_AREA_RE.test(text) && /utilit/i.test(text) ? 'utility-district' : null;
   }
+  // OPERATIONAL boundaries are not service areas. Raleigh publishes "Sewer
+  // Maintenance Districts" — a crew/asset-management boundary that matched on
+  // "district" and asserted sewer availability. Being inside the area a crew
+  // maintains says nothing about whether service reaches a given parcel.
+  if (OPERATIONAL_AREA_RE.test(text)) return isSewer ? 'sewer-main' : 'water-main';
+
   // Service area beats main when a name claims both ("Water Service Area Mains"
   // is a boundary layer far more often than a pipe layer).
   if (SERVICE_AREA_RE.test(text)) return isSewer ? 'sewer-service-area' : 'water-service-area';
