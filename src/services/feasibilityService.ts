@@ -2931,7 +2931,36 @@ export async function executeLandAnalysis(
     }
   }
 
+  // AUTOMATIC PUBLIC-RECORD FILL — runs BEFORE acreage is derived.
+  //
+  // Roughly half of SC's 46 counties publish no queryable parcel GIS, so owner,
+  // acreage and land values all came back empty. This recovers them from public
+  // records, but ONLY when county GIS produced nothing, so a county that already
+  // answered never spends a credit.
+  //
+  // Placement matters: acreage, acreageSource and grossSf are all derived just
+  // below. Fetching this later (as it first did) left gisAcres at 0 no matter
+  // what public records said, which is why no acreage ever appeared.
+  let publicRecordOwner: RealEstateOwnerDetails | null = null;
+  const gisHasOwner = !!(String(info.ownfrst ?? '').trim() && String(info.ownlast ?? '').trim())
+    || !!(info.ownname && String(info.ownname).trim().toUpperCase() !== 'N/A');
+  const gisHasAcres = !!(info.gisacres && parseFloat(info.gisacres) > 0.005);
+  if ((!gisHasOwner || !gisHasAcres) && getRealEstateApiKey() && addressString) {
+    publicRecordOwner = await Promise.race([
+      fetchRealEstateOwnerDetails(addressString, getRealEstateApiKey()).catch(() => null),
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), 12_000)),
+    ]);
+    if (publicRecordOwner) {
+      console.log(`Public records filled gaps for ${addressString} (owner=${!gisHasOwner}, acreage=${!gisHasAcres}).`);
+    }
+  }
+
   let gisAcres = info.gisacres ? parseFloat(info.gisacres) : 0;
+  // Public-record acreage is used only when the county had none — the county
+  // layer stays authoritative wherever it answered.
+  if (!(gisAcres > 0.005) && publicRecordOwner?.lotAcres && publicRecordOwner.lotAcres > 0.005) {
+    gisAcres = publicRecordOwner.lotAcres;
+  }
   let acreageSource: SiteFeasibilityData['acreageSource'] = officialScRecord?.acres && officialScRecord.acres > 0
     ? 'assessor'
     : gisAcres > 0.005 ? 'gis' : 'unavailable';
@@ -3036,25 +3065,10 @@ export async function executeLandAnalysis(
     if (secondOwner) ownerName += ` & ${secondOwner}`;
   }
 
-  // AUTOMATIC PUBLIC-RECORD FILL.
-  //
-  // Roughly half of SC's 46 counties publish no queryable parcel GIS — their
-  // data sits behind vendor viewers that return HTTP 403 — so the owner and
-  // land fields came back empty and the user had to press "Look up owner"
-  // every time. This runs that same verified lookup automatically, but ONLY
-  // when county GIS produced no owner, so a county that already answered never
-  // spends a credit.
-  let publicRecordOwner: RealEstateOwnerDetails | null = null;
-  if (!ownerName && getRealEstateApiKey() && addressString) {
-    publicRecordOwner = await Promise.race([
-      fetchRealEstateOwnerDetails(addressString, getRealEstateApiKey()).catch(() => null),
-      new Promise<null>((resolve) => setTimeout(() => resolve(null), 12_000)),
-    ]);
-    if (publicRecordOwner?.ownerName) {
-      ownerName = toTitleCase(publicRecordOwner.ownerName);
-      if (publicRecordOwner.ownerSecondName) ownerName += ` & ${toTitleCase(publicRecordOwner.ownerSecondName)}`;
-      console.log(`Owner recovered from public records for ${addressString} (county GIS had none).`);
-    }
+  // Owner from the public-record fill fetched above, when county GIS had none.
+  if (!ownerName && publicRecordOwner?.ownerName) {
+    ownerName = toTitleCase(publicRecordOwner.ownerName);
+    if (publicRecordOwner.ownerSecondName) ownerName += ` & ${toTitleCase(publicRecordOwner.ownerSecondName)}`;
   }
 
   // Format mailing address
