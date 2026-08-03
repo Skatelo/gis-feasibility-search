@@ -40,7 +40,8 @@
     "test:reapi-zoning": "node scripts/test-reapi-zoning.mjs",
     "test:openrouter-fusion": "node scripts/test-openrouter-fusion.mjs",
     "sweep:sc-parcels": "node scripts/sweep-sc-parcels.mjs",
-    "test:utility-evidence": "node scripts/test-utility-evidence.mjs"
+    "test:utility-evidence": "node scripts/test-utility-evidence.mjs",
+    "test:report-shape": "node scripts/test-report-shape.mjs"
   },
   "dependencies": {
     "@crawlee/cheerio": "^3.17.0",
