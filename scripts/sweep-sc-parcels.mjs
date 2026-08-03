@@ -128,6 +128,11 @@ async function searchHosts(countyName) {
 
   const roots = new Set();
   const services = new Set();
+  // The official county pages themselves — the viewer miner starts from these.
+  const pages = new Set();
+  for (const r of rows) {
+    try { if (officialCountyHost(new URL(r.url).hostname, countyName)) pages.add(r.url); } catch { /* skip */ }
+  }
   for (const r of rows) {
     const text = `${r.url || ''} ${r.snippet || r.content || ''}`;
     // A REST endpoint quoted anywhere in the page text is the strongest signal.
@@ -148,7 +153,115 @@ async function searchHosts(countyName) {
       }
     } catch { /* not a url */ }
   }
-  return { roots: [...roots], services: [...services] };
+  return { roots: [...roots], services: [...services], pages: [...pages] };
+}
+
+// ---------------------------------------------------------------------------
+// VIEWER MINING (spec section 10)
+// Most remaining counties expose no browsable REST directory — the service is
+// only referenced inside their map viewer. Fetching the county GIS page,
+// following it to the viewer, and reading the viewer's config recovers the
+// endpoint. This is how Orangeburg was found for the existing manifest.
+// ---------------------------------------------------------------------------
+
+const ITEM_ID_RE = /[a-f0-9]{32}/i;
+
+async function fetchText(url, timeoutMs = 12000) {
+  try {
+    const res = await fetch(url, {
+      signal: AbortSignal.timeout(timeoutMs),
+      headers: { 'user-agent': 'Mozilla/5.0 (compatible; parcel-discovery/1.0)' },
+    });
+    if (!res.ok) return '';
+    return await res.text();
+  } catch { return ''; }
+}
+
+/** Pull every service URL, ArcGIS item id and viewer link out of a page. */
+function minePage(html, baseUrl) {
+  const services = new Set();
+  const itemIds = new Set();
+  const links = new Set();
+  for (const m of html.matchAll(/https?:\/\/[^\s"'<>)\\]+?\/(?:MapServer|FeatureServer)(?:\/\d+)?/gi)) {
+    services.add(m[0].replace(/\/\d+$/, ''));
+  }
+  for (const m of html.matchAll(/(?:id|webmap|itemId|appid)["'=:\s]+([a-f0-9]{32})/gi)) itemIds.add(m[1]);
+  for (const m of html.matchAll(/href=["']([^"']+)["']/gi)) {
+    const href = m[1];
+    if (!/gis|map|parcel|property|viewer|arcgis/i.test(href)) continue;
+    try { links.add(new URL(href, baseUrl).toString()); } catch { /* skip */ }
+  }
+  return { services: [...services], itemIds: [...itemIds], links: [...links] };
+}
+
+/** Resolve an ArcGIS Online item (web map or app) into its operational layers. */
+async function servicesFromItem(itemId) {
+  const out = new Set();
+  const data = await getJson(`${AGOL}/content/items/${itemId}/data?f=json`, 12000);
+  const walk = (node) => {
+    if (!node || typeof node !== 'object') return;
+    if (typeof node.url === 'string' && /\/(?:MapServer|FeatureServer)/i.test(node.url)) {
+      out.add(node.url.replace(/\/\d+$/, ''));
+    }
+    if (typeof node.itemId === 'string' && ITEM_ID_RE.test(node.itemId)) out.add(`item:${node.itemId}`);
+    for (const v of Object.values(node)) {
+      if (Array.isArray(v)) v.forEach(walk);
+      else if (v && typeof v === 'object') walk(v);
+    }
+  };
+  walk(data);
+  // An app config points at a web map; follow it one level.
+  for (const entry of [...out]) {
+    if (!entry.startsWith('item:')) continue;
+    out.delete(entry);
+    const nested = await getJson(`${AGOL}/content/items/${entry.slice(5)}/data?f=json`, 12000);
+    walk(nested);
+  }
+  const item = await getJson(`${AGOL}/content/items/${itemId}?f=json`, 10000);
+  if (item?.url && /\/(?:MapServer|FeatureServer)/i.test(item.url)) out.add(item.url.replace(/\/\d+$/, ''));
+  return [...out].filter((u) => !u.startsWith('item:'));
+}
+
+/** Follow a county's GIS pages into its viewer and mine the config files. */
+async function mineCountyViewers(countyName, seedUrls) {
+  const found = new Set();
+  const visited = new Set();
+  let frontier = seedUrls.slice(0, 6);
+
+  for (let depth = 0; depth < 2 && frontier.length; depth += 1) {
+    const next = new Set();
+    const pages = await pooled(frontier.slice(0, 8), async (url) => {
+      if (visited.has(url)) return null;
+      visited.add(url);
+      const html = await fetchText(url);
+      return html ? { url, mined: minePage(html, url) } : null;
+    }, 4);
+
+    for (const page of pages.filter(Boolean)) {
+      for (const s of page.mined.services) {
+        try { if (officialCountyHost(new URL(s).hostname, countyName)) found.add(s); } catch { /* skip */ }
+      }
+      for (const id of page.mined.itemIds.slice(0, 4)) {
+        for (const s of await servicesFromItem(id)) found.add(s);
+      }
+      for (const link of page.mined.links.slice(0, 6)) next.add(link);
+    }
+    frontier = [...next];
+  }
+
+  // Viewer apps keep their layer list in a sidecar config file.
+  const configs = [...visited].slice(0, 4).flatMap((u) => {
+    const base = u.replace(/\/[^/]*$/, '');
+    return ['config.json', 'appconfig.json', 'env.js', 'runtime-config.json'].map((f) => `${base}/${f}`);
+  });
+  const configTexts = await pooled(configs, (u) => fetchText(u, 8000), 4);
+  for (const text of configTexts) {
+    if (!text) continue;
+    for (const s of minePage(text, '').services) {
+      try { if (officialCountyHost(new URL(s).hostname, countyName)) found.add(s); } catch { /* skip */ }
+    }
+  }
+  return [...found];
 }
 
 /** ArcGIS Online catalog, publisher-checked, for counties hosting on Esri. */
@@ -312,7 +425,15 @@ async function discoverCounty(name, point) {
   const crawled = (await pooled(roots, async (r) => crawlArcGisDirectory(r), 6)).flat();
   const fromAgol = await agolServices(name);
   const direct = seeded.services.map((u) => u.replace(/\/\d+$/, ''));
-  const services = [...new Set([...direct, ...crawled, ...fromAgol])].filter((u) => PARCELISH.test(u));
+  // Section 10: when no REST directory is browsable, mine the county's own GIS
+  // pages and viewer configs. Only runs if the cheaper routes found nothing.
+  let mined = [];
+  const cheap = [...new Set([...direct, ...crawled, ...fromAgol])].filter((u) => PARCELISH.test(u));
+  if (!cheap.length) {
+    mined = await mineCountyViewers(name, seeded.pages ?? []);
+    if (mined.length) console.log(`    ${name}: viewer mining surfaced ${mined.length} service(s)`);
+  }
+  const services = [...new Set([...cheap, ...mined])].filter((u) => PARCELISH.test(u) || mined.includes(u));
 
   const ranked = services
     .map((u) => ({ u, s: scoreParcelCandidate({ serviceName: u }) }))
@@ -367,14 +488,21 @@ await pooled(targets, async (name) => {
   const hit = await discoverCounty(name, point).catch(() => null);
   done += 1;
   if (hit) {
+    // Viewer mining reaches MUNICIPAL services too. Anderson resolved to
+    // gis.cityofandersonsc.com with 14,121 parcels against a county of ~80,000
+    // — a city subset that would silently answer "no parcel" for most of the
+    // county. Record it, but never as full county coverage.
+    const cityScoped = /cityof|\/city_|_city\b|city_parcels/i.test(`${hit.serviceUrl} ${hit.layerName}`);
     found += 1;
     store.counties[name] = {
+      ...(cityScoped ? { scope: 'municipal-subset', scopeNote: 'Municipal service found via viewer mining — covers a city, not the whole county. Countywide layer still needed.' } : {}),
       parcel: { serviceUrl: hit.serviceUrl, layerId: hit.layerId, serviceType: /FeatureServer/i.test(hit.serviceUrl) ? 'FeatureServer' : 'MapServer' },
       layerName: hit.layerName, idField: hit.idField, ownerField: hit.ownerField,
       featureCount: hit.featureCount, sample: hit.sample,
-      status: 'verified', verifiedAt: new Date().toISOString().slice(0, 10),
+      status: cityScoped ? 'partially-verified' : 'verified',
+      verifiedAt: new Date().toISOString().slice(0, 10),
     };
-    console.log(`[${done}/${targets.length}] ${name.padEnd(14)} OK  ${String(hit.featureCount).padStart(7)} parcels  id=${hit.idField} owner=${hit.ownerField || '-'}  ${hit.layerName}`);
+    console.log(`[${done}/${targets.length}] ${name.padEnd(14)} ${cityScoped ? 'CITY' : 'OK  '} ${String(hit.featureCount).padStart(7)} parcels  id=${hit.idField} owner=${hit.ownerField || '-'}  ${hit.layerName}${cityScoped ? '  (municipal subset, not countywide)' : ''}`);
   } else {
     store.counties[name] = { ...(store.counties[name] || {}), status: 'not-found', checkedAt: new Date().toISOString().slice(0, 10) };
     console.log(`[${done}/${targets.length}] ${name.padEnd(14)} —   no verifiable public parcel layer`);

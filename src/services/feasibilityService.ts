@@ -5,7 +5,12 @@ import { fetchOfficialScParcel, mergeOfficialScParcelRecords, officialRecordFrom
 import { scCountySource } from '../data/scCountySources';
 import { normalizeSourcedRange } from '../data/sourcedEstimate';
 import { listingZoningEvidenceTier, listingUrlMatchesAddress, zoningListingProvider } from '../data/zoningEvidence';
-import { fetchRealEstateZoning, type RealEstateZoningResult } from './realEstateApiProperty';
+import {
+  fetchRealEstateZoning,
+  fetchRealEstateOwnerDetails,
+  type RealEstateZoningResult,
+  type RealEstateOwnerDetails,
+} from './realEstateApiProperty';
 import { buildDeepSeekTransport } from './deepseekTransport';
 import { cleanCode, splitZoningLabel } from './zoning/normalization/zoning-normalizer';
 import { fetchGeminiZoningSearchEvidence, normalizeFullAddressForZoning, type OfficialZoningEvidenceHint } from './geminiZoningSearch';
@@ -3031,10 +3036,33 @@ export async function executeLandAnalysis(
     if (secondOwner) ownerName += ` & ${secondOwner}`;
   }
 
+  // AUTOMATIC PUBLIC-RECORD FILL.
+  //
+  // Roughly half of SC's 46 counties publish no queryable parcel GIS — their
+  // data sits behind vendor viewers that return HTTP 403 — so the owner and
+  // land fields came back empty and the user had to press "Look up owner"
+  // every time. This runs that same verified lookup automatically, but ONLY
+  // when county GIS produced no owner, so a county that already answered never
+  // spends a credit.
+  let publicRecordOwner: RealEstateOwnerDetails | null = null;
+  if (!ownerName && getRealEstateApiKey() && addressString) {
+    publicRecordOwner = await Promise.race([
+      fetchRealEstateOwnerDetails(addressString, getRealEstateApiKey()).catch(() => null),
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), 12_000)),
+    ]);
+    if (publicRecordOwner?.ownerName) {
+      ownerName = toTitleCase(publicRecordOwner.ownerName);
+      if (publicRecordOwner.ownerSecondName) ownerName += ` & ${toTitleCase(publicRecordOwner.ownerSecondName)}`;
+      console.log(`Owner recovered from public records for ${addressString} (county GIS had none).`);
+    }
+  }
+
   // Format mailing address
   let mailingAddress: string | undefined;
   const trimmed = (v: unknown) => String(v ?? '').trim(); // county fields can be fixed-width padded
-  if (info.officialmailingaddress) {
+  if (!info.officialmailingaddress && !info.mailadd && publicRecordOwner?.mailingAddress) {
+    mailingAddress = toTitleCase(publicRecordOwner.mailingAddress);
+  } else if (info.officialmailingaddress) {
     mailingAddress = toTitleCase(trimmed(info.officialmailingaddress));
   } else if (info.mailadd) {
     mailingAddress = '';
@@ -3069,7 +3097,10 @@ export async function executeLandAnalysis(
   // Formulate values
   const assessedYear = info.reviseyear ? parseInt(info.reviseyear) : (selectedState === 'SC' ? undefined : 2025);
   const assessedPropertyValue = info.parval != null ? parseFloat(info.parval) : undefined;
-  const landValue = info.landval != null ? parseFloat(info.landval) : undefined;
+  // Land facts follow the owner from the same verified record, so the card
+  // fills in one pass instead of leaving acreage and values blank.
+  const landValue = info.landval != null ? parseFloat(info.landval)
+    : publicRecordOwner?.assessedLandValue ?? undefined;
   
   // Determine if contact by mail
   const contactByMail = selectedState === 'SC'
