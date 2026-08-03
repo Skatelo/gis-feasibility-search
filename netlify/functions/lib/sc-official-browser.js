@@ -5,6 +5,7 @@ import { Configuration } from '@crawlee/core';
 import { chromium as playwrightChromium } from 'playwright-core';
 
 const MAX_TEXT = 60_000;
+const MAX_HTML = 1_000_000;
 const CHALLENGE_TITLE_RE = /just a moment|attention required|checking your browser/i;
 const REPORT_TEXT_RE = /Parcel (Number|ID)\s+/i;
 
@@ -21,8 +22,13 @@ function localChromePath() {
   return candidates.find((p) => existsSync(p)) || null;
 }
 
-export async function crawlOfficialParcelPage(url, { parcelId = '', address = '' } = {}) {
+export async function crawlOfficialParcelPage(url, {
+  parcelId = '',
+  address = '',
+  searchPortal = true,
+} = {}) {
   let text = '';
+  let html = '';
   let loadedUrl = url;
   let blocked = false;
   const localChrome = localChromePath();
@@ -95,7 +101,7 @@ export async function crawlOfficialParcelPage(url, { parcelId = '', address = ''
       const readBody = async () => String(await page.locator('body').innerText().catch(() => ''));
       let currentText = await readBody();
 
-      if (!REPORT_TEXT_RE.test(currentText)) {
+      if (searchPortal && !REPORT_TEXT_RE.test(currentText)) {
         // Not on a record page (e.g. a constructed report URL fell back to the
         // app shell): run the portal's own search.
         const searchTab = page.getByRole('tab', { name: 'Search', exact: true });
@@ -154,11 +160,12 @@ export async function crawlOfficialParcelPage(url, { parcelId = '', address = ''
       }
 
       text = currentText.slice(0, MAX_TEXT);
+      html = String(await page.content().catch(() => '')).slice(0, MAX_HTML);
       loadedUrl = page.url() || request.loadedUrl || request.url;
     },
     failedRequestHandler() { blocked = true; },
   }, config);
 
   await crawler.run([url]);
-  return { text, loadedUrl, blocked };
+  return { text, html, loadedUrl, blocked };
 }
