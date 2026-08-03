@@ -6,8 +6,8 @@ import { scCountySource } from '../data/scCountySources';
 import { normalizeSourcedRange } from '../data/sourcedEstimate';
 import { listingZoningEvidenceTier, listingUrlMatchesAddress, zoningListingProvider } from '../data/zoningEvidence';
 import {
-  fetchRealEstateZoning,
   fetchRealEstateOwnerDetails,
+  REAL_ESTATE_API_PROPERTY_DETAIL_DOCS,
   type RealEstateZoningResult,
   type RealEstateOwnerDetails,
 } from './realEstateApiProperty';
@@ -2380,6 +2380,19 @@ export async function executeLandAnalysis(
   if (!config) {
     throw new Error(`Target county context for '${countyName}' is unconfigured.`);
   }
+
+  // PUBLIC-RECORD LOOKUP — STARTED HERE, AWAITED LATER.
+  //
+  // Started at the top so it overlaps the parcel and geometry work that follows
+  // and costs no extra wall time. Awaiting it mid-run (as it did) put up to 12
+  // seconds in FRONT of the zoning stage and starved it — the same mistake that
+  // previously broke the Gemini zoning search, reintroduced by the acreage fix.
+  // Nothing between here and the acreage derivation depends on it, so it must
+  // never gate anything.
+  const publicRecordPromise: Promise<RealEstateOwnerDetails | null> =
+    getRealEstateApiKey() && addressString
+      ? fetchRealEstateOwnerDetails(addressString, getRealEstateApiKey()).catch(() => null)
+      : Promise.resolve(null);
   const expectedParcelIds = knownParcel
     ? [...new Set([
         knownParcel.enteredParcelId,
@@ -2945,10 +2958,13 @@ export async function executeLandAnalysis(
   const gisHasOwner = !!(String(info.ownfrst ?? '').trim() && String(info.ownlast ?? '').trim())
     || !!(info.ownname && String(info.ownname).trim().toUpperCase() !== 'N/A');
   const gisHasAcres = !!(info.gisacres && parseFloat(info.gisacres) > 0.005);
-  if ((!gisHasOwner || !gisHasAcres) && getRealEstateApiKey() && addressString) {
+  if (!gisHasOwner || !gisHasAcres) {
+    // The request started at the top of this function, so it has usually
+    // finished by now. The short cap is a floor on the damage if it has not —
+    // the zoning stage still has to run after this.
     publicRecordOwner = await Promise.race([
-      fetchRealEstateOwnerDetails(addressString, getRealEstateApiKey()).catch(() => null),
-      new Promise<null>((resolve) => setTimeout(() => resolve(null), 12_000)),
+      publicRecordPromise,
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), 3_000)),
     ]);
     if (publicRecordOwner) {
       console.log(`Public records filled gaps for ${addressString} (owner=${!gisHasOwner}, acreage=${!gisHasAcres}).`);
@@ -3436,19 +3452,27 @@ export async function executeLandAnalysis(
     // Measured against official GIS on land parcels: 16/16 exact in Wake and
     // Cabarrus. Coverage is all-or-nothing by county (Cabarrus 100%, Union
     // 98.8%, Gaston 0%), so it either answers or it doesn't.
-    // Started, NOT awaited. Awaiting it here delayed the Gemini research by up
-    // to 10s on exactly the addresses that need that research most — the ones
-    // where official GIS found nothing — which pushed the zoning stage into its
-    // timeout and cost the setbacks and allowances entirely. It is a
-    // nice-to-have hint; it must never gate the primary lookup.
-    const publicRecordPromise: Promise<RealEstateZoningResult | null> =
-      !officialCodeHint && getRealEstateApiKey()
-        ? fetchRealEstateZoning(fullZoningAddress, getRealEstateApiKey()).catch(() => null)
-        : Promise.resolve(null);
-    // A very short peek: if public records answer almost immediately it can
-    // still ground the prompt, otherwise Gemini starts without it.
+    // Reuses the ONE public-record request started at the top of the analysis.
+    // This previously issued a SECOND call to the same endpoint — double the
+    // credits for data already in flight — and awaiting it here delayed the
+    // Gemini research on exactly the addresses that need it most. It is a
+    // nice-to-have hint and must never gate the primary lookup.
+    const publicRecordZoningPromise: Promise<RealEstateZoningResult | null> = officialCodeHint
+      ? Promise.resolve(null)
+      : publicRecordPromise.then((details) => (details?.zoning
+        ? {
+          code: details.zoning,
+          matchedAddress: details.matchedAddress,
+          landUse: details.landUse,
+          precision: 'base-district' as const,
+          sourceUrl: REAL_ESTATE_API_PROPERTY_DETAIL_DOCS,
+          fetchedAt: details.fetchedAt,
+        }
+        : null)).catch(() => null);
+    // A very short peek: if it has already resolved it can ground the prompt,
+    // otherwise Gemini starts without it.
     let publicRecordZoning: RealEstateZoningResult | null =
-      await withZoningTimeout(publicRecordPromise, 1_500, null);
+      await withZoningTimeout(publicRecordZoningPromise, 1_500, null);
 
     // Gemini is grounded on whichever source we have. The public-record value is
     // labelled as unverified so the model checks it against the ordinance rather
@@ -3493,7 +3517,7 @@ export async function executeLandAnalysis(
     // Gemini has already run, so collecting the public-record answer now costs
     // nothing — it is only a last-resort display value from here on.
     if (!publicRecordZoning) {
-      publicRecordZoning = await withZoningTimeout(publicRecordPromise, 3_000, null);
+      publicRecordZoning = await withZoningTimeout(publicRecordZoningPromise, 3_000, null);
     }
 
     let officialResult: ZoningResult | null = null;
