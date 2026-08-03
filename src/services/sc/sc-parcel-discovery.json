@@ -1,0 +1,37 @@
+{
+  "generated": "2026-08-03T21:44:39.027Z",
+  "counties": {
+    "Allendale": {
+      "status": "not-found",
+      "checkedAt": "2026-08-03"
+    },
+    "Aiken": {
+      "status": "not-found",
+      "checkedAt": "2026-08-03"
+    },
+    "Abbeville": {
+      "status": "not-found",
+      "checkedAt": "2026-08-03"
+    },
+    "Bamberg": {
+      "status": "not-found",
+      "checkedAt": "2026-08-03"
+    },
+    "Barnwell": {
+      "status": "not-found",
+      "checkedAt": "2026-08-03"
+    },
+    "Cherokee": {
+      "status": "not-found",
+      "checkedAt": "2026-08-03"
+    },
+    "Chester": {
+      "status": "not-found",
+      "checkedAt": "2026-08-03"
+    },
+    "Anderson": {
+      "status": "not-found",
+      "checkedAt": "2026-08-03"
+    }
+  }
+}

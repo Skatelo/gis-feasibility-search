@@ -38,7 +38,8 @@
     "zoning:sweep": "node scripts/sweep-zoning-layers.mjs",
     "test:zoning-manifest": "node --test scripts/zoning-manifest.test.mjs",
     "test:reapi-zoning": "node scripts/test-reapi-zoning.mjs",
-    "test:openrouter-fusion": "node scripts/test-openrouter-fusion.mjs"
+    "test:openrouter-fusion": "node scripts/test-openrouter-fusion.mjs",
+    "sweep:sc-parcels": "node scripts/sweep-sc-parcels.mjs"
   },
   "dependencies": {
     "@crawlee/cheerio": "^3.17.0",
