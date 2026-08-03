@@ -3357,14 +3357,19 @@ export async function executeLandAnalysis(
     // Measured against official GIS on land parcels: 16/16 exact in Wake and
     // Cabarrus. Coverage is all-or-nothing by county (Cabarrus 100%, Union
     // 98.8%, Gaston 0%), so it either answers or it doesn't.
-    let publicRecordZoning: RealEstateZoningResult | null = null;
-    if (!officialCodeHint && getRealEstateApiKey()) {
-      publicRecordZoning = await withZoningTimeout(
-        fetchRealEstateZoning(fullZoningAddress, getRealEstateApiKey()).catch(() => null),
-        10_000,
-        null,
-      );
-    }
+    // Started, NOT awaited. Awaiting it here delayed the Gemini research by up
+    // to 10s on exactly the addresses that need that research most — the ones
+    // where official GIS found nothing — which pushed the zoning stage into its
+    // timeout and cost the setbacks and allowances entirely. It is a
+    // nice-to-have hint; it must never gate the primary lookup.
+    const publicRecordPromise: Promise<RealEstateZoningResult | null> =
+      !officialCodeHint && getRealEstateApiKey()
+        ? fetchRealEstateZoning(fullZoningAddress, getRealEstateApiKey()).catch(() => null)
+        : Promise.resolve(null);
+    // A very short peek: if public records answer almost immediately it can
+    // still ground the prompt, otherwise Gemini starts without it.
+    let publicRecordZoning: RealEstateZoningResult | null =
+      await withZoningTimeout(publicRecordPromise, 1_500, null);
 
     // Gemini is grounded on whichever source we have. The public-record value is
     // labelled as unverified so the model checks it against the ordinance rather
@@ -3405,6 +3410,12 @@ export async function executeLandAnalysis(
     // A dynamic official resolver may need longer than a registered ArcGIS
     // layer. Let it finish while Gemini is already searching.
     if (!officialZoning) officialZoning = await withZoningTimeout(officialLookup, 25_000, null);
+
+    // Gemini has already run, so collecting the public-record answer now costs
+    // nothing — it is only a last-resort display value from here on.
+    if (!publicRecordZoning) {
+      publicRecordZoning = await withZoningTimeout(publicRecordPromise, 3_000, null);
+    }
 
     let officialResult: ZoningResult | null = null;
     const officialCode = officialZoning ? cleanCode(officialZoning.code) : null;
