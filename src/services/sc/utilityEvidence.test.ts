@@ -136,3 +136,29 @@ test('an unrecognised utility-flavoured name is not assumed to be a service area
   assert.equal(classifyUtilityLayer('Water Quality Samples'), null);
   assert.equal(classifyUtilityLayer('Sewer Complaints 2024'), null);
 });
+
+test('real NC layer names: an operational boundary is not a service area', () => {
+  // From Raleigh's live utility service. "Sewer Maintenance Districts" is a
+  // crew boundary that matched on "district" and asserted sewer availability —
+  // being inside the area a crew maintains says nothing about whether service
+  // reaches a parcel.
+  assert.equal(classifyUtilityLayer('Sewer Maintenance Districts'), 'sewer-main');
+  assert.notEqual(classifyUtilityLayer('Sewer Maintenance Districts'), 'sewer-service-area');
+
+  for (const name of ['Water Meter Read Routes', 'Sewer Billing Zones',
+    'Water Pressure Zones', 'Sewer Inspection Areas', 'Water Asset Districts']) {
+    const role = classifyUtilityLayer(name);
+    assert.ok(role !== 'water-service-area' && role !== 'sewer-service-area', `${name} must not claim coverage (got ${role})`);
+  }
+});
+
+test('real NC layer names: equipment and stormwater stay out of coverage claims', () => {
+  // Also from Raleigh live.
+  assert.equal(classifyUtilityLayer('Sewer Pump Station'), 'sewer-main');
+  assert.equal(classifyUtilityLayer('Sewer Manhole'), 'sewer-main');
+  assert.equal(classifyUtilityLayer('Gravity Sewer'), 'sewer-main');
+  assert.equal(classifyUtilityLayer('Force Main'), 'sewer-main');
+  assert.equal(classifyUtilityLayer('Water Body'), null);
+  assert.equal(classifyUtilityLayer('Drainage Basins'), null);
+  assert.equal(classifyUtilityLayer('Sewer Monitoring Gauges'), null);
+});
