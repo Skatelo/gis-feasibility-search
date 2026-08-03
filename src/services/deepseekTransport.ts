@@ -34,6 +34,19 @@ export interface DeepSeekTransport {
  * Only an explicitly DISABLED thinking block is translated. Anything else just
  * loses the unsupported key — we never assert reasoning is off when it isn't.
  */
+/**
+ * Provider routing. Eleven hosts serve this model and OpenRouter's default
+ * routing picks among them per request, so latency was a lottery: measured on
+ * identical work it ranged from 0.16s (DeepInfra) to 12.47s (DeepSeek's own
+ * endpoint) — a 78x spread, with the slow draw stalling the whole section.
+ *
+ * Sorting by throughput removes that tail. It cannot affect correctness: the
+ * model and its weights are the same wherever it runs, only the host changes.
+ * Fallbacks stay ON so a busy first choice degrades to the next host instead of
+ * failing the call.
+ */
+export const OPENROUTER_PROVIDER_ROUTING = { sort: 'throughput', allow_fallbacks: true } as const;
+
 export function toOpenRouterBody(body: string, model: string = OPENROUTER_DEEPSEEK_MODEL): string {
   let parsed: Record<string, unknown>;
   try {
@@ -45,6 +58,8 @@ export function toOpenRouterBody(body: string, model: string = OPENROUTER_DEEPSE
   delete parsed.thinking;
   if (thinking?.type === 'disabled') parsed.reasoning = { enabled: false };
   parsed.model = model;
+  // An explicit provider block from a caller wins — this is only the default.
+  if (!parsed.provider) parsed.provider = { ...OPENROUTER_PROVIDER_ROUTING };
   return JSON.stringify(parsed);
 }
 
