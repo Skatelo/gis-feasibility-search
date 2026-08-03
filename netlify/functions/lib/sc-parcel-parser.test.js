@@ -770,3 +770,29 @@ test('SC map, zoning, utilities, and clearing estimates require visible provenan
   assert.match(proxy, /Cache-Control': 'no-store'/);
   assert.match(viteConfig, /perplexity-chat[\s\S]*chat\/completions/);
 });
+
+// --- municipal zoning precedence (spec section 11) -------------------------
+import { readFileSync as readSrc } from 'node:fs';
+const zoningSrc = readSrc(new URL('./sc-zoning-discovery.js', import.meta.url), 'utf8');
+
+test('inside a city the municipal layer is exhausted before the county', () => {
+  // Merging municipal and county services and re-sorting by NAME destroyed
+  // municipal precedence: a county service that reads like zoning outranked a
+  // municipal one that does not, so a city parcel could be answered with the
+  // county's district. Tiers must stay separate.
+  assert.match(zoningSrc, /const groups = municipality\s*\n?\s*\? \[\.\.\.tierOf\(municipalServices\), \.\.\.tierOf\(countyServices\)\]/);
+  assert.doesNotMatch(zoningSrc, /const services = dedupe\(\[\.\.\.municipalServices, \.\.\.countyServices\]\)/);
+});
+
+test('the answer names the authority that actually produced the district', () => {
+  // Reporting the municipality whenever one existed sent people to the wrong
+  // planning department when the hit came from the county layer.
+  assert.match(zoningSrc, /jurisdictionType: fromMunicipality \? 'municipality' : 'county'/);
+  assert.match(zoningSrc, /jurisdiction: group\.kind === 'county' \? `\$\{county\} County` : group\.jurisdiction/);
+  assert.doesNotMatch(zoningSrc, /jurisdiction: municipality \|\| \(group\.jurisdiction === county/);
+});
+
+test('a county answer inside city limits is flagged, not presented as the city\'s', () => {
+  assert.match(zoningSrc, /municipalLayerMissing: !!municipality && !fromMunicipality/);
+  assert.match(zoningSrc, /municipalLayerMissing: !!municipality && group\.kind === 'county'/);
+});
