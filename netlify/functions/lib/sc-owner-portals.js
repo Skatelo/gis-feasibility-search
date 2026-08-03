@@ -5,12 +5,18 @@ const SC_ROD_DIRECTORY_URL = 'https://www.sccourts.org/courts/court-officials/re
 // current owner or an exact deed reference. They are queried only after the
 // county GIS/treasurer path needs owner enrichment.
 const SC_OWNER_PORTALS = {
+  allendale: {
+    propertyProvider: 'restricted',
+    propertyUrl: 'https://www.qpublic.net/sc/allendale/',
+  },
   anderson: {
     propertyProvider: 'restricted',
     propertyUrl: 'https://acpass.andersoncountysc.org/index.htm',
     deedUrl: 'https://acpass.andersoncountysc.org/index.htm',
   },
   bamberg: {
+    propertyProvider: 'restricted',
+    propertyUrl: 'https://www.qpublic.net/sc/bamberg/',
     deedProvider: 'restricted',
     deedUrl: 'https://BambergSC.avenuinsights.com/Public/BambergSC/',
   },

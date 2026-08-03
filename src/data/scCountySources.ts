@@ -18,9 +18,9 @@ export interface ScCountySource {
 export const SC_COUNTY_SOURCES: readonly ScCountySource[] = [
   { county: 'Abbeville', fips: '45001', provider: 'qpublic', portalUrl: 'https://qpublic.schneidercorp.com/Application.aspx?AppID=613&LayerID=10508&PageTypeID=1', treasurerUrl: 'https://abbevilletreasurer.qpaybill.com/Taxes/TaxesDefaultType4.aspx' },
   { county: 'Aiken', fips: '45003', provider: 'qpublic', portalUrl: 'https://qpublic.schneidercorp.com/Application.aspx?AppID=844&LayerID=15264&PageTypeID=1&PageID=6876' },
-  { county: 'Allendale', fips: '45005', provider: 'restricted', portalUrl: 'https://qpublic.schneidercorp.com/', officialCountyUrl: 'https://www.allendalecounty.com/' },
+  { county: 'Allendale', fips: '45005', provider: 'restricted', portalUrl: 'https://www.qpublic.net/sc/allendale/', officialCountyUrl: 'https://www.allendalecounty.com/', treasurerUrl: 'https://allendaletreasurer.qpaybill.com/Taxes/TaxesDefaultType4.aspx' },
   { county: 'Anderson', fips: '45007', provider: 'county', portalUrl: 'https://propertyviewer.andersoncountysc.org/mapsjs/' },
-  { county: 'Bamberg', fips: '45009', provider: 'restricted', portalUrl: 'https://www.bambergcounty.sc.gov/parcel-gis-maps', officialCountyUrl: 'https://www.bambergcounty.sc.gov/parcel-gis-maps' },
+  { county: 'Bamberg', fips: '45009', provider: 'restricted', portalUrl: 'https://www.qpublic.net/sc/bamberg/', officialCountyUrl: 'https://www.bambergcountysc.gov/tax-assessor', treasurerUrl: 'https://bambergcountytreasurer.qpaybill.com/Taxes/TaxesDefaultType4.aspx' },
   { county: 'Barnwell', fips: '45011', provider: 'beacon', portalUrl: 'https://beacon.schneidercorp.com/Application.aspx?AppID=898&LayerID=16996&PageTypeID=1&PageID=7643', treasurerUrl: 'https://barnwelltreasurer.qpaybill.com/Taxes/TaxesDefaultType4.aspx' },
   { county: 'Beaufort', fips: '45013', provider: 'county', portalUrl: 'https://gis.beaufortcountysc.gov/publicmapping/index.html' },
   { county: 'Berkeley', fips: '45015', provider: 'county', portalUrl: 'https://gis.berkeleycountysc.gov/maps/advanced_map/' },

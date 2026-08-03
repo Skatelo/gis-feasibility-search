@@ -295,6 +295,8 @@ test('Greenwood property report uses assessor owner, or the latest transfer gran
 test('SC owner portal registry keeps protected sites manual and exposes free county searches', () => {
   assert.equal(scOwnerPortalFor('Anderson, SC').propertyProvider, 'restricted');
   assert.equal(scOwnerPortalFor('Berkeley County').propertyProvider, 'berkeley');
+  assert.match(scOwnerVerificationUrl('Allendale'), /qpublic\.net\/sc\/allendale/);
+  assert.match(scOwnerVerificationUrl('Bamberg'), /qpublic\.net\/sc\/bamberg/);
   assert.match(scOwnerPortalFor('Chester').deedUrl, /sclandrecords\.com/);
   assert.match(scOwnerVerificationUrl('Greenwood'), /greenwoodsc\.gov/);
 });
@@ -383,6 +385,45 @@ test('qPay rejects a newer address result for the wrong parcel', async () => {
   assert.equal(result.ownerName, 'PARKER REGINA G');
   assert.equal(result.parcelId, '049-00-00-112 000');
   assert.equal(result.mailingAddress, 'PO BOX 1 UNION SC 29379');
+  assert.equal(call, 5);
+});
+
+test('qPay address lookup rejects a nearby property and accepts only the exact situs address', async () => {
+  let call = 0;
+  const fetcher = async () => {
+    call += 1;
+    if (call === 1) {
+      return new Response('<input type="hidden" name="__VIEWSTATE" value="one">', {
+        headers: { 'set-cookie': 'ASP.NET_SessionId=test; path=/' },
+      });
+    }
+    if (call === 2) return new Response('<input type="hidden" name="__VIEWSTATE" value="two">');
+    if (call === 3) {
+      return new Response(`<table>
+        <tr><td>Real Estate</td><td>2025</td><td><a href="TaxesDetailsType4.aspx?id=nearby">View</a></td></tr>
+        <tr><td>RealEstate</td><td>2024</td><td><a href="TaxesDetailsType4.aspx?id=exact">View</a></td></tr>
+      </table>`);
+    }
+    const exact = call === 5;
+    return new Response(`<body>
+      Name: ${exact ? 'SMITH JANE' : 'WRONG OWNER'} Address: PO BOX 1 YORK SC 29745 Tax Year: 2025
+      Map Number: ${exact ? '070-01-02-003' : '070-01-02-002'} Acres: 0 District/Levy: 01 /
+      Property Address ${exact ? '21 MAGNOLIA ST' : '17 MAGNOLIA ST'} Taxes County Tax:
+      Total Appraisal: $100,000 Total Assessed: $4,000 Total Taxes: $500 Buildings: 1
+    </body>`);
+  };
+
+  const result = await queryQpayTreasurer(
+    'https://example.qpaybill.com/Taxes/TaxesDefaultType4.aspx',
+    '21 Magnolia Street, York, SC 29745',
+    'York',
+    '',
+    fetcher,
+  );
+
+  assert.equal(result.ownerName, 'SMITH JANE');
+  assert.equal(result.parcelId, '070-01-02-003');
+  assert.equal(result.situsAddress, '21 MAGNOLIA ST');
   assert.equal(call, 5);
 });
 
@@ -499,7 +540,9 @@ test('SC manifest contains every county and normal searches do not invoke Enform
   const counties = [...manifest.matchAll(/\{ county: '([^']+)'/g)].map((match) => match[1]);
   assert.equal(counties.length, 46);
   assert.equal(new Set(counties).size, 46);
-  assert.ok((manifest.match(/treasurerUrl:/g) || []).length >= 18);
+  assert.ok((manifest.match(/treasurerUrl:/g) || []).length >= 20);
+  assert.match(manifest, /Allendale[\s\S]*allendaletreasurer\.qpaybill\.com/);
+  assert.match(manifest, /Bamberg[\s\S]*bambergcountytreasurer\.qpaybill\.com/);
 
   const component = await readFile(new URL('../../../src/components/FeasibilitySearch.tsx', import.meta.url), 'utf8');
   const start = component.indexOf('const generateCostEstimates');
@@ -507,6 +550,19 @@ test('SC manifest contains every county and normal searches do not invoke Enform
   const automaticSearchBlock = component.slice(start, end);
   assert.doesNotMatch(automaticSearchBlock, /enformionPropertySearch|fetchEnformionRecords|ContactEnrich|PersonSearch|BusinessSearch/);
   assert.match(component, /Skip Trace Owner \(Paid\)/);
+
+  const service = await readFile(new URL('../../../src/services/feasibilityService.ts', import.meta.url), 'utf8');
+  const analysisStart = service.indexOf('export async function executeLandAnalysis');
+  const discoveryCall = service.indexOf('const discovered = await discoverScParcelFeature', analysisStart);
+  const statewideLoop = service.indexOf('for (const parcelHost of parcelHosts', analysisStart);
+  const bboxStart = service.indexOf('export async function fetchParcelsInBbox');
+  const bboxEnd = service.indexOf('function acresFromGeometry', bboxStart);
+  const bboxBlock = service.slice(bboxStart, bboxEnd);
+  assert.match(service, /const parcelHosts = selectedState === 'NC'[\s\S]{0,160}: \[\];/);
+  assert.doesNotMatch(service, /queryScStatewideParcelAttributes/);
+  assert.ok(discoveryCall > analysisStart && discoveryCall < statewideLoop);
+  assert.match(bboxBlock, /countyParcelLayerFor\(countyName, 'SC'\)/);
+  assert.doesNotMatch(bboxBlock, /SCDOT statewide snapshot owner/);
 });
 
 test('SC map, zoning, utilities, and clearing estimates require visible provenance', async () => {
@@ -520,7 +576,8 @@ test('SC map, zoning, utilities, and clearing estimates require visible provenan
   assert.match(service, /mode: 'hard'/);
   assert.match(geminiZoning, /Prefer official parcel GIS, official address results, and official parcel reports/);
   assert.match(service, /officialMethods[\s\S]*requestedParcelSource[\s\S]*evidenceUrlAllowed/);
-  assert.match(service, /SCDOT statewide snapshot owner/);
+  assert.match(service, /County GIS tax-roll owner/);
+  assert.doesNotMatch(service, /SCDOT statewide snapshot owner/);
   assert.doesNotMatch(service, /UTIL_ESTIMATE|TREE_RATE_FALLBACK|CLEARING_FALLBACK/);
   assert.match(service, /A number without a line-specific source URL is invalid/);
   assert.match(service, /source-backed budget range/);
