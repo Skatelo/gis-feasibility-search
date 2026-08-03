@@ -28,14 +28,64 @@ const EXCLUDED_NAME_RE = /\b(zoning|flood|school|voting|precinct|election|addres
 
 // A record only counts as a parcel if it carries a parcel identifier and/or owner.
 const PARCEL_ID_KEY_RE = /(^|_)(pin|tms|apn|pid|parcel|taxmap|map_?number|parcel_?id|parcelno|parno)/i;
-const OWNER_KEY_RE = /(owner|ownname|own_?name|taxpayer|deed_?holder|grantee)/i;
+const OWNER_KEY_RE = /(?:^|_)(?:owner(?:s|name|_?name|_?\d+)?|ownname|own_?name|taxpayer|deed_?holder|grantee|current_?owners?)(?:$|_|\d)/i;
 const ACRE_KEY_RE = /(acre|acreage|gis_?acres|calc_?acres|deeded_?acres)/i;
 const ADDRESS_KEY_RE = /(situs|site_?add|prop_?add|phys_?add|location|address)/i;
+const SITUS_ADDRESS_KEY_RE = /(situs|site_?add|prop(?:erty)?_?add|phys(?:ical)?_?add|location_?addr|street_?address)/i;
+
+const STREET_ALIASES = {
+  STREET: 'ST', ROAD: 'RD', AVENUE: 'AVE', HIGHWAY: 'HWY', LANE: 'LN', DRIVE: 'DR',
+  BOULEVARD: 'BLVD', COURT: 'CT', CIRCLE: 'CIR', PLACE: 'PL', TERRACE: 'TER',
+  PARKWAY: 'PKWY', TRAIL: 'TRL', TURNPIKE: 'TPKE', ROUTE: 'RTE', CROSSING: 'XING',
+  COVE: 'CV', NORTH: 'N', SOUTH: 'S', EAST: 'E', WEST: 'W',
+};
 
 const dedupe = (values) => [...new Set(values.filter(Boolean))];
 const compactName = (value) => String(value || '').toLowerCase().replace(/[^a-z0-9]/g, '');
 const isParcelName = (value) => PARCEL_NAME_RE.test(String(value || '').replace(/[_-]+/g, ' '));
 const isExcludedName = (value) => EXCLUDED_NAME_RE.test(String(value || '').replace(/[_-]+/g, ' '));
+
+function normalizeStreetAddress(value) {
+  let text = String(value || '').trim().toUpperCase();
+  if (!text) return '';
+  const firstLine = text.split(',')[0]?.trim();
+  if (/^\d+[A-Z]?(?:[-/]\d+[A-Z]?)?\s/.test(firstLine || '')) text = firstLine;
+  text = text
+    .replace(/\b(?:APT|APARTMENT|UNIT|SUITE|STE|BUILDING|BLDG)\b.*$/i, '')
+    .replace(/[^A-Z0-9]+/g, ' ')
+    .trim();
+  return text.split(/\s+/).filter(Boolean).map((token) => STREET_ALIASES[token] || token).join(' ');
+}
+
+function streetAddressesMatch(left, right) {
+  const a = normalizeStreetAddress(left);
+  const b = normalizeStreetAddress(right);
+  if (!a || !b) return false;
+  const aTokens = a.split(' ');
+  const bTokens = b.split(' ');
+  if (aTokens[0] !== bTokens[0]) return false;
+  if (a === b) return true;
+  const [shorter, longer] = a.length < b.length ? [a, b] : [b, a];
+  return shorter.split(' ').length >= 3 && longer.startsWith(`${shorter} `);
+}
+
+function situsAddresses(attributes) {
+  return Object.entries(attributes || {})
+    .filter(([key, value]) =>
+      SITUS_ADDRESS_KEY_RE.test(key)
+      && !/(mail|billing|owner|taxpayer)/i.test(key)
+      && String(value || '').trim(),
+    )
+    .map(([, value]) => value);
+}
+
+function selectUniqueAddressFeature(features, address) {
+  if (!normalizeStreetAddress(address)) return null;
+  const matches = (features || []).filter((feature) =>
+    situsAddresses(feature?.attributes).some((candidate) => streetAddressesMatch(candidate, address)),
+  );
+  return matches.length === 1 ? matches[0] : null;
+}
 
 function cleanServiceUrl(value) {
   const url = String(value || '').replace(/\\\//g, '/').replace(/[),.;]+$/, '');
@@ -225,23 +275,48 @@ async function parcelLayerIds(serviceUrl, fetcher) {
 }
 
 /** Query one layer at the point and keep it only if it returns a parcel record. */
-async function probeLayer(serviceUrl, layerId, lng, lat, fetcher) {
-  const params = new URLSearchParams({
-    geometry: `${lng},${lat}`,
-    geometryType: 'esriGeometryPoint',
-    inSR: '4326',
-    spatialRel: 'esriSpatialRelIntersects',
-    where: '1=1',
-    outFields: '*',
-    returnGeometry: 'true',
-    outSR: '4326',
-    resultRecordCount: '1',
-    f: 'json',
-  });
-  const data = await request(`${serviceUrl}/${layerId}/query?${params}`, fetcher, 8000);
-  const feature = data?.features?.[0];
+async function probeLayer(serviceUrl, layerId, lng, lat, fetcher, address = '') {
+  const query = async (geometry, geometryType) => {
+    const params = new URLSearchParams({
+      geometry,
+      geometryType,
+      inSR: '4326',
+      spatialRel: 'esriSpatialRelIntersects',
+      where: '1=1',
+      outFields: '*',
+      returnGeometry: 'true',
+      outSR: '4326',
+      resultRecordCount: geometryType === 'esriGeometryPoint' ? '10' : '75',
+      f: 'json',
+    });
+    const data = await request(`${serviceUrl}/${layerId}/query?${params}`, fetcher, 8000);
+    return Array.isArray(data?.features) ? data.features : [];
+  };
+
+  const pointFeatures = await query(`${lng},${lat}`, 'esriGeometryPoint');
+  const pointAddressMatch = selectUniqueAddressFeature(pointFeatures, address);
+  let feature = pointAddressMatch
+    || pointFeatures.find((candidate) => parcelAttributeScore(candidate?.attributes) >= 2)
+    || null;
+
+  if (address && !pointAddressMatch) {
+    const d = 0.00055;
+    const envelopeFeatures = await query(
+      `${lng - d},${lat - d},${lng + d},${lat + d}`,
+      'esriGeometryEnvelope',
+    );
+    const envelopeAddressMatch = selectUniqueAddressFeature(envelopeFeatures, address);
+    if (envelopeAddressMatch) {
+      feature = envelopeAddressMatch;
+    } else if (feature && situsAddresses(feature.attributes).length) {
+      feature = null;
+    }
+  }
   if (!feature?.attributes) return null;
   const score = parcelAttributeScore(feature.attributes);
+  const hasOwner = Object.keys(feature.attributes).some((key) =>
+    OWNER_KEY_RE.test(key) && String(feature.attributes[key] ?? '').trim(),
+  );
   if (score < 2) return null; // not parcel-shaped — reject rather than guess
 
   // GEOGRAPHIC GUARD: some services answer a point query with a record that is
@@ -262,6 +337,7 @@ async function probeLayer(serviceUrl, layerId, lng, lat, fetcher) {
     serviceUrl,
     layerId,
     score,
+    hasOwner,
     attributes: feature.attributes,
     rings: feature.geometry?.rings || null,
   };
@@ -271,7 +347,7 @@ async function probeLayer(serviceUrl, layerId, lng, lat, fetcher) {
  * Find the county's official parcel record at a point. Returns null when nothing
  * verifiable is found — callers must treat that as "unavailable", never invent.
  */
-export async function discoverScParcelAtPoint(county, lng, lat, fetcher = fetch) {
+export async function discoverScParcelAtPoint(county, lng, lat, fetcher = fetch, address = '') {
   const countyName = String(county || '').replace(/,\s*SC$/i, '').replace(/\s+County$/i, '').trim();
   if (!countyName || !Number.isFinite(lng) || !Number.isFinite(lat)) return null;
   const countyToken = compactName(countyName);
@@ -280,31 +356,43 @@ export async function discoverScParcelAtPoint(county, lng, lat, fetcher = fetch)
   // coordinate, so a stale or city-scoped entry falls through to live discovery
   // rather than returning nothing useful.
   const known = scParcelLayerFor(countyName);
+  let best = null;
   if (known) {
-    const hit = await probeLayer(known.url, known.layer, lng, lat, fetcher).catch(() => null);
-    if (hit) return hit;
+    const hit = await probeLayer(known.url, known.layer, lng, lat, fetcher, address).catch(() => null);
+    if (hit) {
+      best = hit;
+      if (hit.hasOwner) return hit;
+    }
   }
 
   const itemIds = await verifiedParcelItemIds(countyName, fetcher);
-  if (!itemIds.length) return null;
+  if (!itemIds.length) return best;
   const services = (await servicesFromItems(itemIds, fetcher))
     .sort((a, b) => scoreService(b, countyToken) - scoreService(a, countyToken))
     .slice(0, 14);
-  if (!services.length) return null;
+  if (!services.length) return best;
 
   // Probe services in rank order and keep the richest parcel hit. Scanning
   // continues past a bare geometry-only match so a layer that actually carries
   // the OWNER wins over one that only has a PIN.
-  let best = null;
   for (const serviceUrl of services) {
     const layerIds = await parcelLayerIds(serviceUrl, fetcher);
-    const probes = await Promise.all(layerIds.map((id) => probeLayer(serviceUrl, id, lng, lat, fetcher).catch(() => null)));
+    const probes = await Promise.all(layerIds.map((id) => probeLayer(serviceUrl, id, lng, lat, fetcher, address).catch(() => null)));
     for (const hit of probes) {
-      if (hit && (!best || hit.score > best.score)) best = hit;
+      if (hit && (!best || (hit.hasOwner && !best.hasOwner) || (hit.hasOwner === best.hasOwner && hit.score > best.score))) best = hit;
     }
-    if (best && best.score >= 5) break; // owner + id + acres/address: good enough
+    if (best?.hasOwner && best.score >= 4) break;
   }
   return best;
 }
 
-export const __testables = { parcelAttributeScore, scoreService, isParcelName, isExcludedName, cleanServiceUrl };
+export const __testables = {
+  parcelAttributeScore,
+  scoreService,
+  isParcelName,
+  isExcludedName,
+  cleanServiceUrl,
+  normalizeStreetAddress,
+  streetAddressesMatch,
+  selectUniqueAddressFeature,
+};
