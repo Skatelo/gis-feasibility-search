@@ -1,4 +1,6 @@
 import { parseQpublicParcelText, scParcelIdsMatch, situsAddressesMatch, unionReportUrl } from './lib/sc-parcel-parser.js';
+import { queryOfficialCountyProperty } from './lib/sc-county-property.js';
+import { scOwnerVerificationUrl } from './lib/sc-owner-portals.js';
 import { queryQpayTreasurer } from './lib/sc-union-treasurer.js';
 import { queryWthgisParcel } from './lib/sc-wthgis.js';
 
@@ -99,6 +101,7 @@ export const handler = async (event) => {
   const skipBrowser = body.skipBrowser === true;
   if (!county || !portalUrl) return response(400, { error: 'county and portalUrl are required' });
   try { new URL(portalUrl); } catch { return response(400, { error: 'Invalid portalUrl' }); }
+  const ownerVerificationUrl = scOwnerVerificationUrl(county, portalUrl);
 
   const qpayPromise = treasurerUrl && address && isAllowedHost(treasurerUrl, 'qpaybill.com')
     ? queryQpayTreasurer(treasurerUrl, address, county, parcelId).catch(() => null)
@@ -106,20 +109,30 @@ export const handler = async (event) => {
   const wthPromise = isAllowedHost(portalUrl, 'wthgis.com')
     ? queryWthgisParcel({ portalUrl, address, parcelId, candidateOwner, county }).catch(() => null)
     : Promise.resolve(null);
-  const [qpayRecord, wthRecord] = await Promise.all([qpayPromise, wthPromise]);
-  const structuredRecord = mergeVerified(qpayRecord, wthRecord);
+  const countyPropertyPromise = queryOfficialCountyProperty({
+    county,
+    address,
+    parcelId,
+    allowBrowser: !skipBrowser,
+  }).catch(() => null);
+  const [qpayRecord, wthRecord, countyPropertyRecord] = await Promise.all([
+    qpayPromise,
+    wthPromise,
+    countyPropertyPromise,
+  ]);
+  const structuredRecord = mergeVerified(countyPropertyRecord, mergeVerified(qpayRecord, wthRecord));
   if (structuredRecord) {
     return response(200, { success: true, data: structuredRecord });
   }
   if (skipBrowser) {
-    return response(200, { success: true, data: { status: 'unavailable', sourceUrl: portalUrl } });
+    return response(200, { success: true, data: { status: 'unavailable', sourceUrl: ownerVerificationUrl } });
   }
 
   // A county's primary portal may be its own viewer while the scrapeable
   // Schneider app is listed as the alternate — use whichever is Schneider.
   const schneiderUrl = [portalUrl, alternateUrl].find(isSchneiderUrl);
   if (!schneiderUrl || (!parcelId && !address)) {
-    return response(200, { success: true, data: { status: 'unavailable', sourceUrl: portalUrl } });
+    return response(200, { success: true, data: { status: 'unavailable', sourceUrl: ownerVerificationUrl } });
   }
 
   const usableParcelId = parcelId && parcelId.toUpperCase() !== 'N/A' ? parcelId : '';

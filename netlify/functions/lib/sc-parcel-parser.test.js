@@ -11,6 +11,14 @@ import {
   unionReportUrl,
 } from './sc-parcel-parser.js';
 import { __testables as parcelDiscoveryTestables } from './sc-parcel-discovery.js';
+import {
+  parseBerkeleyDeedHtml,
+  parseBerkeleyPropertyHtml,
+  parseGreenvillePropertyHtml,
+  parseGreenwoodPropertyHtml,
+  queryOfficialCountyProperty,
+} from './sc-county-property.js';
+import { scOwnerPortalFor, scOwnerVerificationUrl } from './sc-owner-portals.js';
 import { parseUnionTreasurerDetail, queryQpayTreasurer } from './sc-union-treasurer.js';
 import { parseWthgisParcelDetail, queryWthgisParcel } from './sc-wthgis.js';
 
@@ -124,6 +132,171 @@ test('SC assessor browser keeps the Lambda Chromium package as a native ESM impo
   const browserSource = await readFile(new URL('./sc-official-browser.js', import.meta.url), 'utf8');
   assert.doesNotMatch(browserSource, /^import\s+chromiumBinary\s+from\s+['"]@sparticuz\/chromium['"]/m);
   assert.match(browserSource, /await import\(['"]@sparticuz\/chromium['"]\)/);
+});
+
+const BERKELEY_PROPERTY_CARD = `<body>
+  <h2>Property Card</h2>
+  <div>TMS: 180-00-01-030</div>
+  <div>Owner Information:</div>
+  <table><tr><td>OWENS JOSEPH W &amp; RAYMOND HARVEY SURVIVORSHIP<br>478 OAKLEY ROAD<br>MONCKS CORNER, SC 29461</td></tr></table>
+  <div>Owner Occupied Property: Yes</div>
+  <div>Tax District: T06</div><div>Acres: 0.69</div><div>Zoning: Berkeley County - Flex1 Parent TMS:</div>
+  <h3>Site addresses:</h3><table><tr><td>478 OAKLEY RD<br>MONCKS CORNER, SC 29461, Unit/Lot:</td></tr></table>
+  <div>Previous Owner History:</div>
+  <a href="https://search.berkeleydeeds.com/DetailScreen.php?inst_num=2020009164">Current Deed Record</a>
+  <div>Building Market: 140,000 Land Market: 42,000 Total Taxable Value: 153,065 Total Assessment: 6,120</div>
+  <div>Building Count: 1 Building Total Finished SQFT: 1481</div>
+  <table><tr><th>Tax Year</th><th>Receipt #</th><th>Tax District</th><th>Original Total</th></tr><tr><td>2025</td><td>0087059</td><td>6</td><td>$775.29</td></tr></table>
+</body>`;
+
+test('Berkeley property card resolves the current assessor owner and exact situs', () => {
+  const record = parseBerkeleyPropertyHtml(
+    BERKELEY_PROPERTY_CARD,
+    'https://assessor.berkeleycountysc.gov/property_card.php?tms=1800001030',
+  );
+  assert.equal(record.status, 'verified');
+  assert.equal(record.parcelId, '180-00-01-030');
+  assert.equal(record.ownerName, 'OWENS JOSEPH W & RAYMOND HARVEY SURVIVORSHIP');
+  assert.equal(record.situsAddress, '478 OAKLEY RD');
+  assert.equal(record.ownerRecordType, 'assessor');
+  assert.equal(record.landValue, 42000);
+  assert.equal(record.improvementValue, 140000);
+  assert.equal(record.marketValue, 182000);
+  assert.equal(record.taxAmount, 775.29);
+  assert.equal(record.taxYear, 2025);
+  assert.equal(record.building.livingSqft, 1481);
+});
+
+test('Berkeley address fallback selects one exact property-card result', async () => {
+  const calls = [];
+  const fetcher = async (url) => {
+    calls.push(String(url));
+    if (calls.length === 1) {
+      return new Response(`<table>
+        <tr><th>Export</th><th>TMS</th><th>Street Address</th><th>Owner Name</th><th>Owner Mailing Address</th></tr>
+        <tr><td></td><td><a href="property_card.php?tms=1800001030">1800001030</a></td><td>478 OAKLEY RD, MONCKS CORNER 29461</td><td>OWENS JOSEPH W</td><td>478 OAKLEY RD</td></tr>
+        <tr><td></td><td><a href="property_card.php?tms=1800001035">1800001035</a></td><td>318 OAKLEY RD, MONCKS CORNER 29461</td><td>FLYNN DONALD D</td><td>318 OAKLEY RD</td></tr>
+      </table>`);
+    }
+    return new Response(BERKELEY_PROPERTY_CARD);
+  };
+  const record = await queryOfficialCountyProperty({
+    county: 'Berkeley',
+    address: '478 Oakley Road, Moncks Corner, SC 29461',
+    parcelId: '',
+    fetcher,
+  });
+  assert.equal(record.ownerName, 'OWENS JOSEPH W & RAYMOND HARVEY SURVIVORSHIP');
+  assert.equal(record.parcelId, '180-00-01-030');
+  assert.equal(calls.length, 2);
+  assert.match(calls[0], /streetnum=478/);
+  assert.match(calls[0], /streetname=Oakley/i);
+});
+
+test('Berkeley uses one bounded browser read when the official assessor returns a passive challenge', async () => {
+  const browserCalls = [];
+  const record = await queryOfficialCountyProperty({
+    county: 'Berkeley',
+    address: '478 Oakley Road, Moncks Corner, SC 29461',
+    parcelId: '1800001030',
+    fetcher: async () => new Response('<title>Just a moment...</title>', { status: 403 }),
+    browserFetcher: async (url) => {
+      browserCalls.push(String(url));
+      return { blocked: false, html: BERKELEY_PROPERTY_CARD };
+    },
+  });
+  assert.equal(record.ownerName, 'OWENS JOSEPH W & RAYMOND HARVEY SURVIVORSHIP');
+  assert.equal(browserCalls.length, 1);
+  assert.match(browserCalls[0], /property_card\.php\?tms=1800001030/);
+});
+
+test('Berkeley does not start Crawlee when a verified county GIS owner already exists', async () => {
+  let browserCalls = 0;
+  const record = await queryOfficialCountyProperty({
+    county: 'Berkeley',
+    address: '478 Oakley Road, Moncks Corner, SC 29461',
+    parcelId: '1800001030',
+    allowBrowser: false,
+    fetcher: async () => new Response('<title>Just a moment...</title>', { status: 403 }),
+    browserFetcher: async () => {
+      browserCalls += 1;
+      return { blocked: false, html: BERKELEY_PROPERTY_CARD };
+    },
+  });
+  assert.equal(record, null);
+  assert.equal(browserCalls, 0);
+});
+
+test('Berkeley Register of Deeds supplies a grantee only for the matched property card', async () => {
+  const propertyWithoutOwner = BERKELEY_PROPERTY_CARD.replace(
+    'OWENS JOSEPH W &amp; RAYMOND HARVEY SURVIVORSHIP<br>478 OAKLEY ROAD<br>MONCKS CORNER, SC 29461',
+    '',
+  );
+  const deedHtml = `<body>
+    <div>Instrument Type DEED</div><div>File Date 03/13/2020</div>
+    <table><tbody>
+      <tr><td>Grantees</td></tr>
+      <tr><td>Grantees</td><td>D Status</td><td>Date Corrected</td></tr>
+      <tr><td>JOSEPH W OWENS</td><td></td><td></td></tr>
+      <tr><td>RAYMOND HARVEY OWENS</td><td></td><td></td></tr>
+    </tbody></table>
+  </body>`;
+  assert.equal(parseBerkeleyDeedHtml(deedHtml, 'https://search.berkeleydeeds.com/detail').granteeName, 'JOSEPH W OWENS & RAYMOND HARVEY OWENS');
+
+  const record = await queryOfficialCountyProperty({
+    county: 'Berkeley',
+    address: '478 Oakley Road, Moncks Corner, SC 29461',
+    parcelId: '1800001030',
+    fetcher: async (url) => new Response(String(url).includes('search.berkeleydeeds.com') ? deedHtml : propertyWithoutOwner),
+  });
+  assert.equal(record.ownerName, 'JOSEPH W OWENS & RAYMOND HARVEY OWENS');
+  assert.equal(record.ownerRecordType, 'deed');
+  assert.match(record.sourceName, /Register of Deeds/);
+});
+
+test('Greenville property details never confuse Previous Owner with current Owner(s)', () => {
+  const html = `<body><h1>Real Property Details</h1><table>
+    <tr><th>Map #:</th><td>0069000300700</td></tr>
+    <tr><th>Tax Year:</th><td>2026</td></tr>
+    <tr><th>District:</th><td>500</td></tr>
+    <tr><th>Owner(s):</th><td>Anderson Development Inc</td></tr>
+    <tr><th>Previous Owner:</th><td>Wrong Previous Owner</td></tr>
+    <tr><th>Mailing Address:</th><td>PO Box 2567 Greenville, SC 29602</td></tr>
+    <tr><th>Acreage:</th><td>0.280</td></tr>
+    <tr><th>Location:</th><td>12 University Ridge</td></tr>
+    <tr><th>Fair Market Value:</th><td>318,670</td></tr>
+    <tr><th>Taxable Market Value:</th><td>56,930</td></tr>
+  </table></body>`;
+  const record = parseGreenvillePropertyHtml(html, 'https://www.greenvillecounty.org/property');
+  assert.equal(record.ownerName, 'Anderson Development Inc');
+  assert.equal(record.parcelId, '0069000300700');
+  assert.equal(record.situsAddress, '12 University Ridge');
+  assert.equal(record.marketValue, 318670);
+  assert.equal(record.taxableValue, 56930);
+});
+
+test('Greenwood property report uses assessor owner, or the latest transfer grantee when omitted', () => {
+  const report = (ownerRow = '<tr><td>Owner Name</td><td>M &amp; RE ASSOCIATES LLC</td></tr>') => `<body>
+    <div>Greenwood County, SC - Property Report 7/27/2026</div>
+    <table><tr><td>6826-762-357</td><td>115 Queens Ct</td><td>LT 11 EIGHTEEN QUEENS COURT</td></tr></table>
+    <table>${ownerRow}<tr><td>Mailing Address</td><td>PO BOX 11</td></tr><tr><td>City, State Zip</td><td>GREENWOOD, SC 29648</td></tr></table>
+    <table><tr><td>BN2019 LLC</td><td>M &amp; RE ASSOCIATES LLC</td><td>6/3/2025</td><td>Partial Interest</td><td>$17,308</td><td>LT 11</td><td>1657-1852</td><td>132-90</td></tr></table>
+    <table><tr><td>BN2019 LLC</td><td>$606.55</td><td>$999.42</td><td>2025</td><td>Paid</td><td>1/22/2026</td></tr></table>
+  </body>`;
+  const assessor = parseGreenwoodPropertyHtml(report(), 'https://www.greenwoodsc.gov/report');
+  assert.equal(assessor.ownerName, 'M & RE ASSOCIATES LLC');
+  assert.equal(assessor.ownerRecordType, 'assessor');
+  assert.equal(assessor.taxAmount, 999.42);
+  const deed = parseGreenwoodPropertyHtml(report(''), 'https://www.greenwoodsc.gov/report');
+  assert.equal(deed.ownerName, 'M & RE ASSOCIATES LLC');
+  assert.equal(deed.ownerRecordType, 'deed');
+});
+
+test('SC owner portal registry keeps protected sites manual and exposes free county searches', () => {
+  assert.equal(scOwnerPortalFor('Anderson, SC').propertyProvider, 'restricted');
+  assert.equal(scOwnerPortalFor('Berkeley County').propertyProvider, 'berkeley');
+  assert.match(scOwnerPortalFor('Chester').deedUrl, /sclandrecords\.com/);
+  assert.match(scOwnerVerificationUrl('Greenwood'), /greenwoodsc\.gov/);
 });
 
 test('Union treasurer detail resolves current owner, parcel, assessment, and tax', () => {
