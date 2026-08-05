@@ -16,6 +16,7 @@ A high-performance real estate feasibility screening dashboard built with React,
 * **Mortgage & Sales Transactions**: Runs an explicit, on-demand RealEstateAPI.com Property Detail lookup for the exact NC or SC address and displays recorded mortgage and sale history in the left report column.
 * **Interactive Gemini Q&A Chatbot**: A contextual chatbot capable of explaining setbacks, zoning rules, or construction options utilizing the current parcel context.
 * **Printable Feasibility Report**: Generates vector PDF-ready feasibility reports for wholesalers and developers.
+* **Durable Background Reports**: Runs automatic or on-demand reports in a Netlify background function, saves them to the signed-in Supabase account, and can email the completed report through Resend.
 
 ## Get Started
 
@@ -63,6 +64,28 @@ Configure `REALESTATEAPI_KEY` as a Netlify server environment variable, or add a
 The in-report **Zoning & Allowances** section uses Gemini 3.6 Flash with its built-in Google Search grounding tool. Each lookup includes the complete street, city, state name, ZIP code, and `United States`; the request uses `cache: "no-store"`. The grounded response must include source citations before the app accepts a district or its adopted standards.
 
 Configure the Gemini API key in **Account & API Settings**. No separate search credential or search-engine configuration is required.
+
+## Background Reports & Email
+
+Background execution requires Supabase cloud accounts and the `report_jobs`
+migration. Users can choose **Generate Now** or **Run in Background** on a manual
+report, or select **Background server** for automatic reports in Account & API
+Settings. My Reports polls queued/running jobs and opens the saved report when it
+completes. Email is always sent to the authenticated account address.
+
+The background worker runs the full fusion pipeline: Perplexity Search discovers
+sources; bounded Crawlee extracts selected pages and documents; Context.dev web
+search and Markdown extraction plus Octen Extract run through the Monid API;
+Gemini and DeepSeek/OpenRouter
+produce independent drafts; and Gemini judges them into the saved final report.
+It never substitutes a Gemini-only report when fusion credentials are missing.
+
+Deploy the app on Netlify and configure `SUPABASE_URL`, `SUPABASE_ANON_KEY`,
+`RESEND_API_KEY`, and a verified `REPORT_FROM_EMAIL`. Users can save the required
+Gemini, DeepSeek/OpenRouter, Perplexity, and Monid credentials in Account & API
+Settings; equivalent server environment variables are supported as fallbacks.
+See `SETUP_SUPABASE.md` for the SQL and deployment steps. Use `npx netlify dev`
+for local worker testing.
 
 ## Official NC/SC Zoning Service
 

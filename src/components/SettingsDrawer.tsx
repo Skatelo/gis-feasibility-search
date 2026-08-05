@@ -1,8 +1,9 @@
 import { useState, useEffect } from 'react';
-import { X, Key, User, ShieldAlert, LogOut, CheckCircle, Eye, EyeOff, Info, Cloud, Ruler, Home, FileText, Loader2 } from 'lucide-react';
+import { X, Key, User, ShieldAlert, LogOut, CheckCircle, Eye, EyeOff, Info, Cloud, Ruler, Home, FileText, Loader2, Mail } from 'lucide-react';
 import { persistUserKeys } from '../services/authService';
 import { isSupabaseConfigured } from '../services/supabaseClient';
 import { getCompPrefs, setCompPrefs, getReportAutoGenerate, setReportAutoGenerate } from '../services/feasibilityService';
+import { getReportExecutionPreferences, setReportExecutionPreferences } from '../services/reportJobs';
 import {
   getMonidBudgetSnapshot,
   MONID_BUDGET_PROFILES,
@@ -74,6 +75,8 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
   const [compRadiusPref, setCompRadiusPref] = useState(5);
   const [compTypePref, setCompTypePref] = useState('all');
   const [reportAuto, setReportAuto] = useState(true);
+  const [reportExecution, setReportExecution] = useState<'foreground' | 'background'>('foreground');
+  const [reportEmail, setReportEmail] = useState(false);
 
   // Initialize the form ONLY when the drawer opens — not on every activeUser
   // re-render. Supabase refreshes the session when you switch browser tabs,
@@ -105,6 +108,9 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
       setCompRadiusPref(prefs.radiusMiles);
       setCompTypePref(prefs.propertyType);
       setReportAuto(getReportAutoGenerate());
+      const reportPrefs = getReportExecutionPreferences();
+      setReportExecution(reportPrefs.mode);
+      setReportEmail(reportPrefs.emailWhenDone);
       setValidationError(null);
       setSaveSuccess(false);
     }
@@ -167,6 +173,7 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
     // Comp-search preferences persist locally (applied to the next search).
     setCompPrefs({ radiusMiles: compRadiusPref, propertyType: compTypePref });
     setReportAutoGenerate(reportAuto);
+    setReportExecutionPreferences({ mode: reportExecution, emailWhenDone: reportEmail });
 
     try {
       // Persists to the Supabase profile when signed in with a cloud account
@@ -357,8 +364,8 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
             {/* Monid - wallet-aware access to Octen research tools */}
             <div className="settings-field-group">
               <div className="field-label-row">
-                <label htmlFor="monidKey">Monid API Key (Octen research tools)</label>
-                <span className="badge optional">Optional</span>
+                <label htmlFor="monidKey">Monid API Key (Context.dev + Octen tools)</label>
+                <span className="badge optional">Background fusion</span>
               </div>
               <div className="field-input-container">
                 <Key className="input-icon" size={16} />
@@ -474,7 +481,7 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
                   ? (perplexityKey.trim()
                     ? 'ACTIVE - Hard research runs Perplexity and Octen Search together; Broad Search, Extract, and Embedding activate only for weak evidence.'
                     : 'ACTIVE - Octen Search runs first; Broad Search, Extract, and Embedding activate only for weak evidence.')
-                  : 'Optional Monid access to Octen Search, Broad Search, Extract, and Embedding.'} Adaptive and Thorough start with a soft price target but have no fixed provider ceiling; the available wallet and actual Monid billing are the final guardrails. Economy remains capped. Crawlee remains available for selected pages and documents. Get a key at app.monid.ai.
+                  : 'Required for durable background fusion: Monid provides Context.dev web search and Markdown extraction plus Octen Search, Broad Search, Extract, and Embedding.'} Adaptive and Thorough start with a soft price target but have no fixed provider ceiling; the available wallet and actual Monid billing are the final guardrails. Economy remains capped. Crawlee remains available for selected pages and documents. Get a key at app.monid.ai.
               </p>
             </div>
 
@@ -735,6 +742,27 @@ export function SettingsDrawer({ activeUser, isOpen, onClose, onLogout, onUpdate
                 <button type="button" className={`comp-pref-pill${!reportAuto ? ' active' : ''}`} onClick={() => setReportAuto(false)}>Manual</button>
               </div>
               <p className="field-help">Automatic generates the AI Feasibility Report right after a search. Manual waits for you to click <strong>Generate AI Report</strong> — useful to skip the report (and its API cost) when you only need the parcel, comps, or cost data.</p>
+              <div className="field-label-row" style={{ marginTop: '12px' }}>
+                <label><Cloud size={14} style={{ verticalAlign: '-2px', marginRight: '5px' }} />Automatic report execution</label>
+              </div>
+              <div className="comp-pref-pills">
+                <button type="button" className={`comp-pref-pill${reportExecution === 'foreground' ? ' active' : ''}`} onClick={() => setReportExecution('foreground')}>In this tab</button>
+                <button
+                  type="button"
+                  className={`comp-pref-pill${reportExecution === 'background' ? ' active' : ''}`}
+                  disabled={!isSupabaseConfigured() || !activeUser?.userId}
+                  onClick={() => setReportExecution('background')}
+                >
+                  Background server
+                </button>
+              </div>
+              {reportExecution === 'background' && (
+                <label style={{ display: 'flex', alignItems: 'center', gap: '7px', marginTop: '9px', fontSize: '0.78rem', cursor: 'pointer' }}>
+                  <input type="checkbox" checked={reportEmail} onChange={(e) => setReportEmail(e.target.checked)} />
+                  <Mail size={14} /> Email me when each automatic report is complete
+                </label>
+              )}
+              <p className="field-help">Background server reports continue after you navigate away or close the app, save automatically in My Reports, and require a signed-in Supabase account.</p>
             </div>
           </div>
         </div>

@@ -55,6 +55,36 @@ create policy "Users manage their own reports"
 create index if not exists saved_reports_user_created
   on public.saved_reports (user_id, created_at desc);
 
+-- Durable background report queue (processed by the Netlify background worker)
+create table if not exists public.report_jobs (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users(id) on delete cascade,
+  status text not null default 'queued' check (status in ('queued', 'running', 'completed', 'failed')),
+  email_when_done boolean not null default false,
+  address text not null,
+  county text,
+  parcel_id text,
+  acres double precision,
+  zoning_code text,
+  owner_name text,
+  input_json jsonb not null,
+  saved_report_id uuid references public.saved_reports(id) on delete set null,
+  error_message text,
+  created_at timestamptz not null default now(),
+  started_at timestamptz,
+  completed_at timestamptz
+);
+
+alter table public.report_jobs enable row level security;
+
+create policy "Users manage their own report jobs"
+  on public.report_jobs for all
+  using (auth.uid() = user_id)
+  with check (auth.uid() = user_id);
+
+create index if not exists report_jobs_user_created
+  on public.report_jobs (user_id, created_at desc);
+
 -- Comp run history: one row per comp search, plus its verified listings
 create table if not exists public.comp_runs (
   id uuid primary key default gen_random_uuid(),
@@ -174,6 +204,39 @@ VITE_SUPABASE_ANON_KEY=your-anon-public-key
 
 then restart `npm run dev`.
 
+## 6. Enable background reports and completion email on Netlify
+
+The durable worker needs the same Supabase project at server runtime. In
+**Netlify → Site configuration → Environment variables**, add:
+
+```text
+SUPABASE_URL=https://YOUR-PROJECT-REF.supabase.co
+SUPABASE_ANON_KEY=your-anon-public-key
+# Optional server fallbacks when users do not save these in Account & API Settings:
+GEMINI_API_KEY=...
+DEEPSEEK_API_KEY=...
+# OPENROUTER_API_KEY may replace DEEPSEEK_API_KEY
+PERPLEXITY_API_KEY=...
+MONID_API_KEY=...
+RESEND_API_KEY=re_...
+REPORT_FROM_EMAIL=Reports <reports@your-verified-domain.com>
+```
+
+`RESEND_API_KEY` and `REPORT_FROM_EMAIL` are only required when users enable
+completion email. The From address/domain must be verified in Resend. The worker
+authenticates the caller's Supabase JWT, reads only that user's queued job and
+credentials through RLS, saves the finished report to that same account, and only
+emails the authenticated account address (not an arbitrary recipient).
+
+Every accepted background report requires Gemini, DeepSeek or OpenRouter,
+Perplexity, and Monid. The worker calls Context.dev's `/web/search` and
+`/web/scrape/markdown` providers plus Octen's `/extract` provider through
+`api.monid.ai`; Context.dev does not require a separate direct credential.
+Crawlee runs inside the Netlify background function.
+
+For local end-to-end worker testing use `npx netlify dev`; plain `npm run dev`
+does not execute Netlify background functions.
+
 ## What you get once connected
 
 - **Sign Up / Sign In** with real email + password accounts (Supabase Auth).
@@ -184,6 +247,8 @@ then restart `npm run dev`.
   account profile and synced to any device you sign in on.
 - **Saved reports** stored in the cloud per account — save on one machine,
   open and download as PDF on another.
+- **Background reports** continue on Netlify after the tab closes, save
+  automatically, and can email the signed-in user through Resend.
 
 ## Troubleshooting
 
