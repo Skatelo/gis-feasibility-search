@@ -1,8 +1,10 @@
 import { useState, useEffect } from 'react';
 import type { FC, ReactNode } from 'react';
 import { createRoot } from 'react-dom/client';
-import { X, FolderOpen, FileText, Trash2, Download, ArrowLeft, MapPin, Calendar, Loader2, AlertCircle } from 'lucide-react';
+import { X, FolderOpen, FileText, Trash2, Download, ArrowLeft, MapPin, Calendar, Loader2, AlertCircle, Clock, CheckCircle2, Mail } from 'lucide-react';
 import { listSavedReports, deleteReport } from '../services/reportStore';
+import { listBackgroundReportJobs } from '../services/reportJobs';
+import type { BackgroundReportJob } from '../services/reportJobs';
 import type { SavedReport } from '../services/reportStore';
 
 interface ReportsDrawerProps {
@@ -80,32 +82,57 @@ function openSavedReportPdf(report: SavedReport, renderMarkdown: (text: string) 
 
 export const ReportsDrawer: FC<ReportsDrawerProps> = ({ isOpen, onClose, renderMarkdown }) => {
   const [reports, setReports] = useState<SavedReport[]>([]);
+  const [jobs, setJobs] = useState<BackgroundReportJob[]>([]);
   const [selected, setSelected] = useState<SavedReport | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const refresh = async () => {
-    setLoading(true);
+  const refresh = async (silent = false) => {
+    if (!silent) setLoading(true);
     setError(null);
     try {
-      setReports(await listSavedReports());
+      const [saved, background] = await Promise.all([
+        listSavedReports(),
+        listBackgroundReportJobs().catch((jobError) => {
+          // Projects that have not applied the optional report_jobs migration can
+          // still use their existing saved reports.
+          console.warn('Background report jobs are not available:', jobError);
+          return [];
+        }),
+      ]);
+      setReports(saved);
+      setJobs(background);
     } catch (e: any) {
       console.error(e);
       setError(e?.message || 'Failed to load your reports.');
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   };
 
-  // Refresh the list every time the drawer opens.
+  // Refresh when opened, when a new job is queued, and while the drawer remains
+  // open so a server-side completion appears without a page reload.
   useEffect(() => {
-    if (isOpen) {
-      setSelected(null);
-      refresh();
-    }
+    if (!isOpen) return;
+    const initialRefresh = window.setTimeout(() => { void refresh(); }, 0);
+    const onJobsUpdated = () => { void refresh(true); };
+    window.addEventListener('gis-report-jobs-updated', onJobsUpdated);
+    const interval = window.setInterval(() => {
+      if (document.visibilityState === 'visible') void refresh(true);
+    }, 4000);
+    return () => {
+      window.clearTimeout(initialRefresh);
+      window.removeEventListener('gis-report-jobs-updated', onJobsUpdated);
+      window.clearInterval(interval);
+    };
   }, [isOpen]);
 
   if (!isOpen) return null;
+
+  const closeDrawer = () => {
+    setSelected(null);
+    onClose();
+  };
 
   const handleDelete = async (id: string) => {
     try {
@@ -118,7 +145,7 @@ export const ReportsDrawer: FC<ReportsDrawerProps> = ({ isOpen, onClose, renderM
   };
 
   return (
-    <div className="drawer-overlay" onClick={onClose}>
+    <div className="drawer-overlay" onClick={closeDrawer}>
       <div
         className="drawer-container animate-slide-left"
         onClick={(e) => e.stopPropagation()}
@@ -144,7 +171,7 @@ export const ReportsDrawer: FC<ReportsDrawerProps> = ({ isOpen, onClose, renderM
               <p>{selected ? `${selected.county} County — saved ${new Date(selected.savedAt).toLocaleString()}` : 'Saved feasibility reports for your account'}</p>
             </div>
           </div>
-          <button onClick={onClose} className="drawer-close-btn">
+          <button onClick={closeDrawer} className="drawer-close-btn">
             <X size={20} />
           </button>
         </div>
@@ -156,6 +183,48 @@ export const ReportsDrawer: FC<ReportsDrawerProps> = ({ isOpen, onClose, renderM
               <AlertCircle size={15} style={{ flexShrink: 0 }} />
               <span>{error}</span>
             </div>
+          )}
+          {!selected && jobs.length > 0 && (
+            <section style={{ marginBottom: '16px' }}>
+              <div style={{ fontSize: '0.72rem', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--text-muted)', marginBottom: '7px' }}>
+                Background report activity
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '7px' }}>
+                {jobs.slice(0, 5).map((job) => {
+                  const completedReport = job.savedReportId ? reports.find((report) => report.id === job.savedReportId) : undefined;
+                  const active = job.status === 'queued' || job.status === 'running';
+                  const failed = job.status === 'failed';
+                  return (
+                    <button
+                      type="button"
+                      key={job.id}
+                      onClick={() => { if (completedReport) setSelected(completedReport); }}
+                      disabled={!completedReport}
+                      style={{
+                        width: '100%', textAlign: 'left', border: `1px solid ${failed ? '#fecaca' : 'var(--bg-card-border)'}`,
+                        background: failed ? '#fef2f2' : 'var(--bg-card, #fff)', borderRadius: '9px', padding: '9px 11px',
+                        display: 'flex', alignItems: 'center', gap: '9px', cursor: completedReport ? 'pointer' : 'default', color: 'inherit',
+                      }}
+                    >
+                      {active ? <Loader2 size={16} className="spinner" style={{ color: 'var(--primary)' }} />
+                        : failed ? <AlertCircle size={16} style={{ color: 'var(--danger, #dc2626)' }} />
+                          : <CheckCircle2 size={16} style={{ color: 'var(--success, #16a34a)' }} />}
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontWeight: 600, fontSize: '0.8rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{job.address}</div>
+                        <div style={{ fontSize: '0.7rem', color: failed ? 'var(--danger, #dc2626)' : 'var(--text-muted)', marginTop: '2px' }}>
+                          {job.status === 'queued' ? 'Queued — the worker will start shortly'
+                            : job.status === 'running' ? 'Generating on the server — you can close this app'
+                              : failed ? (job.errorMessage || 'Background generation failed')
+                                : (job.errorMessage || 'Completed and saved to My Reports')}
+                        </div>
+                      </div>
+                      {job.emailWhenDone && <span title="Email when complete" style={{ display: 'inline-flex' }}><Mail size={13} style={{ color: 'var(--text-muted)' }} /></span>}
+                      <Clock size={12} style={{ color: 'var(--text-muted)' }} />
+                    </button>
+                  );
+                })}
+              </div>
+            </section>
           )}
           {loading && !selected ? (
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '10px', padding: '48px 0', color: 'var(--text-muted)' }}>

@@ -8,6 +8,7 @@ import { fetchRealEstatePropertyTransactions, fetchRealEstateOwnerDetails } from
 import type { RealEstatePropertyTransactions, RealEstateOwnerDetails } from '../services/realEstateApiProperty';
 import { resolveFullCarolinaPostalAddress } from '../services/carolinaAddress';
 import { saveReport, getReportEtaMs, recordReportDuration } from '../services/reportStore';
+import { canRunReportsInBackground, enqueueBackgroundReport, getReportExecutionPreferences } from '../services/reportJobs';
 import { downloadReportPdf, pdfFileName } from '../services/pdfExport';
 import { fileToReportAttachment, attachmentsAppendix } from '../services/reportAttachments';
 import type { ReportAttachment } from '../services/reportAttachments';
@@ -1060,6 +1061,11 @@ export const FeasibilitySearch: FC = () => {
   const propertyTransactionsIdle = !propertyTransactions && !propertyTransactionsError && !propertyTransactionsLoading;
   // Manual report mode: report awaits the "Generate AI Report" button
   const [reportPending, setReportPending] = useState(false);
+  const [backgroundEmail, setBackgroundEmail] = useState(() => getReportExecutionPreferences().emailWhenDone);
+  const [backgroundQueuing, setBackgroundQueuing] = useState(false);
+  const [backgroundQueued, setBackgroundQueued] = useState(false);
+  const [backgroundQueueError, setBackgroundQueueError] = useState('');
+  const backgroundQueueRef = useRef<string | null>(null);
   // Owner skip trace (Enformion) — phones/emails for the parcel owner
   const [ownerSkip, setOwnerSkip] = useState<SkipTraceContact | null>(null);
   const [ownerSkipLoading, setOwnerSkipLoading] = useState(false);
@@ -1554,6 +1560,40 @@ export const FeasibilitySearch: FC = () => {
     ]);
     if (seq !== searchSeqRef.current) return;
     generateInitialChatReport(data, est || costEstimate || undefined);
+  };
+
+  const queueReportInBackground = async (
+    reportData: SiteFeasibilityData,
+    emailWhenDone: boolean,
+    estimate?: ConstructionCostEstimate,
+  ) => {
+    if (backgroundQueueRef.current) return;
+    const searchSeq = searchSeqRef.current;
+    const queueToken = `${searchSeq}:${Date.now()}`;
+    backgroundQueueRef.current = queueToken;
+    setBackgroundQueuing(true);
+    setBackgroundQueueError('');
+    setBackgroundEmail(emailWhenDone);
+    setReportPending(true);
+    try {
+      await enqueueBackgroundReport({
+        reportData,
+        ...(estimate ? { costEstimate: estimate } : {}),
+      }, emailWhenDone);
+      if (searchSeq === searchSeqRef.current) setBackgroundQueued(true);
+    } catch (err: unknown) {
+      if (searchSeq === searchSeqRef.current) {
+        setBackgroundQueueError(err instanceof Error ? err.message : 'The report could not be queued.');
+      }
+    } finally {
+      if (backgroundQueueRef.current === queueToken) backgroundQueueRef.current = null;
+      if (searchSeq === searchSeqRef.current) setBackgroundQueuing(false);
+    }
+  };
+
+  const startReportInBackground = () => {
+    if (!data) return;
+    void queueReportInBackground(data, backgroundEmail, costEstimate || undefined);
   };
 
   /**
@@ -3599,6 +3639,10 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
     setWholesalePriceInput('');
     setShowWholesalePrice(false);
     setReportPending(false);
+    setBackgroundQueuing(false);
+    setBackgroundQueued(false);
+    setBackgroundQueueError('');
+    backgroundQueueRef.current = null;
     setCompRadius(compPrefs.radiusMiles);
     setCompTypeFilter(compPrefs.propertyType);
     setCompsShowAll(false);
@@ -3663,22 +3707,29 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
       if (!getReportAutoGenerate()) {
         setReportPending(true);
       } else {
-        // Show the report card as "generating" immediately so it isn't idle during
-        // the brief wait for the estimate below.
-        setChatLoading(true);
-        setChatHistory([]);
-        // Auto mode: the cost estimate + material takeoff run WITH the report.
-        // Give them a brief head start so the report can cite the figures; if not
-        // ready quickly, generate anyway and the Development Cost card injects when
-        // it lands.
-        const est = await Promise.race([
-          runCostTakeoffLookup(result, seq),
-          new Promise<ConstructionCostEstimate | null>((r) => setTimeout(() => r(null), 45000)),
-        ]);
-        if (seq !== searchSeqRef.current) return;
-        // All site data is in — generate the AI feasibility report (the countdown
-        // timer in the chat panel tracks this phase).
-        generateInitialChatReport(result, est || undefined);
+        const execution = getReportExecutionPreferences();
+        if (execution.mode === 'background' && canRunReportsInBackground()) {
+          // Durable server execution starts immediately; it deliberately does not
+          // wait up to 45 seconds for the optional client-side cost takeoff.
+          void queueReportInBackground(result, execution.emailWhenDone);
+        } else {
+          // Show the report card as "generating" immediately so it isn't idle during
+          // the brief wait for the estimate below.
+          setChatLoading(true);
+          setChatHistory([]);
+          // Auto mode: the cost estimate + material takeoff run WITH the report.
+          // Give them a brief head start so the report can cite the figures; if not
+          // ready quickly, generate anyway and the Development Cost card injects when
+          // it lands.
+          const est = await Promise.race([
+            runCostTakeoffLookup(result, seq),
+            new Promise<ConstructionCostEstimate | null>((r) => setTimeout(() => r(null), 45000)),
+          ]);
+          if (seq !== searchSeqRef.current) return;
+          // All site data is in — generate the AI feasibility report (the countdown
+          // timer in the chat panel tracks this phase).
+          generateInitialChatReport(result, est || undefined);
+        }
       }
     } catch (err: any) {
       if (seq !== searchSeqRef.current) return;
@@ -5914,10 +5965,43 @@ Format with clear markdown headers, bold key findings, and tables. Subject GIS d
                 ) : showWholesalePrice ? null : reportPending ? (
                   <>
                     <div className="report-manual">
-                      <p className="report-manual-text">The full AI Feasibility Report (25 sections — zoning, rezoning, comps, valuation, risk &amp; more) is ready to generate.</p>
-                      <button type="button" className="report-generate-btn" onClick={startReportManually}>
-                        <FileText size={16} /> Generate AI Report
-                      </button>
+                      {backgroundQueued ? (
+                        <>
+                          <p className="report-manual-text"><strong>Report queued.</strong> It is running on the server, so you can navigate elsewhere or close the app. The completed report will be saved automatically{backgroundEmail ? ' and emailed to your account address' : ''}.</p>
+                          <button type="button" className="report-generate-btn" onClick={() => setShowReports(true)}>
+                            <FolderOpen size={16} /> View Background Activity
+                          </button>
+                        </>
+                      ) : (
+                        <>
+                          <p className="report-manual-text">The full AI Feasibility Report (25 sections — zoning, rezoning, comps, valuation, risk &amp; more) is ready to generate.</p>
+                          <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                            <button type="button" className="report-generate-btn" onClick={startReportManually} disabled={backgroundQueuing}>
+                              <FileText size={16} /> Generate Now
+                            </button>
+                            <button
+                              type="button"
+                              className="report-generate-btn"
+                              onClick={startReportInBackground}
+                              disabled={backgroundQueuing || !canRunReportsInBackground()}
+                              title={canRunReportsInBackground() ? 'Run on the server and save it automatically' : 'Connect Supabase and sign in to use durable background reports'}
+                              style={{ background: 'var(--text-secondary, #475569)' }}
+                            >
+                              {backgroundQueuing ? <Loader2 size={16} className="spinner" /> : <Clock size={16} />}
+                              {backgroundQueuing ? 'Queuing...' : 'Run in Background'}
+                            </button>
+                          </div>
+                          {canRunReportsInBackground() ? (
+                            <label style={{ display: 'flex', alignItems: 'center', gap: '7px', marginTop: '10px', fontSize: '0.78rem', color: 'var(--text-secondary)', cursor: 'pointer' }}>
+                              <input type="checkbox" checked={backgroundEmail} onChange={(e) => setBackgroundEmail(e.target.checked)} />
+                              <Mail size={14} /> Email the completed report to my account address
+                            </label>
+                          ) : (
+                            <p className="field-help" style={{ marginTop: '8px' }}>Durable background reports require a connected Supabase account. You can still generate in this tab now.</p>
+                          )}
+                          {backgroundQueueError && <p style={{ marginTop: '8px', color: 'var(--danger, #dc2626)', fontSize: '0.76rem' }}>{backgroundQueueError}</p>}
+                        </>
+                      )}
                     </div>
                     {developmentCostSection}
                   </>
