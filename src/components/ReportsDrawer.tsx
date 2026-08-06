@@ -107,9 +107,9 @@ export const ReportsDrawer: FC<ReportsDrawerProps> = ({ isOpen, onClose, renderM
       ]);
       setReports(saved);
       setJobs(background);
-    } catch (e: any) {
+    } catch (e: unknown) {
       console.error(e);
-      setError(e?.message || 'Failed to load your reports.');
+      setError(e instanceof Error ? e.message : 'Failed to load your reports.');
     } finally {
       refreshInFlight.current = false;
       if (!silent) setLoading(false);
@@ -143,8 +143,8 @@ export const ReportsDrawer: FC<ReportsDrawerProps> = ({ isOpen, onClose, renderM
   const handleDelete = async (id: string) => {
     try {
       await deleteReport(id);
-    } catch (e: any) {
-      setError(e?.message || 'Failed to delete the report.');
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : 'Failed to delete the report.');
     }
     if (selected?.id === id) setSelected(null);
     refresh();

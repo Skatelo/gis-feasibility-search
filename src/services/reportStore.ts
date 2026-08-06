@@ -24,6 +24,19 @@ export interface SavedReport {
 
 export type NewReport = Omit<SavedReport, 'id' | 'email' | 'savedAt'>;
 
+/** Raw row shape returned by the saved_reports PostgREST query. */
+interface SavedReportRow {
+  id: unknown;
+  created_at?: string | null;
+  address?: unknown;
+  county?: unknown;
+  parcel_id?: unknown;
+  acres?: unknown;
+  zoning_code?: unknown;
+  owner_name?: unknown;
+  report_markdown?: unknown;
+}
+
 const REPORTS_KEY = 'gis_saved_reports';
 
 function activeSession(): { email: string; userId?: string } {
@@ -37,7 +50,7 @@ function activeSession(): { email: string; userId?: string } {
   return { email: '' };
 }
 
-function useCloud(): boolean {
+function isCloudEnabled(): boolean {
   return isSupabaseConfigured() && !!activeSession().userId;
 }
 
@@ -65,7 +78,7 @@ function writeAllLocal(reports: SavedReport[]): void {
 
 /** Reports belonging to the signed-in account, newest first. */
 export async function listSavedReports(): Promise<SavedReport[]> {
-  if (useCloud()) {
+  if (isCloudEnabled()) {
     const supabase = getSupabase();
     const { data, error } = await withTimeout(
       supabase
@@ -77,17 +90,17 @@ export async function listSavedReports(): Promise<SavedReport[]> {
     );
     if (error) throw new Error(`Could not load your reports: ${error.message}`);
     const email = activeSession().email;
-    return (data || []).map((r: any) => ({
+    return (data || []).map((r: SavedReportRow) => ({
       id: String(r.id),
       email,
       savedAt: r.created_at ? new Date(r.created_at).getTime() : Date.now(),
-      address: r.address,
-      county: r.county || '',
-      parcelId: r.parcel_id || '',
-      acres: r.acres ?? undefined,
-      zoningCode: r.zoning_code ?? undefined,
-      ownerName: r.owner_name ?? undefined,
-      reportMarkdown: r.report_markdown,
+      address: String(r.address ?? ''),
+      county: String(r.county ?? ''),
+      parcelId: String(r.parcel_id ?? ''),
+      acres: r.acres === null || r.acres === undefined ? undefined : Number(r.acres),
+      zoningCode: r.zoning_code === null || r.zoning_code === undefined ? undefined : String(r.zoning_code),
+      ownerName: r.owner_name === null || r.owner_name === undefined ? undefined : String(r.owner_name),
+      reportMarkdown: String(r.report_markdown ?? ''),
     }));
   }
   const email = activeSession().email;
@@ -98,7 +111,7 @@ export async function listSavedReports(): Promise<SavedReport[]> {
 
 export async function saveReport(report: NewReport): Promise<SavedReport> {
   const session = activeSession();
-  if (useCloud()) {
+  if (isCloudEnabled()) {
     const supabase = getSupabase();
     const { data, error } = await withTimeout(
       supabase
@@ -140,7 +153,7 @@ export async function saveReport(report: NewReport): Promise<SavedReport> {
 }
 
 export async function deleteReport(id: string): Promise<void> {
-  if (useCloud()) {
+  if (isCloudEnabled()) {
     const supabase = getSupabase();
     const { error } = await withTimeout(
       supabase.from('saved_reports').delete().eq('id', id),
