@@ -6,6 +6,7 @@
 // devices. Otherwise they fall back to per-account localStorage.
 // ---------------------------------------------------------------------------
 import { getSupabase, isSupabaseConfigured } from './supabaseClient';
+import { withTimeout } from './asyncTimeout';
 
 export interface SavedReport {
   id: string;
@@ -66,10 +67,14 @@ function writeAllLocal(reports: SavedReport[]): void {
 export async function listSavedReports(): Promise<SavedReport[]> {
   if (useCloud()) {
     const supabase = getSupabase();
-    const { data, error } = await supabase
-      .from('saved_reports')
-      .select('id, address, county, parcel_id, acres, zoning_code, owner_name, report_markdown, created_at')
-      .order('created_at', { ascending: false });
+    const { data, error } = await withTimeout(
+      supabase
+        .from('saved_reports')
+        .select('id, address, county, parcel_id, acres, zoning_code, owner_name, report_markdown, created_at')
+        .order('created_at', { ascending: false }),
+      12000,
+      'Timed out loading your reports. Check your connection.',
+    );
     if (error) throw new Error(`Could not load your reports: ${error.message}`);
     const email = activeSession().email;
     return (data || []).map((r: any) => ({
@@ -95,20 +100,24 @@ export async function saveReport(report: NewReport): Promise<SavedReport> {
   const session = activeSession();
   if (useCloud()) {
     const supabase = getSupabase();
-    const { data, error } = await supabase
-      .from('saved_reports')
-      .insert({
-        user_id: session.userId,
-        address: report.address,
-        county: report.county,
-        parcel_id: report.parcelId,
-        acres: report.acres ?? null,
-        zoning_code: report.zoningCode ?? null,
-        owner_name: report.ownerName ?? null,
-        report_markdown: report.reportMarkdown,
-      })
-      .select('id, created_at')
-      .single();
+    const { data, error } = await withTimeout(
+      supabase
+        .from('saved_reports')
+        .insert({
+          user_id: session.userId,
+          address: report.address,
+          county: report.county,
+          parcel_id: report.parcelId,
+          acres: report.acres ?? null,
+          zoning_code: report.zoningCode ?? null,
+          owner_name: report.ownerName ?? null,
+          report_markdown: report.reportMarkdown,
+        })
+        .select('id, created_at')
+        .single(),
+      15000,
+      'Timed out saving the report. Check your connection and try again.',
+    );
     if (error) throw new Error(`Could not save the report to your account: ${error.message}`);
     return {
       ...report,
@@ -133,7 +142,11 @@ export async function saveReport(report: NewReport): Promise<SavedReport> {
 export async function deleteReport(id: string): Promise<void> {
   if (useCloud()) {
     const supabase = getSupabase();
-    const { error } = await supabase.from('saved_reports').delete().eq('id', id);
+    const { error } = await withTimeout(
+      supabase.from('saved_reports').delete().eq('id', id),
+      12000,
+      'Timed out deleting the report. Check your connection.',
+    );
     if (error) throw new Error(`Could not delete the report: ${error.message}`);
     return;
   }

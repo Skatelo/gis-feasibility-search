@@ -43,7 +43,7 @@ export function NewsTicker() {
     const load = async () => {
       lastLoaded = Date.now();
       try {
-        const res = await fetch(`/.netlify/functions/news?t=${Math.floor(Date.now() / REFRESH_MS)}`);
+        const res = await fetch(`/.netlify/functions/news?t=${Math.floor(Date.now() / REFRESH_MS)}`, { signal: AbortSignal.timeout(10000) });
         const ct = res.headers.get('content-type') || '';
         if (!ct.includes('json')) { if (!cancelled) setStatus('error'); return; }
         const data = await res.json();

@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import type { FC, ReactNode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { X, FolderOpen, FileText, Trash2, Download, ArrowLeft, MapPin, Calendar, Loader2, AlertCircle, Clock, CheckCircle2, Mail } from 'lucide-react';
@@ -86,8 +86,13 @@ export const ReportsDrawer: FC<ReportsDrawerProps> = ({ isOpen, onClose, renderM
   const [selected, setSelected] = useState<SavedReport | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const refreshInFlight = useRef(false);
 
   const refresh = async (silent = false) => {
+    // Never stack overlapping refreshes (the 4s poll can outrun a slow mobile
+    // network); drop the tick if the previous refresh is still in flight.
+    if (refreshInFlight.current) return;
+    refreshInFlight.current = true;
     if (!silent) setLoading(true);
     setError(null);
     try {
@@ -106,6 +111,7 @@ export const ReportsDrawer: FC<ReportsDrawerProps> = ({ isOpen, onClose, renderM
       console.error(e);
       setError(e?.message || 'Failed to load your reports.');
     } finally {
+      refreshInFlight.current = false;
       if (!silent) setLoading(false);
     }
   };

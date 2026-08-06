@@ -1,5 +1,6 @@
 import type { ConstructionCostEstimate, SiteFeasibilityData } from '../types/feasibility';
 import { getSupabase, isSupabaseConfigured } from './supabaseClient';
+import { fetchWithTimeout, withTimeout } from './asyncTimeout';
 
 export type ReportJobStatus = 'queued' | 'running' | 'completed' | 'failed';
 
@@ -82,11 +83,16 @@ function mapJob(row: Record<string, unknown>): BackgroundReportJob {
 
 export async function listBackgroundReportJobs(): Promise<BackgroundReportJob[]> {
   if (!canRunReportsInBackground()) return [];
-  const { data, error } = await getSupabase()
-    .from('report_jobs')
-    .select('id, status, email_when_done, address, county, parcel_id, saved_report_id, error_message, created_at, started_at, completed_at')
-    .order('created_at', { ascending: false })
-    .limit(25);
+  // Fail fast (mobile: flaky networks must not pin the drawer's spinner).
+  const { data, error } = await withTimeout(
+    getSupabase()
+      .from('report_jobs')
+      .select('id, status, email_when_done, address, county, parcel_id, saved_report_id, error_message, created_at, started_at, completed_at')
+      .order('created_at', { ascending: false })
+      .limit(25),
+    12000,
+    'Timed out loading background reports. Check your connection.',
+  );
   if (error) throw new Error(`Could not load background reports: ${error.message}`);
   return (data || []).map(mapJob);
 }
@@ -100,49 +106,67 @@ export async function enqueueBackgroundReport(
   }
 
   const supabase = getSupabase();
-  const { data: sessionData, error: sessionError } = await supabase.auth.getSession();
+  // getSession() can perform a network token refresh; cap it so a dead mobile
+  // connection fails fast instead of leaving the button stuck on "Queuing...".
+  const { data: sessionData, error: sessionError } = await withTimeout(
+    supabase.auth.getSession(),
+    8000,
+    'Timed out checking your session. Check your connection.',
+  );
   const session = sessionData.session;
   if (sessionError || !session?.access_token || !session.user?.id) {
     throw new Error('Your cloud session expired. Please sign in again before starting a background report.');
   }
 
   const reportData = input.reportData;
-  const { data: row, error } = await supabase
-    .from('report_jobs')
-    .insert({
-      user_id: session.user.id,
-      status: 'queued',
-      email_when_done: emailWhenDone,
-      address: reportData.inputAddress,
-      county: reportData.countyName,
-      parcel_id: reportData.parcelId,
-      acres: reportData.gisAcres,
-      zoning_code: reportData.zoningCode,
-      owner_name: reportData.ownerName,
-      input_json: input,
-    })
-    .select('id, status, email_when_done, address, county, parcel_id, saved_report_id, error_message, created_at, started_at, completed_at')
-    .single();
+  // Fail fast if the queue insert hangs on a flaky connection — a 15s stall is
+  // enough to make the mobile UI look broken.
+  const { data: row, error } = await withTimeout(
+    supabase
+      .from('report_jobs')
+      .insert({
+        user_id: session.user.id,
+        status: 'queued',
+        email_when_done: emailWhenDone,
+        address: reportData.inputAddress,
+        county: reportData.countyName,
+        parcel_id: reportData.parcelId,
+        acres: reportData.gisAcres,
+        zoning_code: reportData.zoningCode,
+        owner_name: reportData.ownerName,
+        input_json: input,
+      })
+      .select('id, status, email_when_done, address, county, parcel_id, saved_report_id, error_message, created_at, started_at, completed_at')
+      .single(),
+    15000,
+    'Timed out queueing the background report. Check your connection and try again.',
+  );
   if (error || !row) throw new Error(`Could not queue the background report: ${error?.message || 'no job was created'}`);
 
-  try {
-    const response = await fetch('/.netlify/functions/report-background-background', {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        Authorization: `Bearer ${session.access_token}`,
-      },
-      body: JSON.stringify({ jobId: row.id }),
+  // The job is durably queued; the sweeper will retry it even if this immediate
+  // dispatch is slow or fails. Fire it WITHOUT awaiting so a slow mobile network
+  // can never leave the UI stuck on "Queuing...". 8s abort cap.
+  void dispatchBackgroundJob(row.id, session.access_token)
+    .catch((dispatchError: unknown) => {
+      console.warn('Immediate background dispatch was unavailable; the durable queue sweeper will retry.', dispatchError);
     });
-    if (!response.ok) {
-      let detail = '';
-      try { detail = (await response.json())?.error || ''; } catch { /* ignore */ }
-      console.warn('Immediate background dispatch failed; the durable queue sweeper will retry.', detail || response.status);
-    }
-  } catch (dispatchError) {
-    console.warn('Immediate background dispatch was unavailable; the durable queue sweeper will retry.', dispatchError);
-  }
 
   window.dispatchEvent(new CustomEvent('gis-report-jobs-updated'));
   return mapJob(row);
+}
+
+async function dispatchBackgroundJob(jobId: string, accessToken: string): Promise<void> {
+  const response = await fetchWithTimeout('/.netlify/functions/report-background-background', 8000, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      Authorization: `Bearer ${accessToken}`,
+    },
+    body: JSON.stringify({ jobId }),
+  });
+  if (!response.ok) {
+    let detail = '';
+    try { detail = (await response.json())?.error || ''; } catch { /* ignore */ }
+    throw new Error(detail || `HTTP ${response.status}`);
+  }
 }
