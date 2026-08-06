@@ -138,11 +138,12 @@ async function completedMonidRun(fetchImpl, key, initial) {
   throw new Error('Monid provider run timed out.');
 }
 
-export function createReportFusionAdapters({ fetchImpl = globalThis.fetch, crawlSources }) {
+export function createReportFusionAdapters({ fetchImpl = globalThis.fetch, crawlSources } = {}) {
   if (typeof fetchImpl !== 'function') throw new Error('A fetch implementation is required.');
-  if (typeof crawlSources !== 'function') throw new Error('The Crawlee extractor is required.');
+  if (typeof crawlSources !== 'function') throw new Error('The Crawlee extractor (crawlSources) is required.');
 
   return {
+    fetchImpl,
     async perplexitySearch(queries, key) {
       const chunks = [];
       for (let index = 0; index < queries.length; index += 5) chunks.push(queries.slice(index, index + 5));

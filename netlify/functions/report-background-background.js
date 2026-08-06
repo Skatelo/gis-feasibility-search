@@ -1,5 +1,6 @@
 import { timingSafeEqual } from 'node:crypto';
 
+import { crawlSources } from './lib/crawlee-scraper.js';
 import { processReportJob, validateReportMarkdown } from './lib/report-background.js';
 import { runReportFusion } from './lib/report-fusion.js';
 import { createReportFusionAdapters } from './lib/report-fusion-adapters.js';
@@ -85,7 +86,7 @@ async function sendCompletionEmail({ to, address, jobId, reportId, markdown }) {
   const from = requiredEnv('RESEND_FROM_EMAIL');
   const appUrl = String(process.env.URL || process.env.DEPLOY_PRIME_URL || '').replace(/\/$/, '');
   const reportUrl = appUrl ? `${appUrl}/?report=${encodeURIComponent(reportId)}` : '';
-  const excerpt = markdown.replace(/[#*_`>]/g, '').slice(0, 1200);
+  const fullReport = String(markdown || '').trim() || 'The report text is unavailable.';
   await fetchJson('https://api.resend.com/emails', {
     method: 'POST',
     headers: {
@@ -97,7 +98,7 @@ async function sendCompletionEmail({ to, address, jobId, reportId, markdown }) {
       from,
       to: [to],
       subject: `Feasibility report ready: ${address || 'your property'}`,
-      text: `Your feasibility report is complete.\n\n${reportUrl ? `Open it: ${reportUrl}\n\n` : ''}${excerpt}`,
+      text: `Your feasibility report is complete.\n\n${reportUrl ? `Open it: ${reportUrl}\n\n` : ''}${fullReport}`,
     }),
   }, 'Completion email failed');
 }
@@ -199,7 +200,7 @@ export async function handler(event) {
     return rows?.[0] || null;
   };
 
-  const adapters = createReportFusionAdapters();
+  const adapters = createReportFusionAdapters({ crawlSources });
   const result = await processReportJob(jobId, authenticatedUser?.id || null, {
     trustedWorker,
     loadJob,

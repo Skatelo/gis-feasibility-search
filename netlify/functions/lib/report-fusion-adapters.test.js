@@ -112,6 +112,35 @@ test('production research adapters call Perplexity, Context.dev Search/Extract, 
   assert.equal(run.body.input.format, 'markdown');
 });
 
+test('the adapter factory works with the production call shape and defaults fetch', async () => {
+  const crawls = [];
+  const adapters = createReportFusionAdapters({
+    crawlSources: async (options) => {
+      crawls.push(options);
+      return { results: [{ title: 'Doc', url: options.urls[0], content: 'body' }] };
+    },
+  });
+  assert.equal(typeof adapters.fetchImpl, 'function');
+  assert.equal(typeof adapters.perplexitySearch, 'function');
+  assert.equal(typeof adapters.contextDevSearch, 'function');
+  assert.equal(typeof adapters.crawleeExtract, 'function');
+  assert.equal(typeof adapters.contextDevExtract, 'function');
+  assert.equal(typeof adapters.octenExtract, 'function');
+  assert.equal(typeof adapters.geminiDraft, 'function');
+  assert.equal(typeof adapters.deepSeekDraft, 'function');
+  assert.equal(typeof adapters.geminiJudge, 'function');
+
+  const crawled = await adapters.crawleeExtract(['https://city.example/ord.pdf'], ['zoning']);
+  assert.equal(crawled[0].provider, 'Crawlee');
+  assert.equal(crawls.length, 1);
+  assert.equal(crawls[0].maxDepth, 1);
+});
+
+test('the adapter factory rejects a completely empty configuration instead of crashing', () => {
+  assert.throws(() => createReportFusionAdapters(), /crawl/i);
+  assert.throws(() => createReportFusionAdapters({}), /crawl/i);
+});
+
 test('production model adapters draft with Gemini and DeepSeek then judge with Gemini', async () => {
   const requests = [];
   const fetchImpl = async (url, init = {}) => {
