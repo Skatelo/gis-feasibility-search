@@ -3,6 +3,16 @@
   command = "npm run build"
   publish = "dist"
 
+  # VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY are flagged as "sensitive" in
+  # this site's environment variables, but Vite inlines VITE_-prefixed vars
+  # into the client bundle by design (the anon key is meant to be public;
+  # Supabase tables are protected by Row-Level Security, not by hiding this
+  # key). Without this, Netlify's secret scanner finds its own env var value
+  # inside dist/**, the exact place it is supposed to be, and fails every
+  # build/deploy from GitHub.
+  [build.environment]
+    SECRETS_SCAN_OMIT_KEYS = "VITE_SUPABASE_URL,VITE_SUPABASE_ANON_KEY"
+
 # Serverless functions (e.g. the RentCast proxy that avoids browser CORS).
 [functions]
   directory = "netlify/functions"
