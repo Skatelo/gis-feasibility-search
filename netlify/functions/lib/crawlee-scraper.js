@@ -90,6 +90,23 @@ export async function assertPublicUrl(value, allowPrivateHosts = false) {
   return url;
 }
 
+export function createPublicDnsLookup(resolve = lookup) {
+  return (hostname, options, callback) => {
+    const normalized = typeof options === 'number' ? { family: options } : (options || {});
+    Promise.resolve(resolve(hostname, { ...normalized, all: true, verbatim: true }))
+      .then((addresses) => {
+        if (!Array.isArray(addresses) || !addresses.length
+          || addresses.some(({ address }) => isPrivateAddress(address))) {
+          callback(new NonRetryableError('DNS lookup resolved to a private address'));
+          return;
+        }
+        if (normalized.all) callback(null, addresses);
+        else callback(null, addresses[0].address, addresses[0].family);
+      })
+      .catch((error) => callback(error));
+  };
+}
+
 function documentKind(url, mimeType) {
   const pathname = new URL(url).pathname.toLowerCase();
   const mime = String(mimeType || '').toLowerCase();
@@ -240,6 +257,7 @@ export async function crawlSources({
   const results = [];
   const errors = [];
   const config = new Configuration({ persistStorage: false, purgeOnStart: true });
+  const publicDnsLookup = createPublicDnsLookup();
 
   const crawler = new CheerioCrawler({
     minConcurrency: 1,
@@ -261,6 +279,7 @@ export async function crawlSources({
       await assertPublicUrl(request.url, allowPrivateHosts);
       gotOptions.timeout = { request: 8_000 };
       gotOptions.maxRedirects = 4;
+      if (!allowPrivateHosts) gotOptions.dnsLookup = publicDnsLookup;
       gotOptions.headers = {
         ...gotOptions.headers,
         'user-agent': 'LandFeasibilityResearchBot/1.0 (+https://github.com/Skatelo/gis-feasibility-search)',

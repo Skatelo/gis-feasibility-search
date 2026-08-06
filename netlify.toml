@@ -9,6 +9,9 @@
   node_bundler = "esbuild"
   external_node_modules = ["@crawlee/cheerio", "@crawlee/playwright", "@sparticuz/chromium", "playwright-core", "mammoth", "pdf-parse", "read-excel-file", "saxen"]
 
+[functions."report-background-sweeper"]
+  schedule = "*/5 * * * *"
+
 # Serve index.html for every path so client routing + the Supabase OAuth
 # redirect (detectSessionInUrl) work after deploy. Netlify routes
 # /.netlify/functions/* before redirects, so this doesn't intercept functions.

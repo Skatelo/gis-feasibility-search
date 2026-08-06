@@ -125,24 +125,22 @@ export async function enqueueBackgroundReport(
     .single();
   if (error || !row) throw new Error(`Could not queue the background report: ${error?.message || 'no job was created'}`);
 
-  const response = await fetch('/.netlify/functions/report-background-background', {
-    method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-      Authorization: `Bearer ${session.access_token}`,
-    },
-    body: JSON.stringify({ jobId: row.id }),
-  });
-  if (!response.ok) {
-    let detail = '';
-    try { detail = (await response.json())?.error || ''; } catch { /* ignore */ }
-    const message = detail || `worker returned HTTP ${response.status}`;
-    await supabase.from('report_jobs').update({
-      status: 'failed',
-      error_message: `The background worker could not be started: ${message}`,
-      completed_at: new Date().toISOString(),
-    }).eq('id', row.id);
-    throw new Error(`The background worker could not be started: ${message}`);
+  try {
+    const response = await fetch('/.netlify/functions/report-background-background', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        Authorization: `Bearer ${session.access_token}`,
+      },
+      body: JSON.stringify({ jobId: row.id }),
+    });
+    if (!response.ok) {
+      let detail = '';
+      try { detail = (await response.json())?.error || ''; } catch { /* ignore */ }
+      console.warn('Immediate background dispatch failed; the durable queue sweeper will retry.', detail || response.status);
+    }
+  } catch (dispatchError) {
+    console.warn('Immediate background dispatch was unavailable; the durable queue sweeper will retry.', dispatchError);
   }
 
   window.dispatchEvent(new CustomEvent('gis-report-jobs-updated'));

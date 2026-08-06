@@ -80,10 +80,14 @@ Gemini and DeepSeek/OpenRouter
 produce independent drafts; and Gemini judges them into the saved final report.
 It never substitutes a Gemini-only report when fusion credentials are missing.
 
-Deploy the app on Netlify and configure `SUPABASE_URL`, `SUPABASE_ANON_KEY`,
-`RESEND_API_KEY`, and a verified `REPORT_FROM_EMAIL`. Users can save the required
+Deploy the app on Netlify and configure `VITE_SUPABASE_URL`,
+`VITE_SUPABASE_ANON_KEY`, server-only `SUPABASE_SERVICE_ROLE_KEY` and
+`REPORT_WORKER_SECRET`, plus `RESEND_API_KEY` and a verified
+`RESEND_FROM_EMAIL` when completion email is enabled. Users must save their own
 Gemini, DeepSeek/OpenRouter, Perplexity, and Monid credentials in Account & API
-Settings; equivalent server environment variables are supported as fallbacks.
+Settings; the worker does not fall back to shared deployment model credentials.
+The scheduled queue sweeper retries dispatch gaps every five minutes and recovers
+interrupted claims after twenty minutes.
 See `SETUP_SUPABASE.md` for the SQL and deployment steps. Use `npx netlify dev`
 for local worker testing.
 
