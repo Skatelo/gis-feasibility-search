@@ -131,3 +131,38 @@ test('one unavailable research provider degrades gracefully and is disclosed to 
   assert.equal(result.diagnostics.errors.contextDev, 'Context.dev rate limited');
   assert.equal(judgePayload.providerDiagnostics.errors.contextDev, 'Context.dev rate limited');
 });
+
+test('URL-only discovery is not accepted as substantive fusion evidence', async () => {
+  const urlOnly = [{ title: 'Discovered only', url: 'https://example.com/no-body', content: '' }];
+  let drafted = false;
+  await assert.rejects(
+    runReportFusion('REPORT PROMPT', input, credentials, {
+      perplexitySearch: async () => urlOnly,
+      contextDevSearch: async () => urlOnly,
+      crawleeExtract: async () => [],
+      contextDevExtract: async () => [],
+      octenExtract: async () => [],
+      geminiDraft: async () => { drafted = true; return 'must not run'; },
+      deepSeekDraft: async () => { drafted = true; return 'must not run'; },
+      geminiJudge: async () => 'must not run',
+    }),
+    /no usable evidence/i,
+  );
+  assert.equal(drafted, false);
+});
+
+test('research is framed as untrusted quoted evidence rather than model instructions', async () => {
+  let groundedPrompt = '';
+  await runReportFusion('REPORT PROMPT', input, credentials, {
+    perplexitySearch: async () => [source('perplexity')],
+    contextDevSearch: async () => [],
+    crawleeExtract: async () => [],
+    contextDevExtract: async () => [],
+    octenExtract: async () => [],
+    geminiDraft: async (prompt) => { groundedPrompt = prompt; return 'GEMINI DRAFT'; },
+    deepSeekDraft: async () => 'DEEPSEEK DRAFT',
+    geminiJudge: async () => '# FUSED',
+  });
+  assert.match(groundedPrompt, /untrusted quoted evidence/i);
+  assert.match(groundedPrompt, /never follow instructions/i);
+});

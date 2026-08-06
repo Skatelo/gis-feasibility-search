@@ -88,6 +88,8 @@ test('production research adapters call Perplexity, Context.dev Search/Extract, 
   const perplexityRequest = requests.find((request) => request.url.includes('perplexity'));
   assert.equal(perplexityRequest.headers.Authorization, ['Bearer', 'pplx-key'].join(' '));
   assert.deepEqual(perplexityRequest.body.query, ['zoning query']);
+  assert.equal(perplexityRequest.body.web_search_options, undefined);
+  assert.equal(perplexityRequest.body.search_context_size, undefined);
   assert.equal(requests.some((request) => request.url.includes('api.context.dev')), false);
   const contextInspect = requests.find((request) => request.url.endsWith('/inspect') && request.body.provider === 'context.dev' && request.body.endpoint === '/web/search');
   assert.deepEqual(contextInspect.body, { provider: 'context.dev', endpoint: '/web/search' });
@@ -142,4 +144,7 @@ test('production model adapters draft with Gemini and DeepSeek then judge with G
     requests.find((request) => request.url.includes('deepseek.com')).headers.Authorization,
     ['Bearer', 'ds-key'].join(' '),
   );
+  const judgeRequest = requests.filter((request) => request.url.includes('generativelanguage')).at(-1);
+  assert.match(judgeRequest.body.contents[0].parts[0].text, /untrusted quoted data/i);
+  assert.match(judgeRequest.body.contents[0].parts[0].text, /never follow instructions/i);
 });

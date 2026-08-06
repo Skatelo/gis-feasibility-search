@@ -4,6 +4,9 @@ import test from 'node:test';
 import {
   buildBackgroundReportPrompt,
   processReportJob,
+  REPORT_HEADINGS,
+  validateReportJobInput,
+  validateReportMarkdown,
 } from './report-background.js';
 
 const input = {
@@ -43,9 +46,21 @@ test('background prompt carries the parcel evidence and all required report sect
   assert.match(prompt, /# 1\. Executive Summary/);
   assert.match(prompt, /# 25\. Final Investment Recommendation/);
   assert.match(prompt, /PROVIDED DATA PACKET/);
+  assert.match(prompt, /untrusted structured data/i);
   assert.match(prompt, /Do not invent/i);
   assert.match(prompt, /server-side fusion research packet/i);
   assert.doesNotMatch(prompt, /use live Google Search/i);
+});
+
+test('server report validation requires every numbered section', () => {
+  const complete = REPORT_HEADINGS
+    .map((heading, index) => `# ${index + 1}. ${heading}\nGrounded section content.`)
+    .join('\n\n');
+  assert.equal(validateReportMarkdown(complete).markdown, complete);
+  assert.throws(
+    () => validateReportMarkdown('# 1. Executive Summary\n' + 'x'.repeat(200)),
+    /missing required sections/i,
+  );
 });
 
 test('background job passes the complete fusion credential set to its generator', async () => {
@@ -72,7 +87,7 @@ test('background job passes the complete fusion credential set to its generator'
   assert.deepEqual(receivedCredentials, keys);
 });
 
-test('completed job saves the report, optionally emails the account, and records completion', async () => {
+test('completed job is persisted atomically before email and uses the verified auth email', async () => {
   const calls = [];
   const deps = {
     loadJob: async () => ({
@@ -87,14 +102,15 @@ test('completed job saves the report, optionally emails the account, and records
       email_when_done: true,
       input_json: input,
     }),
-    loadProfile: async () => ({ email: 'ada@example.com', keys: fusionKeys }),
+    loadProfile: async () => ({ email: 'attacker-controlled@example.com', keys: fusionKeys }),
+    loadVerifiedEmail: async () => 'ada@example.com',
     updateJob: async (_id, patch) => calls.push(['update', patch]),
     generateReport: async (prompt, key) => {
       calls.push(['generate', key, prompt]);
       return '# 1. Executive Summary\nComplete report';
     },
-    saveReport: async (_job, markdown) => {
-      calls.push(['save', markdown]);
+    completeJob: async (_job, markdown) => {
+      calls.push(['complete', markdown]);
       return { id: 'report-1' };
     },
     sendEmail: async (message) => calls.push(['email', message]),
@@ -105,15 +121,96 @@ test('completed job saves the report, optionally emails the account, and records
 
   assert.deepEqual(result, { reportId: 'report-1', emailed: true });
   assert.equal(calls.filter(([name]) => name === 'generate').length, 1);
-  assert.equal(calls.filter(([name]) => name === 'save').length, 1);
+  assert.equal(calls.filter(([name]) => name === 'complete').length, 1);
   assert.equal(calls.filter(([name]) => name === 'email').length, 1);
+  assert.ok(calls.findIndex(([name]) => name === 'complete') < calls.findIndex(([name]) => name === 'email'));
   assert.deepEqual(calls.at(-1), ['update', {
-    status: 'completed',
-    saved_report_id: 'report-1',
-    completed_at: '2026-08-05T12:00:00.000Z',
+    email_sent_at: '2026-08-05T12:00:00.000Z',
     error_message: null,
   }]);
   assert.equal(calls.find(([name]) => name === 'email')[1].to, 'ada@example.com');
+});
+
+test('a completed job retries an unsent completion email without regenerating the report', async () => {
+  let generated = false;
+  const updates = [];
+  const result = await processReportJob('job-1', 'user-1', {
+    loadJob: async () => ({
+      id: 'job-1', user_id: 'user-1', status: 'completed', saved_report_id: 'report-1',
+      email_when_done: true, email_sent_at: null, address: '123 Main St', input_json: input,
+    }),
+    loadVerifiedEmail: async () => 'verified@example.com',
+    loadSavedReport: async () => ({ id: 'report-1', report_markdown: '# Existing report' }),
+    loadProfile: async () => { throw new Error('should not load credentials'); },
+    updateJob: async (_id, patch) => updates.push(patch),
+    generateReport: async () => { generated = true; return 'duplicate'; },
+    sendEmail: async ({ to }) => assert.equal(to, 'verified@example.com'),
+    now: () => '2026-08-05T12:00:00.000Z',
+  });
+  assert.deepEqual(result, { reportId: 'report-1', emailed: true });
+  assert.equal(generated, false);
+  assert.equal(updates[0].email_sent_at, '2026-08-05T12:00:00.000Z');
+});
+
+test('email and email-status failures cannot downgrade an atomically completed report', async () => {
+  const result = await processReportJob('job-1', 'user-1', {
+    loadJob: async () => ({
+      id: 'job-1', user_id: 'user-1', status: 'queued', email_when_done: true,
+      address: '123 Main St', input_json: input,
+    }),
+    claimJob: async () => true,
+    loadProfile: async () => ({ keys: fusionKeys }),
+    loadVerifiedEmail: async () => 'verified@example.com',
+    generateReport: async () => '# 1. Executive Summary\n' + 'Complete report evidence. '.repeat(10),
+    completeJob: async () => ({ id: 'report-1' }),
+    sendEmail: async () => { throw new Error('mail unavailable'); },
+    updateJob: async () => { throw new Error('status write unavailable'); },
+  });
+  assert.deepEqual(result, { reportId: 'report-1', emailed: false });
+});
+
+test('a lost completion response uses conditional failure handling instead of overwriting completion', async () => {
+  let conditionalFailure = false;
+  let unconditionalUpdate = false;
+  await assert.rejects(
+    processReportJob('job-1', 'user-1', {
+      loadJob: async () => ({ id: 'job-1', user_id: 'user-1', status: 'queued', input_json: input }),
+      claimJob: async () => true,
+      loadProfile: async () => ({ keys: fusionKeys }),
+      generateReport: async () => '# 1. Executive Summary\n' + 'Grounded report. '.repeat(10),
+      completeJob: async () => { throw new Error('response lost after commit'); },
+      failJob: async (_id, patch) => { conditionalFailure = patch.status === 'failed'; return false; },
+      updateJob: async () => { unconditionalUpdate = true; },
+      sendEmail: async () => {},
+    }),
+    /response lost/i,
+  );
+  assert.equal(conditionalFailure, true);
+  assert.equal(unconditionalUpdate, false);
+});
+
+test('oversized or malformed job input is rejected before provider work', () => {
+  assert.throws(
+    () => validateReportJobInput({ reportData: { inputAddress: '123 Main St', blob: 'x'.repeat(600_000) } }),
+    /too large/i,
+  );
+  assert.throws(() => validateReportJobInput({ reportData: {} }), /address/i);
+});
+
+test('trusted queue sweeper processes the job owner without an end-user JWT', async () => {
+  let loadedProfileFor = '';
+  const result = await processReportJob('job-1', null, {
+    trustedWorker: true,
+    loadJob: async () => ({ id: 'job-1', user_id: 'owner-1', status: 'queued', input_json: input }),
+    claimJob: async () => true,
+    loadProfile: async (userId) => { loadedProfileFor = userId; return { keys: fusionKeys }; },
+    generateReport: async () => '# 1. Executive Summary\n' + 'Grounded report. '.repeat(10),
+    completeJob: async () => ({ id: 'report-1' }),
+    updateJob: async () => {},
+    sendEmail: async () => {},
+  });
+  assert.equal(loadedProfileFor, 'owner-1');
+  assert.deepEqual(result, { reportId: 'report-1', emailed: false });
 });
 
 test('job cannot be processed for a different authenticated user', async () => {

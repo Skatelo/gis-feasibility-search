@@ -6,6 +6,7 @@ import { strToU8, zipSync } from 'fflate';
 import {
   assertPublicUrl,
   cleanText,
+  createPublicDnsLookup,
   crawlSources,
   extractDocumentText,
   isPrivateAddress,
@@ -64,6 +65,21 @@ test('private address detection covers local network ranges', async () => {
   assert.equal(isPrivateAddress('::ffff:7f00:1'), true);
   assert.equal(isPrivateAddress('8.8.8.8'), false);
   await assert.rejects(() => assertPublicUrl('http://127.0.0.1/admin'), /private/i);
+});
+
+test('connection-time DNS lookup rejects rebinding to a private address', async () => {
+  const lookupAtConnect = createPublicDnsLookup(async () => [
+    { address: '127.0.0.1', family: 4 },
+  ]);
+  await assert.rejects(
+    new Promise((resolve, reject) => {
+      lookupAtConnect('attacker.example', { family: 0 }, (error, address) => {
+        if (error) reject(error);
+        else resolve(address);
+      });
+    }),
+    /private address/i,
+  );
 });
 
 test('document extraction reads JSON, text, PDF, DOCX, and XLSX data', async () => {
