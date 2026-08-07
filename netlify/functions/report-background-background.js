@@ -4,17 +4,29 @@ import { processReportJob, validateReportMarkdown } from './lib/report-backgroun
 import { runReportFusion } from './lib/report-fusion.js';
 import { createReportFusionAdapters } from './lib/report-fusion-adapters.js';
 
-// The Crawlee scraper pulls in a large dependency tree (cheerio crawler, PDF /
-// DOCX / XLSX parsers). It is imported LAZILY inside the handler — a failure at
-// import time must surface as a caught, reportable error, never as a silent
-// cold-start crash that leaves the job stuck in `queued`.
-let cachedCrawlSources = null;
-async function loadCrawlSources() {
-  if (!cachedCrawlSources) {
-    const mod = await import('./lib/crawlee-scraper.js');
-    cachedCrawlSources = mod.crawlSources;
-  }
-  return cachedCrawlSources;
+// The crawl lane runs through the standalone `crawlee` function over HTTP —
+// the same way the browser does. This deliberately keeps the heavy crawler
+// dependency tree (Chromium, canvas, PDF/DOCX/XLSX parsers, ~120 MB with
+// platform-specific native binaries) OUT of this function's bundle:
+//   * it made every deploy a multi-GB upload (deploys wedged in "uploading"),
+//   * and a native binary built for the wrong platform crashes the Lambda
+//     runtime with SIGBUS before any handler code runs — which left jobs
+//     stuck in 'queued' forever with no error recorded.
+// If the crawl lane is unavailable, the fusion pipeline degrades gracefully
+// (softCall) and the report is still produced from the other research lanes.
+async function crawlSourcesViaFunction({ urls, queries = [], maxPages, maxDepth, maxCharsPerPage }) {
+  const siteUrl = String(process.env.URL || process.env.DEPLOY_PRIME_URL || '').replace(/\/$/, '');
+  if (!siteUrl) throw new Error('URL or DEPLOY_PRIME_URL is required for the crawl lane.');
+  const response = await fetch(`${siteUrl}/.netlify/functions/crawlee`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', Accept: 'application/json' },
+    body: JSON.stringify({ urls, queries, maxPages, maxDepth, maxCharsPerPage, fallbacks: false }),
+    signal: AbortSignal.timeout(120_000),
+  });
+  if (!response.ok) throw new Error(`Crawl lane failed with HTTP ${response.status}`);
+  const payload = await response.json();
+  if (!payload?.success) throw new Error(`Crawl lane error: ${String(payload?.error || 'unknown').slice(0, 200)}`);
+  return payload.data || { results: [] };
 }
 
 
@@ -232,16 +244,10 @@ export async function handler(event) {
     ).catch(() => {});
   };
 
-  let adapters;
-  try {
-    const crawlSources = await loadCrawlSources();
-    adapters = createReportFusionAdapters({ crawlSources });
-  } catch (error) {
-    // Heavy dependency chain failed to load. Never die silently: mark the job
-    // failed with the real reason so the user's queue slot is freed.
-    await failActiveJob(`The report worker failed to start: ${String(error?.message || error)}`);
-    return json(502, { ok: false, error: 'The report worker failed to start. Please try again.' });
-  }
+  // The crawl lane runs through the standalone `crawlee` function (HTTP), so
+  // this worker never imports the heavy crawler dependency tree. If the lane
+  // is unreachable, the fusion pipeline degrades gracefully via softCall.
+  const adapters = createReportFusionAdapters({ crawlSources: crawlSourcesViaFunction });
 
   try {
     const result = await processReportJob(jobId, authenticatedUser?.id || null, {
