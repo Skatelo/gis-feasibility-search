@@ -1,6 +1,7 @@
 import { timingSafeEqual } from 'node:crypto';
 
 import { processReportJob, validateReportMarkdown } from './lib/report-background.js';
+import { markdownToEmailText, reportToEmailBody } from './lib/report-email-format.js';
 import { runReportFusion } from './lib/report-fusion.js';
 import { createReportFusionAdapters } from './lib/report-fusion-adapters.js';
 
@@ -111,6 +112,13 @@ async function sendCompletionEmail({ to, address, jobId, reportId, markdown }) {
   const appUrl = String(process.env.URL || process.env.DEPLOY_PRIME_URL || '').replace(/\/$/, '');
   const reportUrl = appUrl ? `${appUrl}/?report=${encodeURIComponent(reportId)}` : '';
   const fullReport = String(markdown || '').trim() || 'The report text is unavailable.';
+  const viewLinkHtml = reportUrl
+    ? `<p style="margin:0 0 16px;line-height:1.6;"><a href="${reportUrl}" style="color:#2563eb;text-decoration:underline;">Open the report in your dashboard</a></p>`
+    : '';
+  // HTML is the styled report (no raw Markdown markers); text is the
+  // marker-free fallback for clients that don't render HTML.
+  const html = reportToEmailBody(fullReport, { address, viewLinkHtml });
+  const text = `Your feasibility report is complete.\n\n${reportUrl ? `Open it: ${reportUrl}\n\n` : ''}${markdownToEmailText(fullReport)}`;
   await fetchJson('https://api.resend.com/emails', {
     method: 'POST',
     headers: {
@@ -122,7 +130,8 @@ async function sendCompletionEmail({ to, address, jobId, reportId, markdown }) {
       from,
       to: [to],
       subject: `Feasibility report ready: ${address || 'your property'}`,
-      text: `Your feasibility report is complete.\n\n${reportUrl ? `Open it: ${reportUrl}\n\n` : ''}${fullReport}`,
+      html,
+      text,
     }),
   }, 'Completion email failed');
 }
