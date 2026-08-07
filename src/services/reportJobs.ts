@@ -141,7 +141,14 @@ export async function enqueueBackgroundReport(
     15000,
     'Timed out queueing the background report. Check your connection and try again.',
   );
-  if (error || !row) throw new Error(`Could not queue the background report: ${error?.message || 'no job was created'}`);
+  if (error || !row) {
+    // Only one queued/running report is allowed per account at a time.
+    // PostgREST surfaces the unique-index violation as a 23505 error code.
+    if (error?.code === '23505' || /report_jobs_one_active_per_user|duplicate key/i.test(error?.message || '')) {
+      throw new Error('You already have a report in the queue. Wait for it to finish (see Background Activity) — then you can generate another one.');
+    }
+    throw new Error(`Could not queue the background report: ${error?.message || 'no job was created'}`);
+  }
 
   // The job is durably queued; the sweeper will retry it even if this immediate
   // dispatch is slow or fails. Fire it WITHOUT awaiting so a slow mobile network

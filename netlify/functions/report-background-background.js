@@ -1,9 +1,21 @@
 import { timingSafeEqual } from 'node:crypto';
 
-import { crawlSources } from './lib/crawlee-scraper.js';
 import { processReportJob, validateReportMarkdown } from './lib/report-background.js';
 import { runReportFusion } from './lib/report-fusion.js';
 import { createReportFusionAdapters } from './lib/report-fusion-adapters.js';
+
+// The Crawlee scraper pulls in a large dependency tree (cheerio crawler, PDF /
+// DOCX / XLSX parsers). It is imported LAZILY inside the handler — a failure at
+// import time must surface as a caught, reportable error, never as a silent
+// cold-start crash that leaves the job stuck in `queued`.
+let cachedCrawlSources = null;
+async function loadCrawlSources() {
+  if (!cachedCrawlSources) {
+    const mod = await import('./lib/crawlee-scraper.js');
+    cachedCrawlSources = mod.crawlSources;
+  }
+  return cachedCrawlSources;
+}
 
 
 const json = (statusCode, body) => ({
@@ -200,27 +212,65 @@ export async function handler(event) {
     return rows?.[0] || null;
   };
 
-  const adapters = createReportFusionAdapters({ crawlSources });
-  const result = await processReportJob(jobId, authenticatedUser?.id || null, {
-    trustedWorker,
-    loadJob,
-    claimJob,
-    updateJob,
-    failJob,
-    loadProfile,
-    loadVerifiedEmail: async (userId) => {
-      if (authenticatedUser?.id === userId && authenticatedUser.email && authenticatedUser.email_confirmed_at) {
-        return authenticatedUser.email;
-      }
-      return loadVerifiedAuthEmail(supabaseUrl, serviceRoleKey, userId);
-    },
-    loadSavedReport,
-    generateReport: async (prompt, credentials, input) => {
-      const fusion = await runReportFusion(prompt, input, credentials, adapters);
-      return validateReportMarkdown(fusion.markdown).markdown;
-    },
-    completeJob,
-    sendEmail: sendCompletionEmail,
-  });
-  return json(200, { ok: true, ...result });
+  // Marks the job failed ONLY if it is still active (queued/running) — so this
+  // safety net never overwrites a more specific failure message that
+  // processReportJob already recorded.
+  const failActiveJob = async (message) => {
+    await supabaseRequest(
+      supabaseUrl,
+      serviceRoleKey,
+      `report_jobs?id=eq.${encodeURIComponent(jobId)}&status=in.(queued,running)&select=id`,
+      {
+        method: 'PATCH',
+        headers: { Prefer: 'return=minimal' },
+        body: JSON.stringify({
+          status: 'failed',
+          completed_at: new Date().toISOString(),
+          error_message: message.slice(0, 900),
+        }),
+      },
+    ).catch(() => {});
+  };
+
+  let adapters;
+  try {
+    const crawlSources = await loadCrawlSources();
+    adapters = createReportFusionAdapters({ crawlSources });
+  } catch (error) {
+    // Heavy dependency chain failed to load. Never die silently: mark the job
+    // failed with the real reason so the user's queue slot is freed.
+    await failActiveJob(`The report worker failed to start: ${String(error?.message || error)}`);
+    return json(502, { ok: false, error: 'The report worker failed to start. Please try again.' });
+  }
+
+  try {
+    const result = await processReportJob(jobId, authenticatedUser?.id || null, {
+      trustedWorker,
+      loadJob,
+      claimJob,
+      updateJob,
+      failJob,
+      loadProfile,
+      loadVerifiedEmail: async (userId) => {
+        if (authenticatedUser?.id === userId && authenticatedUser.email && authenticatedUser.email_confirmed_at) {
+          return authenticatedUser.email;
+        }
+        return loadVerifiedAuthEmail(supabaseUrl, serviceRoleKey, userId);
+      },
+      loadSavedReport,
+      generateReport: async (prompt, credentials, input) => {
+        const fusion = await runReportFusion(prompt, input, credentials, adapters);
+        return validateReportMarkdown(fusion.markdown).markdown;
+      },
+      completeJob,
+      sendEmail: sendCompletionEmail,
+    });
+    return json(200, { ok: true, ...result });
+  } catch (error) {
+    // processReportJob already marks the job failed before re-throwing, but if
+    // something unexpected slipped through, make the failure visible instead of
+    // leaving the job wedged with no diagnostics.
+    await failActiveJob(`The report worker crashed: ${String(error?.message || error)}`);
+    return json(502, { ok: false, error: String(error?.message || 'The report worker failed.').slice(0, 300) });
+  }
 }
